@@ -208,6 +208,11 @@ test('PR npm builds cannot obtain attestation credentials; push-only job checks 
   assert.match(attest, /actions\/attest-build-provenance@[0-9a-f]{40}/);
   assert.match(attest, /hashlib\.sha256\(tarball\.read_bytes\(\)\)/);
   assert.match(attest, /manifest\['sourceCommit'\] == expected/);
+  assert.match(attest, /runtime_actual == runtime_declared \| \{'runtime-manifest.json'\}/);
+  assert.match(attest, /hashlib\.sha256\(content\)\.hexdigest\(\) == entry\['sha256'\]/);
+  assert.match(attest, /archived\.size == entry\['sizeBytes'\]/);
+  assert.match(attest, /duplicate archive member/);
+  assert.match(attest, /packed inventory paths mismatch/);
   assert.match(attest, /source\['runId'\]/);
   assert.match(attest, /steps\.verify\.outputs\.subject_path/);
   assert.doesNotMatch(attest, /actions\/checkout|cargo build|npm install|npm pack/);

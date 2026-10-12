@@ -271,15 +271,47 @@ jobs:
           checksum = (folder / (package['filename'] + '.sha256')).read_text(encoding='ascii')
           assert checksum.strip() == digest + '  ' + package['filename'], 'checksum file mismatch'
           with tarfile.open(tarball, 'r:gz') as archive:
-              member = archive.extractfile('package/runtime/runtime-manifest.json')
-              assert member is not None, 'packed runtime manifest missing'
-              manifest_bytes = member.read()
-          manifest = json.loads(manifest_bytes)
-          assert manifest['version'] == package['version'], 'packed version mismatch'
-          assert manifest['sourceCommit'] == expected, 'packed source SHA mismatch'
-          assert inventory['runtimeManifest']['sourceCommit'] == expected
-          assert inventory['runtimeManifest']['sha256'] == hashlib.sha256(manifest_bytes).hexdigest()
-          assert inventory['runtimeManifest']['fileCount'] == len(manifest['files'])
+              # Never execute any bytes from the untrusted build artifact.
+              # Reject duplicate, special, or path-traversing tar entries.
+              file_map = {}
+              for member in archive.getmembers():
+                  if member.isdir():
+                      continue
+                  assert member.isfile(), 'packed candidate contains a non-regular file'
+                  assert member.name.startswith('package/'), 'unexpected archive root'
+                  relative = member.name[len('package/'):]
+                  assert relative and all(part not in ('', '.', '..') for part in relative.split('/')), 'unsafe archive path'
+                  assert relative not in file_map, 'duplicate archive member'
+                  file_map[relative] = member
+
+              inventory_files = inventory['contents']
+              assert len(inventory_files) == len(file_map), 'packed inventory count mismatch'
+              assert {entry['path'] for entry in inventory_files} == set(file_map), 'packed inventory paths mismatch'
+              for entry in inventory_files:
+                  assert file_map[entry['path']].size == entry['sizeBytes'], 'packed inventory size mismatch'
+
+              manifest_member = file_map.get('runtime/runtime-manifest.json')
+              assert manifest_member is not None, 'packed runtime manifest missing'
+              manifest_bytes = archive.extractfile(manifest_member).read()
+              manifest = json.loads(manifest_bytes)
+              assert manifest['version'] == package['version'], 'packed version mismatch'
+              assert manifest['sourceCommit'] == expected, 'packed source SHA mismatch'
+              assert inventory['runtimeManifest']['sourceCommit'] == expected
+              assert inventory['runtimeManifest']['sha256'] == hashlib.sha256(manifest_bytes).hexdigest()
+              declared_files = manifest['files']
+              assert inventory['runtimeManifest']['fileCount'] == len(declared_files)
+              runtime_declared = {entry['path'] for entry in declared_files}
+              assert len(runtime_declared) == len(declared_files), 'duplicate runtime manifest path'
+              runtime_actual = {p[len('runtime/'):] for p in file_map if p.startswith('runtime/')}
+              assert runtime_actual == runtime_declared | {'runtime-manifest.json'}, 'runtime file set mismatch'
+
+              # Independently hash every compiled JS/native runtime byte from the
+              # downloaded tarball against the embedded manifest, not just its count.
+              for entry in declared_files:
+                  archived = file_map['runtime/' + entry['path']]
+                  assert archived.size == entry['sizeBytes'], 'runtime file size mismatch'
+                  content = archive.extractfile(archived).read()
+                  assert hashlib.sha256(content).hexdigest() == entry['sha256'], 'runtime file digest mismatch'
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               output.write('subject_path=' + str(tarball) + chr(10))
           print('EXACT_SOURCE_NPM_CANDIDATE_VERIFIED', expected, digest)
