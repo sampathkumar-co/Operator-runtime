@@ -263,6 +263,11 @@ test('PR npm builds cannot obtain attestation credentials; push-only job checks 
   assert.doesNotMatch(attest, /actions\/checkout|cargo build\b|npm install\b|npm pack\b/);
 });
 
+test('npm source files preserve canonical Git blob bytes on Windows checkout', async () => {
+  const attributes = await fs.readFile(path.resolve('.gitattributes'), 'utf8');
+  assert.match(attributes, /^packages\\/mecord-connect\\/\\*\\* text=auto eol=lf$/m);
+});
+
 test('runtime launcher allows only supported Windows x64 Node lines', () => {
   assert.doesNotThrow(() => assertSupportedRuntime('win32', 'x64', '22.14.0'));
   assert.doesNotThrow(() => assertSupportedRuntime('win32', 'x64', '22.23.2'));
