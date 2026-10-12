@@ -192,7 +192,8 @@ test('every push SHA retains independent CI evidence even if a new push or PR st
 });
 
 test('PR npm builds cannot obtain attestation credentials; push-only job checks tarball bytes', async () => {
-  const workflow = await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8');
+  // Git may check out YAML using CRLF on Windows runners.
+  const workflow = (await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8')).replace(/\r\n/g, '\n');
   const windows = workflow.split('  windows-runtime:\n')[1]?.split('  attest-candidate:\n')[0];
   const attest = workflow.split('  attest-candidate:\n')[1]?.split('  node-compatibility:\n')[0];
   assert.ok(windows && attest, 'independent Windows build and attestation jobs required');
