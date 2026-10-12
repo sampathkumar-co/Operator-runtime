@@ -326,20 +326,26 @@ jobs:
               pkg_json_bytes = archive.extractfile(file_map['package.json']).read()
               pkg_json_text = pkg_json_bytes.decode('utf-8', errors='strict')
               assert not pkg_json_text.startswith('\ufeff'), 'npm package JSON UTF-8 BOM'
-              embedded_pkg = json.loads(pkg_json_text)
+              # Match Node JSON.parse: reject non-JSON NaN/Infinity tokens.
+              def reject_non_json_constant(value):
+                  raise ValueError('Nonstandard JSON constant: ' + value)
+
+              embedded_pkg = json.loads(pkg_json_text, parse_constant=reject_non_json_constant)
               assert isinstance(embedded_pkg, dict), 'invalid embedded npm package metadata'
               assert embedded_pkg.get('name') == 'mecord-connect', 'embedded npm package identity'
               assert embedded_pkg.get('version') == package['version'], 'embedded npm version mismatch'
               assert embedded_pkg.get('license') == 'SEE LICENSE IN LICENSE', 'embedded npm license mismatch'
               assert embedded_pkg.get('contentPolicy') == {'class': 'dual-use'}, 'embedded dual-use disclosure mismatch'
               assert embedded_pkg.get('bin', {}).get('mecord-connect') == 'bin/operator.mjs', 'embedded npm CLI entrypoint mismatch'
-              # npm install/npx execute lifecycle hooks unless prevented.
+              # Reject unexpected installer lifecycle authority before signing.
               # Match the actual approved source package's inert script set.
               approved_scripts = {
                   'build:runtime': 'node ./scripts/build-runtime-payload.mjs',
                   'prepublishOnly': 'node ./src/publish-check.mjs'
               }
               assert embedded_pkg.get('scripts') == approved_scripts, 'unexpected npm lifecycle scripts'
+              assert 'gypfile' not in embedded_pkg, 'unapproved npm node-gyp metadata'
+              assert 'binding.gyp' not in {name.casefold() for name in file_map}, 'implicit npm native build hook'
               assert embedded_pkg.get('type') == 'module', 'unexpected package module type'
               assert embedded_pkg.get('os') == ['win32'] and embedded_pkg.get('cpu') == ['x64'], 'npm OS/CPU contract mismatch'
               assert embedded_pkg.get('engines') == {
@@ -362,7 +368,7 @@ jobs:
               manifest_bytes = archive.extractfile(manifest_member).read()
               manifest_text = manifest_bytes.decode('utf-8', errors='strict')
               assert not manifest_text.startswith('\ufeff'), 'runtime manifest UTF-8 BOM'
-              manifest = json.loads(manifest_text)
+              manifest = json.loads(manifest_text, parse_constant=reject_non_json_constant)
               # Enforce the installed CLI's validateRuntimeManifest contract,
               # not just the untrusted tarball's self-consistent inventory.
               assert isinstance(manifest, dict), 'runtime manifest not an object'
