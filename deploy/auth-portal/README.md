@@ -19,10 +19,16 @@ directory.
 
 ## Required deployment contract
 
-- `PORTAL_INVITE_SHA256`: SHA-256 of the out-of-band registration code. Generate
-  a human-friendly random code with `node generate-registration-code.mjs <output-dir>`;
-  codes use the form `MCRD-XXXX-XXXX` and avoid ambiguous characters. Never keep
-  the plaintext registration code on the server after handoff.
+- `PORTAL_SIGNUP_MODE`: `invite` (default, preserving existing access restrictions)
+  or `open` (normal username/email/password registration without an invitation).
+  Enable `open` explicitly in the production portal container environment only
+  after verifying ingress rate limits, bot-abuse monitoring, and account quotas.
+- `PORTAL_INVITE_SHA256`: required only in `invite` mode. SHA-256 of the
+  out-of-band registration code. Generate a random code with
+  `node generate-registration-code.mjs <output-dir>`; codes use the form
+  `MCRD-XXXX-XXXX`. Never keep the plaintext code on the server after handoff.
+  Open mode ignores this value, so rolling back to `invite` does not require
+  resetting existing users.
 - `PORTAL_USERS_FILE`: shared Authelia user database path.
 - `PORTAL_DEFAULT_GROUP`: normal signup group; production uses
   `operator-users`.
@@ -40,6 +46,14 @@ directory.
   Mecord browser calls those APIs directly without exposing the Authelia UI.
 - Authelia must mount the same user database read-only and enable its file
   watcher so atomic portal updates reload without restarts.
+
+Open signup keeps per-IP throttling (4 attempts per 15 minutes) and adds a
+process-wide ceiling of 60 attempts per 15 minutes; invite signup keeps its
+existing 8-attempt per-IP limit. These in-memory limits are only defense in depth,
+not a substitute for an ingress-layer distributed rate limit, anti-bot challenge,
+email verification, or monitoring. In multi-replica deployments, enforce shared
+limits before enabling `open`. Registration creates only `operator-users` and
+never entitles the new account to Developer MCP access.
 
 Passwords are hashed in-process with Argon2id using the production Authelia
 parameters: 64 MiB memory, 3 iterations, parallelism 4, 32-byte output.
