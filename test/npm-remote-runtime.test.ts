@@ -264,7 +264,8 @@ test('PR npm builds cannot obtain attestation credentials; push-only job checks 
 });
 
 test('npm PR CI covers all generated-runtime TypeScript source trees', async () => {
-  const workflow = await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8');
+  // Windows checkouts may use CRLF even for the YAML trigger manifest.
+  const workflow = (await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8')).replace(/\r\n/g, '\n');
   const build = await fs.readFile(path.resolve('packages/mecord-connect/scripts/build-runtime-payload.mjs'), 'utf8');
   const roots = [...build.matchAll(/compileTrackedTree\('([^']+)'/g)].map(match => match[1]);
   assert.deepEqual(roots.sort(), [
