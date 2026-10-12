@@ -4,8 +4,10 @@ on:
   push:
     branches:
       - main
+      - release/npm-206-rc1-preparation-20261012
     paths:
       - '.release/npm-runtime-stage-request.json'
+      - '.release/npm-rc1-activation.json'
   workflow_dispatch:
     inputs:
       npm_tag:
@@ -34,7 +36,7 @@ concurrency:
 
 jobs:
   publish:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.modified, '.release/npm-runtime-stage-request.json') || contains(github.event.head_commit.added, '.release/npm-runtime-stage-request.json'))
     name: Build and hand off mecord-connect
     runs-on: windows-latest
     timeout-minutes: 25
@@ -300,9 +302,9 @@ jobs:
 
   stage-rc1:
     name: Stage source-matched signed 2.0.6-rc.1 (next only)
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release/npm-206-rc1-preparation-20261012' && github.repository == 'sampathkumar-co/Operator-runtime' && inputs.npm_tag == 'next' && inputs.publication_mode == 'stage'
+    if: github.ref == 'refs/heads/release/npm-206-rc1-preparation-20261012' && github.repository == 'sampathkumar-co/Operator-runtime' && ((github.event_name == 'workflow_dispatch' && inputs.npm_tag == 'next' && inputs.publication_mode == 'stage') || (github.event_name == 'push' && contains(github.event.head_commit.added, '.release/npm-rc1-activation.json')))
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     permissions:
       contents: read
       actions: read
@@ -315,6 +317,77 @@ jobs:
       NPM_TAG: next
       OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
     steps:
+      - name: Validate one-time checked-in owner-authorized RC1 activation
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "/repos/$RC_REPO/contents/.release/npm-rc1-activation.json?ref=$GITHUB_SHA" --jq .content | base64 --decode > "$RUNNER_TEMP/rc-activation.json"
+          python3 -I - <<'PY'
+          import json, os, pathlib
+          actual = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'rc-activation.json').read_text())
+          expected = {
+              'schemaVersion': 1, 'package': 'mecord-connect', 'version': '2.0.6-rc.1',
+              'targetTag': 'next', 'publicationMode': 'stage', 'enabled': True,
+              'ownerInstruction': 'Stage signed RC1 via GitHub with laptop offline; no stable promotion',
+          }
+          assert actual == expected, 'activation content not exactly authorized'
+          event = json.loads(pathlib.Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+          assert event['head_commit']['id'] == os.environ['GITHUB_SHA'], 'activation commit identity mismatch'
+          assert '.release/npm-rc1-activation.json' in event['head_commit']['added'], 'not a one-time activation push'
+          assert event['repository']['full_name'] == os.environ['RC_REPO'], 'unexpected repository'
+          print('one-time RC1 stage-only activation verified')
+          PY
+
+      - name: Wait for all six original PR workflow families and exact-SHA push signer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 52); do
+            gh api "/repos/$RC_REPO/actions/runs?head_sha=$GITHUB_SHA&per_page=100" > "$RUNNER_TEMP/rc-ci-wait.json"
+            if python3 -I - <<'PY'
+          import json, os, pathlib, sys
+          runs = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'rc-ci-wait.json').read_text())['workflow_runs']
+          commit = os.environ['GITHUB_SHA']
+          original = {
+              'CI': '.github/workflows/ci.yml',
+              'Platform Matrix': '.github/workflows/platform-matrix.yml',
+              'Windows Signing Smoke': '.github/workflows/windows-signing-smoke.yml',
+              'NPM Remote Runtime CI': '.github/workflows/npm-remote-ci.yml',
+              'R1 Canonical Runtime': '.github/workflows/r1-canonical-runtime.yml',
+              'R2 Adaptive Planning Runtime': '.github/workflows/r2-adaptive-planning.yml',
+          }
+          missing = []
+          for name, path in original.items():
+              matching = [r for r in runs if r['name'] == name and r['path'] == path
+                          and r['head_sha'] == commit and r['event'] == 'pull_request'
+                          and any(p['number'] == 316 for p in r.get('pull_requests', []))]
+              if not any(r['status'] == 'completed' and r['conclusion'] == 'success' for r in matching):
+                  missing.append(name)
+          signed = [r for r in runs if r['name'] == 'NPM Remote Runtime CI'
+              and r['path'] == '.github/workflows/npm-remote-ci.yml'
+              and r['event'] == 'push' and r['head_sha'] == commit
+              and r['head_branch'] == 'release/npm-206-rc1-preparation-20261012'
+              and r['status'] == 'completed' and r['conclusion'] == 'success']
+          if not signed: missing.append('exact-source signed push build')
+          print('Pending CI:' + ', '.join(missing) if missing else 'All six exact-PR CI families and signed builder passed')
+          sys.exit(1 if missing else 0)
+          PY
+            then
+              echo 'Fully green exact-SHA certification reached'
+              break
+            fi
+            if [ "$attempt" -eq 52 ]; then
+              echo 'CI gate timed out: stage blocked'
+              exit 1
+            fi
+            sleep 30
+          done
+
       - name: Validate approved exact-source RC and all CI evidence
         id: evidence
         shell: bash
