@@ -214,8 +214,8 @@ test('open signup challenge exposes relative delay for clients with skewed clock
     assert.equal(data.minAgeMs, 0);
     assert.ok(data.token);
     const page = await (await fetch(`${origin}/signup`)).text();
-    assert.match(page, /performance\\.now\\(\\)/);
-    assert.doesNotMatch(page, /Date\\.now\\(\\)<signupChallenge\\.readyAt/);
+    assert.ok(page.includes('performance.now()'));
+    assert.ok(!page.includes('Date.now()<signupChallenge.readyAt'));
   } finally {
     await stopPortal(child);
     await rm(dir, { recursive: true, force: true });
