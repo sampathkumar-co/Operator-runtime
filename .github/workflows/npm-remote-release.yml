@@ -583,7 +583,7 @@ jobs:
               'schemaVersion': 1, 'package': 'mecord-connect', 'version': '2.0.6-rc.2',
               'targetTag': 'next', 'publicationMode': 'stage', 'enabled': True,
               'ownerInstruction': 'Stage signed RC2 from certified relay-recovery release source; no stable promotion',
-              'activationAttempt': 1,
+              'activationAttempt': 2,
           }
           assert actual == expected, 'activation content not exactly authorized'
           commit = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'rc-activation-commit.json').read_text())
