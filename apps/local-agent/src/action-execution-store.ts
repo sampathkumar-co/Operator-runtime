@@ -362,6 +362,12 @@ function assertIdentity(record: LocalActionExecutionRecord, identity: { actionHa
 
 function prune(state: State, now: number): void {
   state.records = state.records.filter((record) => {
+    // Unresolved writes are permanent replay fences until reconciled against
+    // the authoritative kernel journal. Dropping one after 30 days could
+    // permit an old action ID to execute twice following a relay retry.
+    // Bounded capacity intentionally fails closed instead of silently
+    // deleting unknown mutation history.
+    if (record.status === 'processing' && record.risk !== 'read') return true;
     const anchor = record.completedAt ?? record.startedAt;
     const retention = record.status === 'completed' ? COMPLETED_RETENTION_MS : UNCERTAIN_RETENTION_MS;
     return Date.parse(anchor) > now - retention;

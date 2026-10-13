@@ -431,3 +431,19 @@ test('mislabeled write may not reclaim a processing receipt as if it were a harm
   const restarted = new LocalActionExecutionStore(state);
   assert.equal((await restarted.begin(spoofed, authority)).status, 'processing');
 });
+
+
+test('uncertain write execution receipt never expires into permission to replay old action ID', async t => {
+  const state = await temp(t);
+  let time = Date.parse('2026-10-01T00:00:00Z');
+  const clock = () => new Date(time);
+  const first = new LocalActionExecutionStore(state, { clock });
+  const request = action('write-cross-ttl');
+  assert.equal((await first.begin(request, authority)).status, 'started');
+  time += 90 * 24 * 60 * 60_000;
+  const afterRestart = new LocalActionExecutionStore(state, { clock });
+  assert.equal((await afterRestart.begin(action('trigger-prune'), authority)).status, 'started');
+  const previous = await afterRestart.begin(request, authority);
+  assert.equal(previous.status, 'processing', 'old unknown write cannot be treated as a fresh command');
+  assert.equal((await afterRestart.lookup(request, authority)).status, 'processing');
+});
