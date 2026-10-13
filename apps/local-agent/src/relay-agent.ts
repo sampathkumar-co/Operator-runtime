@@ -9,6 +9,7 @@ import type { ActionRequest } from '../../../src/core/types.ts';
 import type { ApprovalAuthorityContext } from './approval-store.ts';
 import { containsRestrictedData } from '../../../src/core/public-restricted-data.ts';
 import { readRelaySessionTokenFile, type RelaySessionCredentialProvider } from './relay-session-credentials.ts';
+import { LocalActionExecutionStore } from './action-execution-store.ts';
 
 const MAX_RESULT_BYTES = 256 * 1024;
 const RESULT_SUBMIT_ATTEMPTS = 3;
@@ -46,6 +47,7 @@ export class LocalAgentRelayRunner {
   #client: RelayClient;
   #identity: DeviceIdentityStore;
   #outbox: RelayResultStore;
+  #mutationReceipts: LocalActionExecutionStore;
   #sessionCredentials: RelaySessionCredentialProvider;
   #resultUrl: string;
   #localAgentBaseUrl: string;
@@ -59,6 +61,7 @@ export class LocalAgentRelayRunner {
   constructor(options: LocalAgentRelayRunnerOptions) {
     this.#identity = options.identity;
     this.#outbox = new RelayResultStore(path.join(path.resolve(options.stateDir), 'relay-outbox'));
+    this.#mutationReceipts = new LocalActionExecutionStore(options.stateDir);
     const legacyFile = path.resolve(options.sessionTokenFile);
     this.#sessionCredentials = options.sessionCredentials ?? {
       forConnection: () => readRelaySessionTokenFile(legacyFile),
@@ -151,10 +154,31 @@ export class LocalAgentRelayRunner {
         await this.#submitResultWithRetry(seq, deliveryId, safe);
         return 'ack';
       }
-      // A canonically read-only action can be retried only after fresh relay
-      // authority validation. All mutations remain fail-closed, since a
-      // receipt alone cannot disprove prior external side effects.
-      if (recovered.state === 'processing') return canRetryUncertainRelayDelivery(delivery) ? 'retry' : 'stop';
+      // Canonically read-only actions can be reissued only through the
+      // authenticated fresh-authority path. A mutation must NEVER be replayed
+      // just because its previous local receipt was missing or unfinished.
+      if (canRetryUncertainRelayDelivery(delivery)) return 'retry';
+      const uncertain = uncertainMutationRecoveryResult(delivery);
+      if (!uncertain) return 'stop';
+      // Quarantine is an explicit, non-retryable UNKNOWN outcome, not proof
+      // that the provider did not run. Keep the local processing receipt and
+      // kernel journal intact for human / provider-backed reconciliation.
+      // The server confirms the current authority before this new response
+      // can retire the stranded relay cursor.
+      await this.#assertFreshDeliveryAuthority(delivery);
+      if (recovered.state === 'missing') {
+        // If the prior crash occurred before the local execution receipt was
+        // created, atomically fence this same action identity as processing.
+        // Otherwise, expiry or a later explicit re-submission could execute
+        // the action again after the relay has reported UNKNOWN. This call
+        // writes ONLY a protected receipt; it never executes the provider.
+        const action = validateRemoteAction(delivery.payload.action);
+        const authority = validateApprovalAuthority(delivery.payload.approvalAuthority);
+        await this.#mutationReceipts.begin(action, authority);
+      }
+      await this.#outbox.put(identity.deviceId, seq, deliveryId, uncertain);
+      await this.#submitResultWithRetry(seq, deliveryId, uncertain);
+      return 'ack';
     }
     return delivery && canRetryUncertainRelayDelivery(delivery) ? 'retry' : 'stop';
   }
@@ -529,6 +553,39 @@ function localResourceProfile() {
 }
 
 export { readRelaySessionTokenFile } from './relay-session-credentials.ts';
+
+/**
+ * Do not confuse relay liveness with proof of successful execution. When a
+ * previous write's result cannot be reconstructed, report a durable UNKNOWN
+ * outcome to the original caller without running its provider again.
+ *
+ * This function deliberately does NOT finalize or delete the local mutation
+ * receipt. Identical action IDs stay fenced; users must inspect the original
+ * action journal before issuing a new command with the same intended effect.
+ */
+export function uncertainMutationRecoveryResult(delivery: RelayDelivery): JsonObject | null {
+  if (delivery.kind !== 'action') return null;
+  try {
+    const action = validateRemoteAction(delivery.payload.action);
+    if (action.risk === 'read' && capabilityRiskRule(action.capability) === 'read') return null;
+    return boundedResult({
+      ok: false,
+      capability: action.capability,
+      provider: 'relay.recovery',
+      error: {
+        code: 'RELAY_ACTION_OUTCOME_UNCERTAIN',
+        message: 'An earlier action may have reached its provider before the connection failed. Its outcome is unknown. The action was not replayed; review the original execution before any new mutation.',
+        retryable: false,
+        sideEffectState: 'uncertain'
+      },
+      evidence: [],
+      durationMs: 0
+    });
+  } catch {
+    // Malformed or untrusted recovery envelopes never earn an ACK.
+    return null;
+  }
+}
 
 export function canRetryUncertainRelayDelivery(delivery: RelayDelivery): boolean {
   try {
