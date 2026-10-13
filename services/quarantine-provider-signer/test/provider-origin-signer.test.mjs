@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import {originUrl} from '../server.mjs';
 import {authenticateToken,stableMissionId,quarantineIntentId,
   signFromVerifiedObservation,createSigner} from '../provider-origin-signer.mjs';
 
@@ -94,4 +95,21 @@ test('rejects non-Ed25519 source or signer and missing bearer authority',async()
     signerPrivateKey:privatePem(signer.privateKey),originPublicKey:publicPem(origin.publicKey),
     lookup:async()=>source()});
   await assert.rejects(sign('',query),/REQUEST_UNAUTHORIZED/);
+});
+
+test('provider origin URL rejects literal IPs, IPv6 loopback, local aliases and ambiguous intranet hosts',()=>{
+  const invalid=[
+    'http://origin.example.org/',
+    'https://localhost/', 'https://localhost./', 'https://origin.localhost/',
+    'https://provider.local/', 'https://provider/',
+    'https://127.0.0.1/', 'https://10.0.0.20/', 'https://192.168.1.7/',
+    'https://[::1]/', 'https://[fe80::1]/', 'https://[::ffff:127.0.0.1]/',
+    'https://user:pass@origin.example.org/',
+    'https://origin.example.org:8443/',
+    'https://origin.example.org/?override=1',
+    'https://origin.example.org/#fragment'
+  ];
+  for(const url of invalid) assert.throws(()=>originUrl(url),/ORIGIN_URL_INVALID/,url);
+  assert.equal(originUrl('https://origin.external.example.org/v1').href,
+    'https://origin.external.example.org/v1/');
 });
