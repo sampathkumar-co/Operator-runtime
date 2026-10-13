@@ -12,6 +12,7 @@
 - Signer claim output is {claim,signature}; signature is Ed25519 base64url over UTF-8 JSON.stringify(claim). The output schema matches the OrganizationQuarantineAdjudicator provider-origin verification.
 - verified-owned does NOT grant cancellation authority. Human reviewer and external high-water CAS anchor remain separate controls.
 - Origin outage, key mismatch, stale receipt, revoked generation, wrong origin issuer, wrong scope or TLS/authorization failure must all fail closed.
+- The origin endpoint configuration rejects direct IP literals (including IPv6/IPv4-mapped loopback), localhost aliases, mDNS `.local` names and unqualified intranet hostnames. **This is only a static configuration guard:** DNS rebinding/private-IP resolution, TLS identity, independent network ownership and route isolation still require separately administered deployment controls and live verification. Do not claim off-domain independence solely because an origin URL passed parsing.
 
 ## Network protocol
 
