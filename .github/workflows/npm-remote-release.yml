@@ -550,9 +550,9 @@ jobs:
             echo "Builder run: ${{ steps.evidence.outputs.builder_run_id }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  stage-rc2:
-    name: Stage source-matched signed 2.0.6-rc.2 (next only)
-    if: github.ref == 'refs/heads/release/npm-206-rc2-relay-recovery-20261013' && github.repository == 'sampathkumar-co/Operator-runtime' && ((github.event_name == 'workflow_dispatch' && inputs.npm_tag == 'next' && inputs.publication_mode == 'stage') || (github.event_name == 'push' && github.actor == 'sampathkumar-co'))
+  stage-rc3:
+    name: Stage source-matched signed 2.0.6-rc.3 (next only)
+    if: github.ref == 'refs/heads/release/npm-206-rc3-relay-recovery-20261013' && github.repository == 'sampathkumar-co/Operator-runtime' && ((github.event_name == 'workflow_dispatch' && inputs.npm_tag == 'next' && inputs.publication_mode == 'stage') || (github.event_name == 'push' && github.actor == 'sampathkumar-co'))
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:
@@ -563,35 +563,35 @@ jobs:
       id-token: write
     env:
       RC_REPO: sampathkumar-co/Operator-runtime
-      RC_VERSION: 2.0.6-rc.2
+      RC_VERSION: 2.0.6-rc.3
       NPM_TAG: next
       OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
     steps:
-      - name: Validate one-time checked-in owner-authorized RC2 activation
+      - name: Validate one-time checked-in owner-authorized RC3 activation
         if: github.event_name == 'push'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api "/repos/$RC_REPO/contents/.release/npm-rc2-activation.json?ref=$GITHUB_SHA" --jq .content | base64 --decode > "$RUNNER_TEMP/rc-activation.json"
+          gh api "/repos/$RC_REPO/contents/.release/npm-rc3-activation.json?ref=$GITHUB_SHA" --jq .content | base64 --decode > "$RUNNER_TEMP/rc-activation.json"
           gh api "/repos/$RC_REPO/commits/$GITHUB_SHA" > "$RUNNER_TEMP/rc-activation-commit.json"
           python3 -I - <<'PY'
           import json, os, pathlib
           actual = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'rc-activation.json').read_text())
           expected = {
-              'schemaVersion': 1, 'package': 'mecord-connect', 'version': '2.0.6-rc.2',
+              'schemaVersion': 1, 'package': 'mecord-connect', 'version': '2.0.6-rc.3',
               'targetTag': 'next', 'publicationMode': 'stage', 'enabled': True,
-              'ownerInstruction': 'Stage signed RC2 from certified relay-recovery release source; no stable promotion',
-              'activationAttempt': 3,
+              'ownerInstruction': 'Stage signed RC3 from certified fail-closed relay hardening source; no stable promotion',
+              'activationAttempt': 1,
           }
           assert actual == expected, 'activation content not exactly authorized'
           commit = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'rc-activation-commit.json').read_text())
           assert commit['sha'] == os.environ['GITHUB_SHA'], 'activation commit identity mismatch'
-          assert any(f['filename'] == '.release/npm-rc2-activation.json' and f['status'] in ('added', 'modified') for f in commit['files']), 'activation was not committed in this push'
+          assert any(f['filename'] == '.release/npm-rc3-activation.json' and f['status'] in ('added', 'modified') for f in commit['files']), 'activation was not committed in this push'
           event = json.loads(pathlib.Path(os.environ['GITHUB_EVENT_PATH']).read_text())
           assert event['repository']['full_name'] == os.environ['RC_REPO'], 'unexpected repository'
-          print('one-time RC2 stage-only activation verified')
+          print('one-time RC3 stage-only activation verified')
           PY
 
       - name: Wait for all six original PR workflow families and exact-SHA push signer
@@ -618,13 +618,13 @@ jobs:
           for name, path in original.items():
               matching = [r for r in runs if r['name'] == name and r['path'] == path
                           and r['head_sha'] == commit and r['event'] == 'pull_request'
-                          and any(p['number'] == 331 for p in r.get('pull_requests', []))]
+                          and any(p['number'] == 337 for p in r.get('pull_requests', []))]
               if not any(r['status'] == 'completed' and r['conclusion'] == 'success' for r in matching):
                   missing.append(name)
           signed = [r for r in runs if r['name'] == 'NPM Remote Runtime CI'
               and r['path'] == '.github/workflows/npm-remote-ci.yml'
               and r['event'] == 'push' and r['head_sha'] == commit
-              and r['head_branch'] == 'release/npm-206-rc2-relay-recovery-20261013'
+              and r['head_branch'] == 'release/npm-206-rc3-relay-recovery-20261013'
               and r['status'] == 'completed' and r['conclusion'] == 'success']
           if not signed: missing.append('exact-source signed push build')
           print('Pending CI:' + ', '.join(missing) if missing else 'All six exact-PR CI families and signed builder passed')
@@ -648,7 +648,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api "/repos/$RC_REPO/pulls/331" > "$RUNNER_TEMP/source-pr.json"
+          gh api "/repos/$RC_REPO/pulls/337" > "$RUNNER_TEMP/source-pr.json"
           gh api "/repos/$RC_REPO/actions/runs?head_sha=$OPERATOR_SOURCE_COMMIT&per_page=100" > "$RUNNER_TEMP/source-runs.json"
           python3 -I - <<'PY'
           import json, os, pathlib
@@ -657,8 +657,8 @@ jobs:
           pr, runs = (read(x) for x in ('source-pr.json','source-runs.json'))
           commit, repo = os.environ['OPERATOR_SOURCE_COMMIT'], os.environ['RC_REPO']
           assert len(commit) == 40 and all(c in '0123456789abcdef' for c in commit), 'source SHA malformed'
-          assert pr['number'] == 331 and pr['head']['sha'] == commit, 'source PR is not at this workflow commit'
-          assert pr['base']['ref'] == 'release/npm-206-rc1-preparation-20261012', 'source PR base mismatch'
+          assert pr['number'] == 337 and pr['head']['sha'] == commit, 'source PR is not at this workflow commit'
+          assert pr['base']['ref'] == 'release/npm-206-rc2-relay-recovery-20261013', 'source PR base mismatch'
           assert pr['head']['repo']['full_name'] == repo and pr['state'] == 'open', 'source PR must remain reviewable'
           required = {
               'CI': '.github/workflows/ci.yml',
@@ -674,26 +674,26 @@ jobs:
                   and r['path'] == path and r['event'] == 'pull_request'
                   and r['head_sha'] == commit and r['status'] == 'completed'
                   and r['conclusion'] == 'success'
-                  and any(p['number'] == 331 for p in r.get('pull_requests', []))]
+                  and any(p['number'] == 337 for p in r.get('pull_requests', []))]
               assert matched, 'missing exact PR successful run: ' + name + ' ' + path
           signed_runs = [r for r in all_runs
               if r['name'] == 'NPM Remote Runtime CI'
               and r['path'] == '.github/workflows/npm-remote-ci.yml'
               and r['event'] == 'push'
               and r['head_sha'] == commit
-              and r['head_branch'] == 'release/npm-206-rc2-relay-recovery-20261013'
+              and r['head_branch'] == 'release/npm-206-rc3-relay-recovery-20261013'
               and r['status'] == 'completed' and r['conclusion'] == 'success']
           assert signed_runs, 'missing signed exact-source push build'
           builder = max(signed_runs, key=lambda r: int(r['id']))
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('builder_run_id=' + str(builder['id']) + '\n')
-          print('OWNER-DISPATCH RC2, six path+PR bound checks green, builder run:', builder['id'])
+          print('OWNER-DISPATCH RC3, six path+PR bound checks green, builder run:', builder['id'])
           PY
 
       - name: Download candidate signed by same-source push CI
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: mecord-connect-2.0.6-rc.2-${{ github.sha }}
+          name: mecord-connect-2.0.6-rc.3-${{ github.sha }}
           repository: sampathkumar-co/Operator-runtime
           run-id: ${{ steps.evidence.outputs.builder_run_id }}
           github-token: ${{ github.token }}
@@ -775,8 +775,8 @@ jobs:
           with urllib.request.urlopen('https://registry.npmjs.org/mecord-connect', timeout=15) as response:
               p = json.load(response)
           assert p['name'] == 'mecord-connect' and p['dist-tags']['latest'] == '2.0.5'
-          assert '2.0.6-rc.2' not in p['versions'], 'RC2 already public'
-          assert p['dist-tags'].get('next') == '2.0.6-rc.1', 'unexpected prior npm next release'
+          assert '2.0.6-rc.3' not in p['versions'], 'RC3 already public'
+          assert p['dist-tags'].get('next') == '2.0.6-rc.2', 'unexpected prior npm next release'
           print('registry verified: latest=2.0.5, next pinned to RC1, prerelease absent')
           PY
 
@@ -787,13 +787,13 @@ jobs:
           NPM_CONFIG_IGNORE_SCRIPTS: 'false'
         run: |
           set -euo pipefail
-          test "$RC_VERSION" = 2.0.6-rc.2
+          test "$RC_VERSION" = 2.0.6-rc.3
           test "$NPM_TAG" = next
           npm stage publish "$RC_DIR/mecord-connect-$RC_VERSION.tgz" \
             --access public --tag next --provenance --ignore-scripts=false
           {
-            echo '## npm RC2 staged (human 2FA approval still required)'
-            echo 'Version: mecord-connect@2.0.6-rc.2; dist-tag: next; latest unaffected'
+            echo '## npm RC3 staged (human 2FA approval still required)'
+            echo 'Version: mecord-connect@2.0.6-rc.3; dist-tag: next; latest unaffected'
             echo "Source and provenance commit: $OPERATOR_SOURCE_COMMIT"
             echo "Builder run: ${{ steps.evidence.outputs.builder_run_id }}"
           } >> "$GITHUB_STEP_SUMMARY"
