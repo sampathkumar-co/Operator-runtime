@@ -6,5 +6,5 @@
   "publicationMode": "stage",
   "enabled": true,
   "ownerInstruction": "Stage signed RC2 from certified relay-recovery release source; no stable promotion",
-  "activationAttempt": 2
+  "activationAttempt": 3
 }
