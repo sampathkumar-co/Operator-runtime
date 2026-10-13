@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "package": "mecord-connect",
+  "version": "2.0.6-rc.2",
+  "targetTag": "next",
+  "publicationMode": "stage",
+  "enabled": true,
+  "ownerInstruction": "Stage signed RC2 from certified relay-recovery release source; no stable promotion",
+  "activationAttempt": 1
+}
