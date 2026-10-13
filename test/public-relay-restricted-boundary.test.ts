@@ -1250,3 +1250,68 @@ test('quarantine rejects malformed actions and never quarantines canonical reads
   } } }), null);
   assert.equal(uncertainMutationRecoveryResult({ ...base, kind: 'task' }), null);
 });
+
+
+test('quarantine refuses revoked delivery authority and does not retire the old cursor', { timeout: 12_000 }, async t => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-revoked-write-quarantine-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Revoked Write PC');
+  const deliveryId = crypto.randomUUID();
+  await fs.writeFile(path.join(stateDir, 'relay-client.json'), JSON.stringify({
+    version: 1, lastAckedServerSeq: 0,
+    processing: { seq: 1, id: deliveryId, startedAt: new Date().toISOString() }
+  }));
+  let providerCalls = 0;
+  const localBase = await listen(t, async (req, res) => {
+    await readBody(req);
+    if (req.url === '/v1/action-receipt') {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: { code: 'ACTION_EXECUTION_RECEIPT_NOT_FOUND' } }));
+      return;
+    }
+    providerCalls++;
+    res.writeHead(500); res.end('not permitted');
+  });
+  let resultCalls = 0;
+  const resultBase = await listen(t, async (req, res) => {
+    resultCalls++;
+    await readBody(req);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  }, 403);
+  const tokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(tokenFile, 'sessiontoken123456.signature123456');
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: {
+      approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 },
+      action: {
+        id: crypto.randomUUID(), capability: 'browser.navigate', risk: 'write',
+        input: { url: 'https://example.org/' }, provenance: { kind: 'chatgpt' }
+      }
+    }
+  };
+  const runner = new LocalAgentRelayRunner({
+    stateDir, relayUrl: 'ws://127.0.0.1:65433/device',
+    resultUrl: resultBase + '/v1/device-result', sessionTokenFile: tokenFile, identity,
+    localAgentBaseUrl: localBase, agentToken: 'c'.repeat(64), relayInternalToken: 'r'.repeat(64),
+    allowLoopbackInsecure: true,
+    socketFactory: url => new ScriptedRelaySocket(url, delivery, () => {
+      throw new Error('revoked delivery must never ACK');
+    })
+  });
+  try {
+    await assert.rejects(runner.run(), (err: any) => err?.code === 'RELAY_EXECUTION_AUTHORITY_UNCONFIRMED');
+  } finally {
+    runner.stop();
+  }
+  assert.equal(providerCalls, 0);
+  assert.equal(resultCalls, 0);
+  const saved = JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8'));
+  assert.equal(saved.lastAckedServerSeq, 0);
+  assert.equal(saved.processing?.id, deliveryId);
+  assert.equal((await new RelayResultStore(path.join(stateDir, 'relay-outbox')).has(
+    (await identity.loadExisting())!.deviceId, 1, deliveryId
+  )), false);
+});
