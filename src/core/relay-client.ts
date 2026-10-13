@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { DeviceIdentityStore } from './device-identity.ts';
 import { OperatorError } from './errors.ts';
+import { capabilityRiskRule } from './capability-policy.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import {
   createRelayCapabilitySessionBinding,
@@ -179,6 +180,7 @@ export class RelayClient {
   #stopped = false;
   #socket: RelaySocketLike | null = null;
   #attempt = 0;
+  #readySinceMs: number | null = null;
   #heartbeatTimer: NodeJS.Timeout | null = null;
   #lastPongAt = 0;
   #interruptConnection: ((mode?: 'reconnect' | 'shutdown') => void) | null = null;
@@ -248,6 +250,11 @@ export class RelayClient {
           else this.#emitConnectionState({ state: 'DEGRADED', code, recoverable: false });
           throw error;
         }
+        // A welcome frame alone does not prove a stable connection. Preserve
+        // backoff across short, repeatedly authenticated execution failures;
+        // reset after a genuinely healthy session instead.
+        if (this.#readySinceMs !== null && this.#clock().getTime() - this.#readySinceMs >= 60_000) this.#attempt = 0;
+        this.#readySinceMs = null;
         const requestedReconnect = code === 'RELAY_RECONNECT_REQUESTED';
         const delay = requestedReconnect ? 0 : reconnectDelay(this.#attempt++, this.#random());
         this.#emitStatus({ state: 'reconnect-wait', code, delayMs: delay });
@@ -404,7 +411,7 @@ export class RelayClient {
           nextReceiveSeq = frame.resumeFromSeq + 1;
           nextAckSeq = frame.resumeFromSeq + 1;
           welcomed = true;
-          this.#attempt = 0;
+          this.#readySinceMs = this.#clock().getTime();
           this.#lastPongAt = this.#clock().getTime();
           this.#startHeartbeat(socket, boundedHeartbeat(frame.heartbeatMs));
           this.#emitStatus({ state: 'authenticated-ready', capabilityCount: negotiated.capabilities.length });
@@ -721,10 +728,14 @@ function boundedReadConcurrency(value: unknown): number {
   return parsed;
 }
 
-function isConcurrentReadDelivery(delivery: RelayDelivery): boolean {
+export function isConcurrentReadDelivery(delivery: RelayDelivery): boolean {
   if (delivery.kind !== 'action') return false;
   const action = delivery.payload.action;
-  return Boolean(action && typeof action === 'object' && !Array.isArray(action) && (action as Record<string, unknown>).risk === 'read');
+  if (!action || typeof action !== 'object' || Array.isArray(action)) return false;
+  const candidate = action as Record<string, unknown>;
+  if (candidate.risk !== 'read' || typeof candidate.capability !== 'string') return false;
+  try { return capabilityRiskRule(candidate.capability) === 'read'; }
+  catch { return false; }
 }
 
 function validateResourceProfile(input: RelayResourceProfile): RelayResourceProfile {

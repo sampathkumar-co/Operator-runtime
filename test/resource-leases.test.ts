@@ -282,6 +282,27 @@ test('canonical resource extractor registry covers every policy capability and m
   }
 });
 
+test('pathless Docker daemon inspection has a real identity but pathless Docker mutation remains denied', async () => {
+  const inspect = {
+    id: 'daemon-inspect',
+    capability: 'docker.inspect',
+    risk: 'read' as const,
+    input: {},
+    provenance: { kind: 'runtime' as const }
+  };
+  assert.deepEqual(resourceKeysForAction(inspect), ['docker:daemon']);
+  assert.deepEqual(await resolvePhysicalResourceKeysForAction(inspect), ['docker:daemon']);
+  assert.throws(
+    () => resourceKeysForAction({ ...inspect, id: 'unsafe-manage', capability: 'docker.manage', risk: 'system' }),
+    (error: any) => error?.code === 'RESOURCE_TARGET_REQUIRED'
+  );
+  const project = path.resolve(os.tmpdir(), 'docker-project').replace(/\\/g, '/');
+  const normalized = process.platform === 'win32' ? project.toLowerCase() : project;
+  assert.deepEqual(resourceKeysForAction({
+    ...inspect, id: 'project-inspect', input: { path: project }
+  }), [`docker:${normalized}`]);
+});
+
 test('terminal declarations bind external mutation paths without parsing argv', async (t) => {
   const state = await temp(t);
   const cwd = path.join(state, 'cwd');
