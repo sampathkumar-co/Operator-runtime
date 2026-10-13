@@ -9,6 +9,7 @@ import type { ActionRequest } from '../../../src/core/types.ts';
 import type { ApprovalAuthorityContext } from './approval-store.ts';
 import { containsRestrictedData } from '../../../src/core/public-restricted-data.ts';
 import { readRelaySessionTokenFile, type RelaySessionCredentialProvider } from './relay-session-credentials.ts';
+import { LocalActionExecutionStore } from './action-execution-store.ts';
 
 const MAX_RESULT_BYTES = 256 * 1024;
 const RESULT_SUBMIT_ATTEMPTS = 3;
@@ -46,6 +47,7 @@ export class LocalAgentRelayRunner {
   #client: RelayClient;
   #identity: DeviceIdentityStore;
   #outbox: RelayResultStore;
+  #mutationReceipts: LocalActionExecutionStore;
   #sessionCredentials: RelaySessionCredentialProvider;
   #resultUrl: string;
   #localAgentBaseUrl: string;
@@ -59,6 +61,7 @@ export class LocalAgentRelayRunner {
   constructor(options: LocalAgentRelayRunnerOptions) {
     this.#identity = options.identity;
     this.#outbox = new RelayResultStore(path.join(path.resolve(options.stateDir), 'relay-outbox'));
+    this.#mutationReceipts = new LocalActionExecutionStore(options.stateDir);
     const legacyFile = path.resolve(options.sessionTokenFile);
     this.#sessionCredentials = options.sessionCredentials ?? {
       forConnection: () => readRelaySessionTokenFile(legacyFile),
@@ -163,6 +166,16 @@ export class LocalAgentRelayRunner {
       // The server confirms the current authority before this new response
       // can retire the stranded relay cursor.
       await this.#assertFreshDeliveryAuthority(delivery);
+      if (recovered.state === 'missing') {
+        // If the prior crash occurred before the local execution receipt was
+        // created, atomically fence this same action identity as processing.
+        // Otherwise, expiry or a later explicit re-submission could execute
+        // the action again after the relay has reported UNKNOWN. This call
+        // writes ONLY a protected receipt; it never executes the provider.
+        const action = validateRemoteAction(delivery.payload.action);
+        const authority = validateApprovalAuthority(delivery.payload.approvalAuthority);
+        await this.#mutationReceipts.begin(action, authority);
+      }
       await this.#outbox.put(identity.deviceId, seq, deliveryId, uncertain);
       await this.#submitResultWithRetry(seq, deliveryId, uncertain);
       return 'ack';
