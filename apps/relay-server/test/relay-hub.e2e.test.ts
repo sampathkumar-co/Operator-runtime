@@ -543,7 +543,7 @@ test('stale downgraded session cannot retire work after a restored-capability se
 });
 
 
-test('read window keeps lightweight control traffic responsive beside one heavy read', { timeout: 20_000 }, async (t) => {
+test('unverified dynamic-risk read serializes before lightweight control and resumes safely', { timeout: 20_000 }, async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-read-window-authority-');
   const deviceState = await tempDir(t, 'operator-relay-read-window-device-');
   const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
@@ -624,10 +624,14 @@ test('read window keeps lightweight control traffic responsive beside one heavy 
     payload: { action: { id: 'light-inspect', capability: 'computer.inspect', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } } }
   });
   assert.equal(light.delivery.seq, 2);
-  await Promise.race([
-    lightSeen,
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('lightweight read was starved behind heavy read')), 1_000))
+  // A dynamic-risk project command cannot be trusted as a read solely from
+  // its caller-provided risk label. It creates a serialization barrier until
+  // a policy-authorized kernel resolves the risk, unlike static read tools.
+  const lightBeforeRelease = await Promise.race([
+    lightSeen.then(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100))
   ]);
+  assert.equal(lightBeforeRelease, false, 'unverified dynamic command must not enter the parallel read lane');
 
   const heavyTwo = await hub.dispatch({
     accountId: account.accountId,
@@ -645,8 +649,12 @@ test('read window keeps lightweight control traffic responsive beside one heavy 
 
   releaseHeavyOne();
   await Promise.race([
+    lightSeen,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('lightweight read did not resume after dynamic command completed')), 2_000))
+  ]);
+  await Promise.race([
     heavyTwoSeen,
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('second heavy read did not start after heavy slot cleared')), 2_000))
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('second dynamic read did not resume after first completed')), 2_000))
   ]);
   await waitFor(async () => (await hub.deliveryCursor(device.deviceId)).lastAckedSeq === 3);
   client.stop();
