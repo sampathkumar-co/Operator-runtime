@@ -6,10 +6,12 @@ on:
       - main
       - release/npm-206-rc1-preparation-20261012
       - release/npm-206-rc2-relay-recovery-20261013
+      - release/npm-206-rc3-relay-hardening-20261013
     paths:
       - '.release/npm-runtime-stage-request.json'
       - '.release/npm-rc1-activation.json'
       - '.release/npm-rc2-activation.json'
+      - '.release/npm-rc3-activation.json'
   workflow_dispatch:
     inputs:
       npm_tag:
