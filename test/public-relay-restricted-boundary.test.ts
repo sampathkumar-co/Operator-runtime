@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { canRetryUncertainRelayDelivery, LocalAgentRelayRunner } from '../apps/local-agent/src/relay-agent.ts';
+import { canRetryUncertainRelayDelivery, uncertainMutationRecoveryResult, LocalAgentRelayRunner } from '../apps/local-agent/src/relay-agent.ts';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 import { LocalActionExecutionStore } from '../apps/local-agent/src/action-execution-store.ts';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
@@ -1148,4 +1148,105 @@ test('oversized local relay result is converted to a bounded non-retryable failu
   assert.equal(submitted.result?.error?.retryable, false);
   assert.match(submitted.result?.error?.message ?? '', /Do not retry automatically/);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
+});
+
+
+test('uncertain write returns explicit durable unknown outcome without replay or relay shutdown', { timeout: 20_000 }, async t => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-write-quarantine-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Write Quarantine PC');
+  const deliveryId = crypto.randomUUID();
+  const writeAction = {
+    id: crypto.randomUUID(),
+    capability: 'file.write', risk: 'write' as const,
+    input: { path: '/tmp/never-replay-write.txt', content: 'must never be dispatched' },
+    provenance: { kind: 'chatgpt' as const }
+  };
+  await new LocalActionExecutionStore(stateDir).begin(writeAction);
+  await fs.writeFile(path.join(stateDir, 'relay-client.json'), JSON.stringify({
+    version: 1, lastAckedServerSeq: 0,
+    processing: { seq: 1, id: deliveryId, startedAt: new Date().toISOString() }
+  }));
+  let providerCalls = 0;
+  const localBase = await listen(t, async (req, res) => {
+    await readBody(req);
+    if (req.url === '/v1/action-receipt') {
+      res.writeHead(202, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, receipt: { status: 'processing' } }));
+      return;
+    }
+    providerCalls += 1;
+    res.writeHead(500); res.end('must not execute');
+  });
+  const submitted: any[] = [];
+  const resultBase = await listen(t, async (req, res) => {
+    submitted.push(JSON.parse(await readBody(req)));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const tokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(tokenFile, 'sessiontoken123456.signature123456');
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: {
+      publicBoundary: true,
+      approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 },
+      action: writeAction
+    }
+  };
+  let signalAck!: () => void;
+  const ack = new Promise<void>(resolve => { signalAck = resolve; });
+  const runner = new LocalAgentRelayRunner({
+    stateDir, relayUrl: 'ws://127.0.0.1:65433/device',
+    resultUrl: resultBase + '/v1/device-result', sessionTokenFile: tokenFile, identity,
+    localAgentBaseUrl: localBase, agentToken: 'c'.repeat(64),
+    relayInternalToken: 'r'.repeat(64),
+    allowLoopbackInsecure: true,
+    socketFactory: url => new ScriptedRelaySocket(url, delivery, signalAck)
+  });
+  const running = runner.run();
+  let watchdog: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([ack, new Promise<never>((_, reject) => {
+      watchdog = setTimeout(() => reject(new Error('quarantine ACK timed out')), 13_000);
+    })]);
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
+    runner.stop();
+    await running;
+  }
+  assert.equal(providerCalls, 0);
+  assert.equal(submitted.length, 1);
+  const outcome = submitted[0]?.result;
+  assert.equal(outcome?.ok, false);
+  assert.equal(outcome?.error?.code, 'RELAY_ACTION_OUTCOME_UNCERTAIN');
+  assert.equal(outcome?.error?.retryable, false);
+  assert.equal(outcome?.error?.sideEffectState, 'uncertain');
+  assert.equal(JSON.stringify(outcome).includes(writeAction.input.content), false);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json',), 'utf8')),
+    { version: 1, lastAckedServerSeq: 1 });
+  assert.equal((await new LocalActionExecutionStore(stateDir).lookup(writeAction)).status, 'processing',
+    'UNKNOWN relay response cannot erase or falsely complete the local write receipt');
+  assert.equal(await new RelayResultStore(path.join(stateDir, 'relay-outbox')).has(
+    (await identity.loadExisting())!.deviceId, 1, deliveryId
+  ), false, 'ACK removes submitted outbox copy but not execution evidence');
+});
+
+test('quarantine rejects malformed actions and never quarantines canonical reads', () => {
+  const base = {
+    seq: 1, id: crypto.randomUUID(), kind: 'action',
+    payload: { action: {
+      id: crypto.randomUUID(), capability: 'file.read', risk: 'read',
+      input: { path: '/tmp/example' }, provenance: { kind: 'chatgpt' }
+    } }
+  } as any;
+  assert.equal(uncertainMutationRecoveryResult(base), null);
+  assert.equal(uncertainMutationRecoveryResult({ ...base, payload: { action: {
+    ...base.payload.action, risk: 'write', capability: 'file.write'
+  } } })?.error?.code, 'RELAY_ACTION_OUTCOME_UNCERTAIN');
+  assert.equal(uncertainMutationRecoveryResult({ ...base, payload: { action: {
+    ...base.payload.action, risk: 'write', provenance: { kind: 'untrusted' }
+  } } }), null);
+  assert.equal(uncertainMutationRecoveryResult({ ...base, kind: 'task' }), null);
 });
