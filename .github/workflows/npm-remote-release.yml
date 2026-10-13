@@ -554,7 +554,7 @@ jobs:
 
   stage-rc3:
     name: Stage source-matched signed 2.0.6-rc.3 (next only)
-    if: github.ref == 'refs/heads/release/npm-206-rc3-relay-recovery-20261013' && github.repository == 'sampathkumar-co/Operator-runtime' && ((github.event_name == 'workflow_dispatch' && inputs.npm_tag == 'next' && inputs.publication_mode == 'stage') || (github.event_name == 'push' && github.actor == 'sampathkumar-co'))
+    if: github.ref == 'refs/heads/release/npm-206-rc3-relay-hardening-20261013' && github.repository == 'sampathkumar-co/Operator-runtime' && ((github.event_name == 'workflow_dispatch' && inputs.npm_tag == 'next' && inputs.publication_mode == 'stage') || (github.event_name == 'push' && github.actor == 'sampathkumar-co'))
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:
@@ -626,7 +626,7 @@ jobs:
           signed = [r for r in runs if r['name'] == 'NPM Remote Runtime CI'
               and r['path'] == '.github/workflows/npm-remote-ci.yml'
               and r['event'] == 'push' and r['head_sha'] == commit
-              and r['head_branch'] == 'release/npm-206-rc3-relay-recovery-20261013'
+              and r['head_branch'] == 'release/npm-206-rc3-relay-hardening-20261013'
               and r['status'] == 'completed' and r['conclusion'] == 'success']
           if not signed: missing.append('exact-source signed push build')
           print('Pending CI:' + ', '.join(missing) if missing else 'All six exact-PR CI families and signed builder passed')
@@ -683,7 +683,7 @@ jobs:
               and r['path'] == '.github/workflows/npm-remote-ci.yml'
               and r['event'] == 'push'
               and r['head_sha'] == commit
-              and r['head_branch'] == 'release/npm-206-rc3-relay-recovery-20261013'
+              and r['head_branch'] == 'release/npm-206-rc3-relay-hardening-20261013'
               and r['status'] == 'completed' and r['conclusion'] == 'success']
           assert signed_runs, 'missing signed exact-source push build'
           builder = max(signed_runs, key=lambda r: int(r['id']))
