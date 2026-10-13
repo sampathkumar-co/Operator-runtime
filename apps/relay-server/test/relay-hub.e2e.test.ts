@@ -543,7 +543,7 @@ test('stale downgraded session cannot retire work after a restored-capability se
 });
 
 
-test('unverified dynamic-risk read serializes before lightweight control and resumes safely', { timeout: 20_000 }, async (t) => {
+test('static read window stays responsive while unverified dynamic commands remain serialized', { timeout: 20_000 }, async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-read-window-authority-');
   const deviceState = await tempDir(t, 'operator-relay-read-window-device-');
   const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
@@ -611,7 +611,7 @@ test('unverified dynamic-risk read serializes before lightweight control and res
     explicitDeviceId: device.deviceId,
     requiredCapabilities: ['project.command.run'],
     kind: 'action',
-    payload: { action: { id: 'heavy-one', capability: 'project.command.run', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } } }
+    payload: { action: { id: 'heavy-one', capability: 'computer.inspect', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } } }
   });
   assert.equal(heavyOne.delivery.seq, 1);
   await heavyOneSeen;
@@ -624,14 +624,13 @@ test('unverified dynamic-risk read serializes before lightweight control and res
     payload: { action: { id: 'light-inspect', capability: 'computer.inspect', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } } }
   });
   assert.equal(light.delivery.seq, 2);
-  // A dynamic-risk project command cannot be trusted as a read solely from
-  // its caller-provided risk label. It creates a serialization barrier until
-  // a policy-authorized kernel resolves the risk, unlike static read tools.
+  // A static read must not starve other static reads, even while a slow
+  // operation is pending. The later dynamic command remains serialized.
   const lightBeforeRelease = await Promise.race([
     lightSeen.then(() => true),
     new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100))
   ]);
-  assert.equal(lightBeforeRelease, false, 'unverified dynamic command must not enter the parallel read lane');
+  assert.equal(lightBeforeRelease, true, 'static read control traffic must bypass a slow static read');
 
   const heavyTwo = await hub.dispatch({
     accountId: account.accountId,
