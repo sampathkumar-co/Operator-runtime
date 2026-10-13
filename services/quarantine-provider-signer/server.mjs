@@ -3,6 +3,7 @@
 import https from 'node:https';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import net from 'node:net';
 import crypto from 'node:crypto';
 import {createSigner} from './provider-origin-signer.mjs';
 
@@ -14,10 +15,17 @@ async function fileFromEnv(env,name) {
     || (process.platform !== 'win32' && (stat.mode & 0o077))) throw new Error('SIGNER_FILE_UNSAFE');
   return fs.readFile(filename);
 }
-function originUrl(value) {
+export function originUrl(value) {
   const u=new URL(value);
-  if (u.protocol !== 'https:' || u.username || u.password || u.search || u.hash
-    || u.port || u.hostname === 'localhost' || /^(\d+\.){3}\d+$/.test(u.hostname))
+  // An off-domain provider must not silently resolve to a local service through
+  // IPv6 literals, IPv4-mapped IPv6, trailing-dot localhost or mDNS aliases.
+  const hostname=u.hostname.toLowerCase().replace(/\.$/, '');
+  const literal=hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1,-1) : hostname;
+  if (u.protocol !== 'https:' || u.username || u.password || u.search || u.hash || u.port
+    || net.isIP(literal) !== 0 || hostname === 'localhost'
+    || hostname.endsWith('.localhost') || hostname.endsWith('.local')
+    || !hostname.includes('.'))
     throw new Error('ORIGIN_URL_INVALID');
   if (!u.pathname.endsWith('/')) u.pathname += '/';
   return u;
