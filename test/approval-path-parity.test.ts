@@ -90,6 +90,75 @@ test('direct Chrome-style tab selection and durable task both require actual app
   assert.equal((await approvals.list()).find(r => r.actionId === blocked.actionId)?.status, 'consumed');
 });
 
+test('denied Chrome-style durable task approval remains non-dispatchable across retries and recovery credential', async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-p0-denied-parity-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const provider = new TabProvider();
+  const runtime = new OperatorRuntime().register(provider);
+  const tasks = new TaskStore(state);
+  const approvals = new ApprovalStore(state);
+  const permissions = { allowedCapabilities: ['app.inspect', 'app.operate'], allowedRoots: [],
+    allowExternalWrites: false, allowDestructive: false, allowSystemChanges: false };
+  const taskOrchestrator = new TaskOrchestrator({ runtime, store: tasks, permissions });
+  const token = 'd'.repeat(64), recoveryToken = 'e'.repeat(64);
+  const agent = createLocalAgentServer({
+    runtime, token, recoveryToken, approvals, permissions, tasks, taskOrchestrator,
+    inlineApprovalWaitMs: 10
+  });
+  t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
+  const { port } = await agent.listen('127.0.0.1', 0);
+  const base = 'http://127.0.0.1:' + port;
+  const headers = { authorization: 'Bearer ' + token, 'content-type': 'application/json' };
+  const selector = { automationId: 'chrome-tab-2', controlType: 'TabItem', processId: 77 };
+  const submitted = await fetch(base + '/v1/tasks', {
+    method: 'POST', headers, body: JSON.stringify({
+      objective: 'Select Chrome tab after an explicit denial', run: true,
+      successConditions: ['selected tab verified'],
+      goal: { kind: 'app-operation', operation: 'select', selector }
+    })
+  });
+  const initial = await submitted.json() as any;
+  assert.equal(submitted.status, 200, JSON.stringify(initial));
+  assert.equal(initial.task.state, 'BLOCKED');
+  assert.equal(provider.operateCalls, 0);
+  const blocked = initial.task.execution.records.find((record: any) => record.state === 'BLOCKED');
+  assert.equal(blocked.capability, 'app.operate');
+  const pending = (await approvals.list()).find(record => record.actionId === blocked.actionId);
+  assert.equal(pending?.status, 'pending');
+  await approvals.deny(blocked.actionId, pending!.approvalRequestId);
+  assert.equal((await approvals.list()).find(record => record.actionId === blocked.actionId)?.status, 'denied');
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const resume = await fetch(base + '/v1/tasks/' + initial.task.id + '/resume', {
+      method: 'POST', headers, body: '{}'
+    });
+    const output = await resume.json() as any;
+    assert.ok([200, 409].includes(resume.status), JSON.stringify(output));
+    if (resume.status === 200) assert.notEqual(output.task.state, 'VERIFIED',
+      'denied task cannot be promoted to verified execution by ordinary retry');
+    assert.equal(provider.operateCalls, 0, 'no provider dispatch after explicit denial');
+  }
+
+  const recovery = await fetch(base + '/v1/tasks/' + initial.task.id + '/resume', {
+    method: 'POST', headers: { ...headers, 'x-operator-recovery-token': recoveryToken },
+    body: JSON.stringify({ approvedActionId: blocked.actionId })
+  });
+  assert.equal(recovery.status, 409);
+  const recovered = await recovery.json() as any;
+  assert.notEqual(recovered.error?.code, undefined);
+  assert.equal(provider.operateCalls, 0, 'recovery credential must not undo the denied approval');
+
+  const newAction = await fetch(base + '/v1/execute', {
+    method: 'POST', headers, body: JSON.stringify({ action: {
+      id: 'fresh-after-denied', capability: 'app.operate', risk: 'external',
+      input: { operation: 'select', selector }, provenance: { kind: 'chatgpt' }
+    } })
+  });
+  assert.equal(newAction.status, 409);
+  assert.equal((await newAction.json() as any).error?.code, 'APPROVAL_REQUIRED');
+  assert.equal(provider.operateCalls, 0);
+});
+
 test('cross-device approval cannot authorize the same blocked application step inside a workflow', async t => {
   const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-p0-workflow-approval-'));
   t.after(() => fs.rm(state, { recursive: true, force: true }));
