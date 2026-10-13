@@ -1,6 +1,7 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { createServer } from 'node:http';
+import { isIP } from 'node:net';
 import { Algorithm, hash as argon2Hash } from '@node-rs/argon2';
 import YAML from 'yaml';
 import { createPairingService } from './pairing.mjs';
@@ -8,9 +9,25 @@ import { createPairingService } from './pairing.mjs';
 const port = Number(process.env.PORT || 8090);
 const usersFile = process.env.PORTAL_USERS_FILE || '/data/users_database.yml';
 const inviteHash = (process.env.PORTAL_INVITE_SHA256 || '').trim().toLowerCase();
+const signupMode = (process.env.PORTAL_SIGNUP_MODE || 'invite').trim().toLowerCase();
+if (signupMode !== 'invite' && signupMode !== 'open') throw new Error('INVALID_SIGNUP_MODE');
+const openSignup = signupMode === 'open';
 const defaultGroup = process.env.PORTAL_DEFAULT_GROUP || 'operator-users';
+if (openSignup && defaultGroup !== 'operator-users') throw new Error('OPEN_SIGNUP_REQUIRES_OPERATOR_USERS');
+const challengeSecret = (process.env.PORTAL_CHALLENGE_SECRET || '').trim();
+if (openSignup && challengeSecret.length < 32) throw new Error('OPEN_SIGNUP_REQUIRES_CHALLENGE_SECRET');
+const securityStateFile = process.env.PORTAL_SECURITY_STATE_FILE || usersFile + '.portal-security.json';
+if (openSignup && !process.env.PORTAL_MAX_USERS) throw new Error('OPEN_SIGNUP_REQUIRES_MAX_USERS');
+const maxUsers = Number(process.env.PORTAL_MAX_USERS || 1000);
+if (!Number.isSafeInteger(maxUsers) || maxUsers < 1) throw new Error('INVALID_PORTAL_MAX_USERS');
+const rawTrustedProxyIps = String(process.env.PORTAL_TRUSTED_PROXY_IPS || '').split(',').map((value) => value.trim()).filter(Boolean);
+const normalizedTrustedProxyIps = rawTrustedProxyIps.map((value) => normalizeIp(value));
+if (normalizedTrustedProxyIps.some((value) => !value)) throw new Error('INVALID_PORTAL_TRUSTED_PROXY_IPS');
+if (normalizedTrustedProxyIps.length === 0) throw new Error(openSignup ? 'OPEN_SIGNUP_REQUIRES_TRUSTED_PROXY_IPS' : 'INVITE_SIGNUP_REQUIRES_TRUSTED_PROXY_IPS');
+const trustedProxyIps = new Set(normalizedTrustedProxyIps);
+const challengeMinAgeMs = process.env.NODE_ENV === 'test' ? Number(process.env.PORTAL_CHALLENGE_MIN_AGE_MS || 0) : 3000;
+const maxRateBuckets = 10_000;
 const maxBody = 16 * 1024;
-const attempts = new Map();
 const pairAttempts = new Map();
 const pairing = createPairingService();
 let writeQueue = Promise.resolve();
@@ -39,16 +56,87 @@ function validInvite(value) {
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-function rateAllowed(ip) {
+function normalizeIp(value) {
+  const candidate = String(value || '').trim().replace(/^::ffff:/, '');
+  return isIP(candidate) ? candidate : '';
+}
+
+function clientIp(req) {
+  const peer = normalizeIp(req.socket.remoteAddress) || 'unknown';
+  const forwarded = normalizeIp(req.headers['x-real-ip']);
+  return trustedProxyIps.has(peer) && forwarded ? forwarded : peer;
+}
+
+function rateAllowed(store, ip) {
   const now = Date.now();
-  const item = attempts.get(ip) || { count: 0, reset: now + 15 * 60_000 };
+  const key = createHmac('sha256', challengeSecret || inviteHash || 'invite-mode').update(ip).digest('hex');
+  if (!store.attempts[key] && Object.keys(store.attempts).length >= maxRateBuckets) {
+    const oldest = Object.entries(store.attempts).sort((left, right) => Number(left[1]?.reset || 0) - Number(right[1]?.reset || 0))[0];
+    if (oldest) delete store.attempts[oldest[0]];
+  }
+  const item = store.attempts[key] || { count: 0, reset: now + 15 * 60_000 };
   if (now > item.reset) {
     item.count = 0;
     item.reset = now + 15 * 60_000;
   }
   item.count += 1;
-  attempts.set(ip, item);
-  return item.count <= 8;
+  store.attempts[key] = item;
+  return item.count <= (openSignup ? 4 : 8);
+}
+
+function emptySecurityState() {
+  return { attempts: {} };
+}
+
+async function readSecurityState() {
+  try {
+    const value = JSON.parse(await fs.readFile(securityStateFile, 'utf8'));
+    return {
+      attempts: value?.attempts && typeof value.attempts === 'object' ? value.attempts : {}
+    };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return emptySecurityState();
+    throw new Error('SIGNUP_SECURITY_STATE_INVALID');
+  }
+}
+
+async function writeSecurityState(state) {
+  const temp = securityStateFile + '.tmp';
+  await fs.writeFile(temp, JSON.stringify(state), { encoding: 'utf8', mode: 0o600 });
+  await fs.rename(temp, securityStateFile);
+}
+
+function issueSignupChallenge(ip) {
+  const issuedAt = Date.now();
+  const client = createHmac('sha256', challengeSecret).update(ip).digest('base64url');
+  const value = Buffer.from(JSON.stringify({ nonce: randomBytes(18).toString('base64url'), client, issuedAt, expiresAt: issuedAt + 15 * 60_000 })).toString('base64url');
+  const signature = createHmac('sha256', challengeSecret).update(value).digest('base64url');
+  return { token: value + '.' + signature, minAgeMs: challengeMinAgeMs, readyAt: issuedAt + challengeMinAgeMs, expiresAt: issuedAt + 15 * 60_000 };
+}
+
+function verifySignupChallenge(token, ip) {
+  const [value, suppliedSignature, extra] = String(token || '').split('.');
+  if (!value || !suppliedSignature || extra) return false;
+  const expectedSignature = createHmac('sha256', challengeSecret).update(value).digest();
+  let actualSignature;
+  try { actualSignature = Buffer.from(suppliedSignature, 'base64url'); } catch { return false; }
+  if (actualSignature.length !== expectedSignature.length || !timingSafeEqual(actualSignature, expectedSignature)) return false;
+  let payload;
+  try { payload = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')); } catch { return false; }
+  const now = Date.now();
+  if (!/^[A-Za-z0-9_-]{24}$/.test(payload?.nonce || '')) return false;
+  const expectedClient = createHmac('sha256', challengeSecret).update(ip).digest();
+  let actualClient;
+  try { actualClient = Buffer.from(payload?.client || '', 'base64url'); } catch { return false; }
+  if (actualClient.length !== expectedClient.length || !timingSafeEqual(actualClient, expectedClient)) return false;
+  if (!Number.isSafeInteger(payload?.issuedAt) || !Number.isSafeInteger(payload?.expiresAt)) return false;
+  if (now < payload.issuedAt + challengeMinAgeMs || now > payload.expiresAt || payload.expiresAt - payload.issuedAt !== 15 * 60_000) return false;
+  return true;
+}
+
+function pruneSecurityState(state) {
+  const now = Date.now();
+  for (const [key, item] of Object.entries(state.attempts)) if (!item || Number(item.reset) < now) delete state.attempts[key];
 }
 
 function pairRateAllowed(ip) {
@@ -98,7 +186,7 @@ async function createUser({ username, email, password, invite }) {
   if (password.length < 12 || password.length > 128) {
     return { status: 400, body: { ok: false, error: 'Password must be 12-128 characters.' } };
   }
-  if (!validInvite(invite)) {
+  if (!openSignup && !validInvite(invite)) {
     return { status: 403, body: { ok: false, error: 'Registration code is invalid.' } };
   }
 
@@ -110,6 +198,10 @@ async function createUser({ username, email, password, invite }) {
     return { status: 409, body: { ok: false, error: 'That username already exists.' } };
   }
   const snapshot = doc.toJS() || {};
+  const userCount = Object.keys(snapshot.users || {}).length;
+  if (openSignup && userCount >= maxUsers) {
+    return { status: 503, body: { ok: false, error: 'Account capacity has been reached. Contact support.' } };
+  }
   const duplicateEmail = Object.values(snapshot.users || {}).some((entry) =>
     String(entry?.email || '').trim().toLowerCase() === email
   );
@@ -181,13 +273,13 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
 <div class="switch">New here? <button id="createInstead" class="secondary" type="button">Create an account</button></div>
 </div>
 <div id="signUpPane" class="pane">
-<h2>Create account</h2><p class="help">Choose your own username and password. You only need the registration code once.</p>
+<h2>Create account</h2><p class="help">Choose your username, email address, and a strong password.${openSignup ? "" : " A registration code is required for this private signup."}</p>
 <form id="signUpForm">
 <label for="signupUsername">Username</label><input id="signupUsername" autocomplete="username" required placeholder="sampath">
 <label for="signupEmail">Email</label><input id="signupEmail" type="email" autocomplete="email" required placeholder="you@example.com">
 <label for="signupPassword">Password</label><input id="signupPassword" type="password" autocomplete="new-password" required minlength="12">
 <label for="signupConfirm">Confirm password</label><input id="signupConfirm" type="password" autocomplete="new-password" required minlength="12">
-<label for="signupInvite">Registration code</label><input id="signupInvite" type="password" autocomplete="one-time-code" required>
+${openSignup ? "" : '<label for="signupInvite">Registration code</label><input id="signupInvite" type="password" autocomplete="one-time-code" required>'}
 <button id="signUpButton" class="primary" type="submit">Create account</button>
 <div id="signupMsg" class="msg"></div>
 </form>
@@ -208,7 +300,14 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
   const byId=(id)=>document.getElementById(id);
   const signInTab=byId('signInTab'),signUpTab=byId('signUpTab');
   const signInPane=byId('signInPane'),signUpPane=byId('signUpPane'),oauthConsentPane=byId('oauthConsentPane');
-  let oauthConsent;
+  let oauthConsent,signupChallenge;
+  async function loadSignupChallenge(){
+    if(!${openSignup})return;
+    const r=await fetch('/signup/challenge',{credentials:'same-origin'});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||!j.token)throw new Error('Secure signup could not be prepared.');
+    signupChallenge={...j, receivedAt:performance.now()};
+  }
   function show(which){
     const login=which==='signin';
     const signup=which==='signup',consent=which==='consent';
@@ -220,6 +319,7 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
   signInTab.onclick=()=>show('signin'); signUpTab.onclick=()=>show('signup');
   byId('createInstead').onclick=()=>show('signup'); byId('signinInstead').onclick=()=>show('signin');
   if(location.pathname==='/signup') show('signup');
+  if(${openSignup})loadSignupChallenge().catch(()=>{});
   if(location.pathname==='/recover') {
     show('signin');
     const msg=byId('loginMsg');
@@ -321,14 +421,23 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
     if(password!==byId('signupConfirm').value){msg.className='msg bad';msg.textContent='Passwords do not match.';return;}
     msg.className='msg';msg.textContent='Creating account...';btn.disabled=true;
     try{
-      const r=await fetch('/signup/api',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:username,email:byId('signupEmail').value,password:password,invite:byId('signupInvite').value})});
+      if(${openSignup}&&!signupChallenge)await loadSignupChallenge();
+      const challengeRemainingMs=signupChallenge?Math.max(0,signupChallenge.minAgeMs-(performance.now()-signupChallenge.receivedAt)):0;
+      if(challengeRemainingMs>0){
+        msg.textContent='Preparing secure signup...';
+        await new Promise((resolve)=>setTimeout(resolve,challengeRemainingMs+100));
+      }
+      const payload={username:username,email:byId('signupEmail').value,password:password,challenge:signupChallenge&&signupChallenge.token};
+      const inviteField=byId('signupInvite');
+      if(inviteField)payload.invite=inviteField.value;
+      const r=await fetch('/signup/api',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
       const j=await r.json().catch(()=>({}));
       if(!r.ok) throw new Error(j.error||'Could not create account.');
       byId('loginUsername').value=username;
-      byId('signupPassword').value='';byId('signupConfirm').value='';byId('signupInvite').value='';
+      byId('signupPassword').value='';byId('signupConfirm').value='';if(inviteField)inviteField.value='';
       show('signin'); const lm=byId('loginMsg'); lm.className='msg ok'; lm.textContent='Account created. Sign in to continue.';
     }catch(err){msg.className='msg bad';msg.textContent=(err&&err.message)||'Could not create account.';}
-    finally{btn.disabled=false;}
+    finally{btn.disabled=false;if(${openSignup}){signupChallenge=undefined;loadSignupChallenge().catch(()=>{});}}
   });
 })();
 </script>
@@ -395,11 +504,13 @@ const server = createServer(async (req, res) => {
       return send(res, 200, pairPage, 'text/html; charset=utf-8');
     }
     if (req.method === 'GET' && requestURL.pathname === '/health') {
-      return send(res, 200, { ok: true, configured: Boolean(inviteHash), pairing: true });
+      return send(res, 200, { ok: true, configured: openSignup || Boolean(inviteHash), signupMode, pairing: true });
+    }
+    if (req.method === 'GET' && requestURL.pathname === '/signup/challenge' && openSignup) {
+      return send(res, 200, issueSignupChallenge(clientIp(req)));
     }
     if (req.method === 'POST' && requestURL.pathname === '/pair/start') {
-      const forwardedIp = String(req.headers['x-real-ip'] || '').trim();
-      const ip = forwardedIp || req.socket.remoteAddress || 'unknown';
+      const ip = clientIp(req);
       if (!pairRateAllowed(ip)) return send(res, 429, { ok: false, error: 'Too many pairing attempts. Try again later.' });
       const payload = await readJson(req);
       try {
@@ -423,11 +534,18 @@ const server = createServer(async (req, res) => {
       }
     }
     if (req.method === 'POST' && req.url === '/signup/api') {
-      const forwardedIp = String(req.headers['x-real-ip'] || '').trim();
-      const ip = forwardedIp || req.socket.remoteAddress || 'unknown';
-      if (!rateAllowed(ip)) return send(res, 429, { ok: false, error: 'Too many attempts. Try again later.' });
+      const ip = clientIp(req);
       const payload = await readJson(req);
-      const run = writeQueue.then(() => createUser(payload));
+      const run = writeQueue.then(async () => {
+        const securityState = await readSecurityState();
+        pruneSecurityState(securityState);
+        const allowed = rateAllowed(securityState, ip);
+        const challengeValid = !openSignup || verifySignupChallenge(payload?.challenge, ip);
+        await writeSecurityState(securityState);
+        if (!allowed) return { status: 429, body: { ok: false, error: 'Too many attempts. Try again later.' } };
+        if (!challengeValid) return { status: 400, body: { ok: false, error: 'Secure signup challenge expired. Refresh and try again.' } };
+        return await createUser(payload);
+      });
       writeQueue = run.then(() => undefined, () => undefined);
       const result = await run;
       return send(res, result.status, result.body);

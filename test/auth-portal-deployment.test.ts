@@ -31,8 +31,17 @@ test('auth signup portal hashes passwords in-process with production Argon2id pa
 test('auth signup portal protects account creation and writes only normal users', () => {
   const source = text('deploy/auth-portal/server.mjs');
   assert.match(source, /PORTAL_INVITE_SHA256/);
+  assert.match(source, /PORTAL_SIGNUP_MODE/);
+  assert.match(source, /signupMode !== 'invite' && signupMode !== 'open'/);
+  assert.match(source, /!openSignup && !validInvite\(invite\)/);
   assert.match(source, /timingSafeEqual/);
-  assert.match(source, /return item\.count <= 8/);
+  assert.doesNotMatch(source, /signupGlobal/);
+  assert.match(source, /store\.attempts\[key\] = item/);
+  assert.match(source, /return item\.count <= \(openSignup \? 4 : 8\)/);
+  assert.match(source, /OPEN_SIGNUP_REQUIRES_OPERATOR_USERS/);
+  assert.match(source, /OPEN_SIGNUP_REQUIRES_MAX_USERS/);
+  assert.match(source, /OPEN_SIGNUP_REQUIRES_TRUSTED_PROXY_IPS/);
+  assert.match(source, /verifySignupChallenge/);
   assert.match(source, /Password must be 12-128 characters/);
   assert.match(source, /Enter a valid email address/);
   assert.match(source, /That username already exists/);
@@ -45,7 +54,8 @@ test('auth signup portal protects account creation and writes only normal users'
 test('auth signup portal serializes writes and uses atomic replacement with backup', () => {
   const source = text('deploy/auth-portal/server.mjs');
   assert.match(source, /let writeQueue = Promise\.resolve\(\)/);
-  assert.match(source, /writeQueue\.then\(\(\) => createUser\(payload\)\)/);
+  assert.match(source, /writeQueue\.then\(async \(\) =>/);
+  assert.match(source, /createUser\(payload\)/);
   assert.match(source, /\.portal-backup/);
   assert.match(source, /\.portal-tmp/);
   assert.match(source, /fs\.rename\(temp, usersFile\)/);
@@ -60,7 +70,8 @@ test('public auth surface exposes Mecord signup, pairing, recovery and active Op
   assert.match(source, /requestURL\.pathname === '\/pair\/start'/);
   assert.match(source, /requestURL\.pathname === '\/pair\/callback'/);
   assert.match(source, /req\.method === 'POST' && req\.url === '\/signup\/api'/);
-  assert.match(source, /if \(!rateAllowed\(ip\)\) return send\(res, 429, \{ ok: false, error: 'Too many attempts\. Try again later\.' \}\);/);
+  assert.match(source, /const allowed = rateAllowed\(securityState, ip\)/);
+  assert.match(source, /if \(!allowed\) return \{ status: 429/);
   assert.match(source, /cache-control/);
   assert.match(source, /x-frame-options/);
 });
@@ -144,4 +155,18 @@ test('Developer ChatGPT OAuth client reuses normal login with isolated scope and
   assert.match(developerClient, /- 'refresh_token'/);
   assert.match(developerClient, /token_endpoint_auth_method: 'none'/);
   assert.doesNotMatch(developerClient, /https:\/\/operator\.splcart\.in\/mcp/);
+});
+
+
+test('open signup omits registration code from UI and payload while keeping invite mode as fallback', () => {
+  const source = text('deploy/auth-portal/server.mjs');
+  assert.match(source, /const openSignup = signupMode === 'open'/);
+  assert.match(source, /\$\{openSignup \? "" : '<label for="signupInvite">Registration code/);
+  assert.match(source, /const inviteField=byId\('signupInvite'\)/);
+  assert.match(source, /if\(inviteField\)payload\.invite=inviteField\.value/);
+  assert.match(source, /configured: openSignup \|\| Boolean\(inviteHash\), signupMode/);
+  assert.match(source, /groups: \[defaultGroup\]/);
+  assert.match(source, /PORTAL_SECURITY_STATE_FILE/);
+  assert.match(source, /PORTAL_MAX_USERS/);
+  assert.match(source, /trustedProxyIps\.has\(peer\)/);
 });
