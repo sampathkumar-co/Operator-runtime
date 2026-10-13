@@ -208,8 +208,8 @@ export class ActionTransitionJournal {
   }
 
   /**
-   * Trusted local-operator repair for an original policy deferral whose legacy
-   * receipt cannot prove the prior owner's host. Caller MUST independently
+   * Trusted local-operator repair for an original policy deferral or an original
+   * PREPARED write with an exited, process-bound Windows owner. Caller MUST independently
    * authorize the exact receipt/journal digest and persist a signed recovery
    * decision before invoking this method. Never exposed to relay/MCP callers.
    */
@@ -222,16 +222,19 @@ export class ActionTransitionJournal {
     return await this.#mutate(async (state, now) => {
       const entry = findEntry(state, input.actionId);
       if (entry.actionDigest !== input.actionDigest || entry.generation !== input.generation ||
-          entry.risk !== 'external') {
+          (entry.risk !== 'external' && entry.risk !== 'write')) {
         throw new OperatorError('ACTION_JOURNAL_ID_CONFLICT', 'Operator recovery identity or generation conflicts.');
       }
-      if (entry.state !== 'DEFERRED' || entry.generation !== 1 || entry.transitions.length !== 2 ||
-          entry.transitions[0]?.state !== 'PREPARED' ||
-          entry.transitions[1]?.state !== 'DEFERRED' || entry.transitions[1]?.provider !== 'policy' ||
-          !entry.transitions[1]?.resultDigest ||
-          digest(entry.transitions) !== input.transitionsDigest) {
+      const originalPolicyDeferral = entry.risk === 'external' && entry.state === 'DEFERRED'
+        && entry.transitions.length === 2 && entry.transitions[0]?.state === 'PREPARED'
+        && entry.transitions[1]?.state === 'DEFERRED' && entry.transitions[1]?.provider === 'policy'
+        && Boolean(entry.transitions[1]?.resultDigest);
+      const originalPreparedWrite = entry.risk === 'write' && entry.state === 'PREPARED'
+        && entry.transitions.length === 1 && entry.transitions[0]?.state === 'PREPARED';
+      if (entry.generation !== 1 || (!originalPolicyDeferral && !originalPreparedWrite)
+        || digest(entry.transitions) !== input.transitionsDigest) {
         throw new OperatorError('ACTION_JOURNAL_PRE_DISPATCH_UNPROVEN',
-          'Operator recovery requires the exact original policy deferral without any provider dispatch.');
+          'Operator recovery requires an exact original never-dispatched journal state.');
       }
       // The public method cannot itself grant recovery authority. Validate
       // the precommitted original-device Ed25519 operator decision INSIDE the
@@ -297,7 +300,8 @@ export class ActionTransitionJournal {
         ? receipts.records.filter((record: any) => record?.actionId === entry.actionId)
         : [];
       const receipt = matching.length === 1 ? matching[0] : null;
-      if (!receipt || receipt.status !== 'processing' || receipt.risk !== 'external' ||
+      if (!receipt || receipt.status !== 'processing' || receipt.risk !== entry.risk ||
+          (entry.risk === 'write' && (!receipt.ownerProcess || !decision.receiptOwnerProcessDigest)) ||
           receipt.ownerId !== decision.receiptOwnerId ||
           receipt.actionHash !== entry.actionDigest ||
           receipt.authorityHash !== decision.receiptAuthorityHash) {
