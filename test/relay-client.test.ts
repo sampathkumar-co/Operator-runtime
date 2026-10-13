@@ -1213,6 +1213,7 @@ test('concurrent read scheduling refuses caller-labeled write or unknown capabil
     payload: { action: { id: 'concurrency-risk-test', capability, risk, input: {}, provenance: { kind: 'chatgpt' } } }
   });
   assert.equal(isConcurrentReadDelivery(frame('docker.inspect')), true);
+  assert.equal(isConcurrentReadDelivery(frame('project.command.run')), false, 'unverified dynamic risk is never concurrent on a caller read label');
   assert.equal(isConcurrentReadDelivery(frame('file.write')), false);
   assert.equal(isConcurrentReadDelivery(frame('docker.manage')), false);
   assert.equal(isConcurrentReadDelivery(frame('not.a.registered.capability')), false);
