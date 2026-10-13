@@ -114,9 +114,18 @@ export class OperatorPreDispatchAdjudicator {
         actionId: decision.actionId, actionDigest: decision.actionDigest,
         generation: decision.journalGeneration, transitionsDigest: decision.transitionsDigest
       });
-    } else if (current.actionDigest !== decision.actionDigest || current.generation !== decision.journalGeneration ||
-               current.transitions.length !== 3 || current.transitions[1]?.provider !== 'policy') {
-      throw denied('Existing terminal fence does not match the signed recovery decision.');
+    } else {
+      const policyDeferralFence = current.risk === 'external' && current.transitions.length === 3
+        && current.transitions[0]?.state === 'PREPARED'
+        && current.transitions[1]?.state === 'DEFERRED' && current.transitions[1]?.provider === 'policy'
+        && current.transitions[2]?.state === 'INTERRUPTED';
+      const preparedWriteFence = current.risk === 'write' && current.transitions.length === 2
+        && current.transitions[0]?.state === 'PREPARED'
+        && current.transitions[1]?.state === 'INTERRUPTED';
+      if (current.actionDigest !== decision.actionDigest || current.generation !== decision.journalGeneration
+          || (!policyDeferralFence && !preparedWriteFence)) {
+        throw denied('Existing terminal fence does not match the signed recovery decision.');
+      }
     }
     return { actionId: decision.actionId, state: 'INTERRUPTED', epoch: decision.epoch, caseDigest: decision.caseDigest };
   }
@@ -128,15 +137,22 @@ export class OperatorPreDispatchAdjudicator {
     // and strictly validated Windows process identities. Windows filetime is
     // NOT a transferable host proof: local operator attestation and the
     // existing device signer remain mandatory. Refuse a live/unknown owner.
-    if (!receipt || receipt.status !== 'processing' || receipt.risk !== 'external' ||
-        !receipt.ownerId ||
-        receipt.actionHash !== journal.actionDigest || !validHash(receipt.authorityHash) ||
-        journal.risk !== 'external' || journal.generation !== 1 || journal.state !== 'DEFERRED' ||
-        journal.transitions.length !== 2 ||
-        journal.transitions[0]?.state !== 'PREPARED' ||
-        journal.transitions[1]?.state !== 'DEFERRED' ||
-        journal.transitions[1]?.provider !== 'policy' || !validHash(journal.transitions[1]?.resultDigest)) {
-      throw denied('This action is not an exact original policy-deferred, never-dispatched recovery candidate.');
+    const originalPolicyDeferral = receipt?.risk === 'external' && journal.risk === 'external'
+      && journal.state === 'DEFERRED' && journal.transitions.length === 2
+      && journal.transitions[0]?.state === 'PREPARED'
+      && journal.transitions[1]?.state === 'DEFERRED'
+      && journal.transitions[1]?.provider === 'policy' && validHash(journal.transitions[1]?.resultDigest);
+    // An original PREPARED write may be recovered only with an exact exited
+    // Windows owner process plus the original-device signed human attestation.
+    // Unbound legacy write receipts remain unreviewable; never infer dispatch
+    // absence from their journal alone.
+    const originalPreparedWrite = receipt?.risk === 'write' && journal.risk === 'write'
+      && journal.state === 'PREPARED' && journal.transitions.length === 1
+      && journal.transitions[0]?.state === 'PREPARED' && receipt.ownerProcess !== undefined;
+    if (!receipt || receipt.status !== 'processing' || !receipt.ownerId
+        || receipt.actionHash !== journal.actionDigest || !validHash(receipt.authorityHash)
+        || journal.generation !== 1 || (!originalPolicyDeferral && !originalPreparedWrite)) {
+      throw denied('This action is not an exact original never-dispatched recovery candidate.');
     }
     if (receipt.ownerProcess !== undefined) {
       const owner = receipt.ownerProcess;
