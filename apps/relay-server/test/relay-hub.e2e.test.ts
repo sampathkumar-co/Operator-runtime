@@ -609,7 +609,7 @@ test('static read window stays responsive while unverified dynamic commands rema
   const heavyOne = await hub.dispatch({
     accountId: account.accountId,
     explicitDeviceId: device.deviceId,
-    requiredCapabilities: ['project.command.run'],
+    requiredCapabilities: ['computer.inspect'],
     kind: 'action',
     payload: { action: { id: 'heavy-one', capability: 'computer.inspect', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } } }
   });
