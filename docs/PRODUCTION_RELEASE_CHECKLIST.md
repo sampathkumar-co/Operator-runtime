@@ -2,7 +2,7 @@
 
 **Last reviewed:** 2026-10-12 (Asia/Kolkata)  
 **Release candidate:** [PR #295](https://github.com/sampathkumar-co/Operator-runtime/pull/295), branch `integration/p0-hardening-20261011`  
-**Latest verified source integration before this checklist update:** `5270a45c60eae64426bef039b6bca99e6450c261` (through PR #324; this documentation commit creates a newer integration head, so full exact-head CI and fresh signing must be independently reverified)  
+**Latest verified source integration before this checklist update:** `5f8e5cba7134d58db2ffdf2c596d576cab01eae8` (through PR #327; this documentation update creates a newer integration head, requiring fresh exact-head CI and source-specific signing)  
 **Release decision:** **HOLD**. No production deployment, npm publication, or replacement of protected local runtimes until all required gates are checked against a single final source commit.
 
 This is a *live execution tracker*, not a claim that any missing tests passed. Mark items `[x]` **only** after collecting reproducible evidence (commit SHA, exact command/run, machine, test outcome, time). Every subsequent project change should update this checklist and report the changed lines/checkmarks to the user. An already-green CI run on a predecessor commit is not certification of a newer head.
@@ -16,7 +16,9 @@ This section records the **integration branch**, not a released artifact or upda
 - [x] [#323](https://github.com/sampathkumar-co/Operator-runtime/pull/323) bounded synthetic visual diagnostics, merge `07ae9e9a29c121b909f25f70e5120d4d0dcd1d41`; no claim of GKKTT227 physical UI certification from CI.
 - [x] [#314](https://github.com/sampathkumar-co/Operator-runtime/pull/314) npm compiled source-root CI trigger coverage, merge `070ad2106f8e7677d3888e9edfb3a11b2601c6a3`.
 - [x] [#324](https://github.com/sampathkumar-co/Operator-runtime/pull/324) four real independent operating-system writers to one optimizer file, 24 unique receipt outcomes and exact 24-count idempotent retry recovery, five exact-head CI workflow families successful; merge `5270a45c60eae64426bef039b6bca99e6450c261`. No deployed cross-host witness or full #157 closure.
-- [ ] [#325](https://github.com/sampathkumar-co/Operator-runtime/pull/325) six-child detached Windows native Job Object burst under abrupt supervisor termination: separate PR, exact-head CI/review pending at this checkpoint. Do not merge based solely on prior source.
+- [x] [#325](https://github.com/sampathkumar-co/Operator-runtime/pull/325) six-child detached Windows native Job Object burst under abrupt supervisor termination: six exact-head GitHub workflow families SUCCESS, including native Job Object stress repeated five times; merged into P0 integration at `0c2b7f56250352b95a2224e38bb5817b5c7bbe85`. Codex review unavailable due to usage limits; no independent human release signoff claimed.
+- [x] [#327](https://github.com/sampathkumar-co/Operator-runtime/pull/327) denied-approval durable browser-style action retry/recovery-token regression: five exact-head workflow families SUCCESS including the actual test on Windows/macOS/Linux; merged into P0 integration at `5f8e5cba7134d58db2ffdf2c596d576cab01eae8`. Synthetic localhost only, NOT hosted/physical #251 certification.
+
 - [ ] **Requalify final exact-source build and signing** after the last integration change. Historical package attestations **cannot** be carried forward to this newer commit.
 - [ ] **External release acceptance:** #146/#151/#157/#192/#251/#279/#293 continue to require independent real-host/cross-host, external provider signer and ledger, rollback witness, installed/hosted authorization parity or recovery certification as individually specified. No protected runtime changes, npm stable promotion or production main merge are authorized by these GitHub-only test changes.
 
