@@ -267,6 +267,69 @@ test('an explicitly approved session authorizes direct and durable Chrome-style 
   assert.equal(provider.operateCalls, 2);
 });
 
+test('revoking the live session grant fails closed for new direct and durable Chrome-style operations', async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-p0-revoked-session-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const provider = new TabProvider();
+  const runtime = new OperatorRuntime().register(provider);
+  const tasks = new TaskStore(state);
+  const approvals = new ApprovalStore(state);
+  const sessionApprovals = new SessionApprovalStore();
+  const permissions = { allowedCapabilities: ['app.inspect', 'app.operate'], allowedRoots: [],
+    allowExternalWrites: false, allowDestructive: false, allowSystemChanges: false };
+  const taskOrchestrator = new TaskOrchestrator({ runtime, store: tasks, permissions });
+  const agent = createLocalAgentServer({
+    runtime, token: 'j'.repeat(64), approvals, sessionApprovals,
+    permissions, tasks, taskOrchestrator, inlineApprovalWaitMs: 10
+  });
+  t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
+  const { port } = await agent.listen('127.0.0.1', 0);
+  const base = 'http://127.0.0.1:' + port;
+  const headers = { authorization: 'Bearer ' + 'j'.repeat(64), 'content-type': 'application/json' };
+  const authority = { accountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    deviceId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', generation: 7 };
+  const selector = { automationId: 'chrome-tab-2', controlType: 'TabItem', processId: 77 };
+  const approvedAction: ActionRequest = {
+    id: 'revocation-session-grant', capability: 'app.operate', risk: 'external',
+    input: { operation: 'select', selector }, provenance: { kind: 'chatgpt' }
+  };
+  const pending = await approvals.register(approvedAction, authority);
+  const approved = await approvals.approve(approvedAction.id, pending.approvalRequestId);
+  sessionApprovals.grant(approved, permissions);
+  assert.equal(sessionApprovals.summary().active, true);
+  const directRequest = (id: string) => fetch(base + '/v1/execute', {
+    method: 'POST', headers, body: JSON.stringify({ action: {
+      ...approvedAction, id
+    }, approvalAuthority: authority })
+  });
+  const permitted = await directRequest('direct-before-revoke');
+  assert.equal(permitted.status, 200, JSON.stringify(await permitted.clone().json()));
+  assert.equal(provider.operateCalls, 1, 'granted session must allow one direct provider dispatch');
+
+  sessionApprovals.clear();
+  assert.equal(sessionApprovals.summary().active, false);
+  const denied = await directRequest('direct-after-revoke');
+  assert.equal(denied.status, 409);
+  assert.equal((await denied.json() as any).error.code, 'APPROVAL_REQUIRED');
+  assert.equal(provider.operateCalls, 1, 'revocation must stop new direct side effects');
+
+  const submitted = await fetch(base + '/v1/tasks', {
+    method: 'POST', headers, body: JSON.stringify({
+      objective: 'Select Chrome tab after session grant revocation', run: true,
+      approvalAuthority: authority, successConditions: ['tab selection verified'],
+      goal: { kind: 'app-operation', operation: 'select', selector }
+    })
+  });
+  const task = await submitted.json() as any;
+  assert.equal(submitted.status, 200, JSON.stringify(task));
+  assert.equal(task.task.state, 'BLOCKED', 'revocation must block new durable tasks too');
+  assert.equal(provider.operateCalls, 1, 'revoked session must not authorize task provider dispatch');
+  const blocked = task.task.execution.records.find((record: any) => record.state === 'BLOCKED');
+  assert.equal(blocked.capability, 'app.operate');
+  assert.equal((await approvals.list()).some(item => item.actionId === blocked.actionId
+    && item.status === 'pending'), true, 'revoked authority still requires a new explicit decision');
+});
+
 test('relay direct app-operation returns a terminal no-dispatch approval result before upstream timeout', async t => {
   const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-approval-deadline-'));
   t.after(() => fs.rm(state, { recursive: true, force: true }));
