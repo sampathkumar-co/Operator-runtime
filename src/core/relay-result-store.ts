@@ -11,6 +11,8 @@ const MAX_RESULTS_PER_STREAM = 10_000;
 const MAX_RESULT_BYTES = 256 * 1024;
 const DEFAULT_RETENTION_MS = 24 * 60 * 60_000;
 const MAX_RETENTION_MS = 30 * 24 * 60 * 60_000;
+const MAX_WAITERS = 20_000;
+const WAIT_FALLBACK_POLL_MS = 50;
 
 type JsonObject = Record<string, unknown>;
 
@@ -35,6 +37,8 @@ export class RelayResultStore {
   #retentionMs: number;
   #shared?: ControlPlaneStore;
   #sharedNamespace: string;
+  #waiters = new Map<string, Set<(result: StoredRelayResult) => void>>();
+  #waiterCount = 0;
 
   constructor(stateDir: string, options: { clock?: () => Date; retentionMs?: number; sharedStore?: ControlPlaneStore; sharedNamespace?: string } = {}) {
     this.#file = path.join(path.resolve(stateDir), 'relay-results.json');
@@ -53,7 +57,7 @@ export class RelayResultStore {
     if (replayAuthority && !idempotencyKey) throw new OperatorError('RELAY_RESULT_AUTHORITY_INVALID', 'Replay authority requires an idempotency key.');
     const result = safeResult(resultInput);
     const resultSha256 = hashResult(result);
-    return await this.#mutate((state) => {
+    const stored = await this.#mutate((state) => {
       pruneExpired(state, this.#clock().getTime(), this.#retentionMs);
       let stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
       if (!stream) {
@@ -83,6 +87,8 @@ export class RelayResultStore {
       stream.results.sort((a, b) => a.seq - b.seq);
       return { result: clone(stored), duplicate: false };
     });
+    this.#notify(deviceId, seq, stored.result);
+    return stored;
   }
 
   async get(deviceIdInput: string, seqInput: number): Promise<StoredRelayResult | null> {
@@ -92,6 +98,56 @@ export class RelayResultStore {
     const result = state.streams.find((stream) => stream.deviceId === deviceId)?.results.find((entry) => entry.seq === seq);
     if (!result || result.consumedAt || isExpired(result, this.#clock().getTime(), this.#retentionMs)) return null;
     return clone(result);
+  }
+
+  async waitFor(deviceIdInput: string, seqInput: number, deliveryIdInput: string, timeoutMsInput: number, signal?: AbortSignal): Promise<StoredRelayResult | null> {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    const seq = validSeq(seqInput);
+    const deliveryId = validUuid(deliveryIdInput, 'deliveryId');
+    const timeoutMs = Number(timeoutMsInput);
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 10 * 60_000) {
+      throw new OperatorError('RELAY_RESULT_WAIT_INVALID', 'Relay result wait must be between 0 and 600000 ms.');
+    }
+    if (signal?.aborted) return null;
+    if (this.#waiterCount >= MAX_WAITERS) throw new OperatorError('RELAY_RESULT_WAITER_LIMIT', 'Relay result waiter limit reached.', { retryable: true });
+    const key = `${deviceId}:${seq}`;
+    return await new Promise<StoredRelayResult | null>((resolve, reject) => {
+      let settled = false;
+      const finish = (result: StoredRelayResult | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        clearInterval(poller);
+        signal?.removeEventListener('abort', aborted);
+        const listeners = this.#waiters.get(key);
+        if (listeners?.delete(notified)) this.#waiterCount--;
+        if (listeners?.size === 0) this.#waiters.delete(key);
+        resolve(result?.deliveryId === deliveryId ? clone(result) : null);
+      };
+      const failed = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        clearInterval(poller);
+        signal?.removeEventListener('abort', aborted);
+        const listeners = this.#waiters.get(key);
+        if (listeners?.delete(notified)) this.#waiterCount--;
+        if (listeners?.size === 0) this.#waiters.delete(key);
+        reject(error);
+      };
+      const notified = (result: StoredRelayResult) => finish(result);
+      const aborted = () => finish(null);
+      const listeners = this.#waiters.get(key) ?? new Set();
+      listeners.add(notified);
+      this.#waiters.set(key, listeners);
+      this.#waiterCount++;
+      const timer = setTimeout(() => finish(null), timeoutMs);
+      const poller = setInterval(() => { void this.get(deviceId, seq).then((result) => { if (result) finish(result); }, failed); }, WAIT_FALLBACK_POLL_MS);
+      timer.unref();
+      poller.unref();
+      signal?.addEventListener('abort', aborted, { once: true });
+      void this.get(deviceId, seq).then((result) => { if (result) finish(result); }, failed);
+    });
   }
 
   async findByIdempotencyKey(idempotencyKeyInput: string): Promise<{ deviceId: string; result: StoredRelayResult } | null> {
@@ -207,6 +263,10 @@ export class RelayResultStore {
     } finally {
       release();
     }
+  }
+
+  #notify(deviceId: string, seq: number, result: StoredRelayResult): void {
+    for (const listener of [...(this.#waiters.get(`${deviceId}:${seq}`) ?? [])]) listener(result);
   }
 
   async #readShared(): Promise<{
