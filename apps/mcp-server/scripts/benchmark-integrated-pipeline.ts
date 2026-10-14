@@ -28,7 +28,13 @@ const CONTROL_TOKEN = 'isolated-relay-control-token-0123456789abcdef';
 const AGENT_TOKEN = 'a'.repeat(64);
 const INTERNAL_TOKEN = 'r'.repeat(64);
 const repetitions = boundedInt(process.env.MECORD_BENCH_REPS, 1000, 1, 10_000);
-const concurrencyRuns = parseConcurrency(process.env.MECORD_BENCH_CONCURRENCY ?? '1,5,10,25,50,100');
+const requestedConcurrency = parseConcurrency(process.env.MECORD_BENCH_CONCURRENCY ?? '1,5,10,25,50,100');
+const concurrencyRuns = requestedConcurrency.filter((value) => value <= 16);
+const unsupportedConcurrency = requestedConcurrency.filter((value) => value > 16).map((value) => ({
+  concurrency: value,
+  tested: false,
+  reason: 'exceeds the relay result service bounded 16-read out-of-order persistence window'
+}));
 const concurrencySamples = boundedInt(process.env.MECORD_BENCH_CONCURRENCY_SAMPLES, 100, 1, 10_000);
 const sourceSha = sourceIdentity();
 const runId = new Date().toISOString().replace(/[:.]/g, '-');
@@ -156,6 +162,9 @@ try {
   assert.notEqual(warmup.isError, true, 'warmup computer.inspect failed');
 
   const sequential = await executeBatch(client, repetitions, 1);
+  await fs.writeFile(path.join(outputDir, 'sequential-checkpoint.json'), `${JSON.stringify({
+    schemaVersion: 1, sourceSha, generatedAt: new Date().toISOString(), sequential
+  }, null, 2)}\n`, { mode: 0o600 });
   const concurrency: Record<string, BatchResult> = {};
   for (const width of concurrencyRuns) concurrency[String(width)] = await executeBatch(client, concurrencySamples, width);
 
@@ -184,13 +193,14 @@ try {
     environment: 'isolated source-matched loopback staging; no production credentials or state',
     sequential,
     concurrency,
+    unsupportedConcurrency,
     tracing: { retainedSpans: allSpans.length, droppedSpans: stageReport.droppedSpans },
     stageReport
   };
   await fs.writeFile(path.join(outputDir, 'benchmark-results.json'), `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
   await fs.writeFile(path.join(outputDir, 'benchmark-stage-latency.csv'), stageCsv(stageReport.stages), { mode: 0o600 });
   process.stdout.write(`MECORD_INTEGRATED_BENCHMARK_DIR=${outputDir}\n`);
-  process.stdout.write(`MECORD_INTEGRATED_SUMMARY=${JSON.stringify({ sourceSha, sequential: withoutSamples(sequential), concurrency: Object.fromEntries(Object.entries(concurrency).map(([key, value]) => [key, withoutSamples(value)])), retainedSpans: allSpans.length, droppedSpans: stageReport.droppedSpans })}\n`);
+  process.stdout.write(`MECORD_INTEGRATED_SUMMARY=${JSON.stringify({ sourceSha, sequential: withoutSamples(sequential), concurrency: Object.fromEntries(Object.entries(concurrency).map(([key, value]) => [key, withoutSamples(value)])), unsupportedConcurrency, retainedSpans: allSpans.length, droppedSpans: stageReport.droppedSpans })}\n`);
 } finally {
   if (client) await client.close().catch(() => undefined);
   if (mcp) await stopChild(mcp);
