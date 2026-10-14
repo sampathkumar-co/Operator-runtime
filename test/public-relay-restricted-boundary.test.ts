@@ -1227,7 +1227,7 @@ test('uncertain write returns explicit durable unknown outcome without replay or
   assert.equal(JSON.stringify(outcome).includes(writeAction.input.content), false);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json',), 'utf8')),
     { version: 1, lastAckedServerSeq: 1 });
-  assert.equal((await new LocalActionExecutionStore(stateDir).lookup(writeAction)).status, 'processing',
+  assert.equal((await new LocalActionExecutionStore(stateDir).lookup(writeAction, writeAuthority)).status, 'processing',
     'UNKNOWN relay response cannot erase or falsely complete the local write receipt');
   assert.equal(await new RelayResultStore(path.join(stateDir, 'relay-outbox')).has(
     (await identity.loadExisting())!.deviceId, 1, deliveryId
