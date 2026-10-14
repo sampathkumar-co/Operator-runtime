@@ -13,28 +13,33 @@ function value(input,pattern,code='ORIGIN_INVALID') {
   if (typeof input !== 'string' || !pattern.test(input)) fail(code);
   return input;
 }
+function canonicalUuid(input,code='ORIGIN_INVALID') {
+  const uuid=value(input,UUID,code);
+  if(uuid!==uuid.toLowerCase()) fail(code);
+  return uuid;
+}
 function timestamp(input) {
   if (typeof input !== 'string' || !Number.isFinite(Date.parse(input))
     || new Date(input).toISOString() !== input) fail('ORIGIN_TIME_INVALID');
   return Date.parse(input);
 }
 export function stableMissionId(programId,targetKey) {
-  value(programId,UUID);value(targetKey,LABEL);
+  canonicalUuid(programId);value(targetKey,LABEL);
   const bytes = crypto.createHash('sha256').update('organization-mission\0'+programId+'\0'+targetKey,'utf8').digest().subarray(0,16);
   bytes[6] = (bytes[6] & 15) | 80; bytes[8] = (bytes[8] & 63) | 128;
   const h = bytes.toString('hex');
   return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);
 }
 export function quarantineIntentId(programId,returnedMissionId) {
-  value(programId,UUID);value(returnedMissionId,UUID);
+  canonicalUuid(programId);canonicalUuid(returnedMissionId);
   return 'organization:'+crypto.createHash('sha256')
     .update(programId+'\0reconcile-untrusted-team-identity\0'+returnedMissionId,'utf8').digest('hex');
 }
 export function validateQuery(input) {
   if (!exactKeys(input,['programId','targetKey','returnedMissionId'])) fail('REQUEST_INVALID');
   const {programId,targetKey,returnedMissionId}=input;
-  value(programId,UUID,'REQUEST_INVALID');value(targetKey,LABEL,'REQUEST_INVALID');
-  value(returnedMissionId,UUID,'REQUEST_INVALID');
+  canonicalUuid(programId,'REQUEST_INVALID');value(targetKey,LABEL,'REQUEST_INVALID');
+  canonicalUuid(returnedMissionId,'REQUEST_INVALID');
   return {programId,targetKey,returnedMissionId};
 }
 export function authenticateToken(provided,expected) {
@@ -60,8 +65,8 @@ export function signFromVerifiedObservation({query,challenge,originResponse,orig
     || r.intentId !== quarantineIntentId(request.programId,request.returnedMissionId))
     fail('ORIGIN_BINDING_MISMATCH');
   if (!CLASSIFICATIONS.has(r.classification)) fail('ORIGIN_CLASSIFICATION_INVALID');
-  value(r.evidenceDigest,HEX);value(r.providerDeviceId,UUID);
-  value(r.providerProcessId,LABEL);value(r.providerSessionId,UUID);
+  value(r.evidenceDigest,HEX);canonicalUuid(r.providerDeviceId);
+  value(r.providerProcessId,LABEL);canonicalUuid(r.providerSessionId);
   if (!Number.isSafeInteger(r.authorityGeneration) || r.authorityGeneration < 1) fail('ORIGIN_INVALID');
   const issued=timestamp(r.observedAt),expires=timestamp(r.validUntil),clock=now.getTime();
   if (issued > clock || clock-issued > 30000 || expires <= clock || expires-issued > 60000) fail('ORIGIN_STALE');
