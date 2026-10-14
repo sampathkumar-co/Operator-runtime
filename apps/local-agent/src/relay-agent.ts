@@ -166,15 +166,20 @@ export class LocalAgentRelayRunner {
       // The server confirms the current authority before this new response
       // can retire the stranded relay cursor.
       await this.#assertFreshDeliveryAuthority(delivery);
-      if (recovered.state === 'missing') {
-        // If the prior crash occurred before the local execution receipt was
-        // created, atomically fence this same action identity as processing.
-        // Otherwise, expiry or a later explicit re-submission could execute
-        // the action again after the relay has reported UNKNOWN. This call
-        // writes ONLY a protected receipt; it never executes the provider.
-        const action = validateRemoteAction(delivery.payload.action);
-        const authority = validateApprovalAuthority(delivery.payload.approvalAuthority);
-        await this.#mutationReceipts.begin(action, authority);
+      // "processing" is not proof that a receipt exists: a timed-out HTTP
+      // lookup may have stalled BEFORE the local receipt-store begin(). Use
+      // the exact shared durable-state lock to establish a replay fence for
+      // EVERY non-completed mutation (missing OR processing) before sending
+      // terminal UNKNOWN. If an exact completed receipt won that race, return
+      // its authoritative result rather than inventing uncertainty.
+      const action = validateRemoteAction(delivery.payload.action);
+      const authority = validateApprovalAuthority(delivery.payload.approvalAuthority);
+      const receipt = await this.#mutationReceipts.begin(action, authority);
+      if (receipt.status === 'completed') {
+        const safe = boundedResult(receipt.result);
+        await this.#outbox.put(identity.deviceId, seq, deliveryId, safe);
+        await this.#submitResultWithRetry(seq, deliveryId, safe);
+        return 'ack';
       }
       await this.#outbox.put(identity.deviceId, seq, deliveryId, uncertain);
       await this.#submitResultWithRetry(seq, deliveryId, uncertain);
