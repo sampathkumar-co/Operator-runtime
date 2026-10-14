@@ -279,7 +279,7 @@ test('revoking the live session grant fails closed for new direct and durable Ch
     allowExternalWrites: false, allowDestructive: false, allowSystemChanges: false };
   const taskOrchestrator = new TaskOrchestrator({ runtime, store: tasks, permissions });
   const agent = createLocalAgentServer({
-    runtime, token: 'j'.repeat(64), approvals, sessionApprovals,
+    runtime, token: 'j'.repeat(64), recoveryToken: 'k'.repeat(64), approvals, sessionApprovals,
     permissions, tasks, taskOrchestrator, inlineApprovalWaitMs: 10
   });
   t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
@@ -306,7 +306,19 @@ test('revoking the live session grant fails closed for new direct and durable Ch
   assert.equal(permitted.status, 200, JSON.stringify(await permitted.clone().json()));
   assert.equal(provider.operateCalls, 1, 'granted session must allow one direct provider dispatch');
 
-  sessionApprovals.clear();
+  const unauthorizedRevoke = await fetch(base + '/v1/session-approval', {
+    method: 'DELETE', headers: { ...headers, 'x-operator-recovery-token': 'wrong-token' }
+  });
+  assert.equal(unauthorizedRevoke.status, 401, 'invalid recovery authority must not revoke');
+  assert.equal(sessionApprovals.summary().active, true);
+  const revoke = await fetch(base + '/v1/session-approval', {
+    method: 'DELETE', headers: { ...headers, 'x-operator-recovery-token': 'k'.repeat(64) }
+  });
+  assert.equal(revoke.status, 200, JSON.stringify(await revoke.clone().json()));
+  assert.equal((await revoke.json() as any).session.active, false);
+  const stateAfterRevoke = await fetch(base + '/v1/session-approval', { headers });
+  assert.equal(stateAfterRevoke.status, 200);
+  assert.equal((await stateAfterRevoke.json() as any).session.active, false);
   assert.equal(sessionApprovals.summary().active, false);
   const denied = await directRequest('direct-after-revoke');
   assert.equal(denied.status, 409);
