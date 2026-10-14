@@ -32,6 +32,7 @@ const maxBody = 16 * 1024;
 const pairAttempts = new Map();
 const pairing = createPairingService();
 const accountSessions = new Map();
+const browserFlows = new Map();
 const accountSessionLifetimeMs = 10 * 60_000;
 const accountSessionLimit = 512;
 const publicOrigin = 'https://auth.splcart.in';
@@ -43,6 +44,29 @@ const accountListUrl = new URL('/pair/api/devices', relayClaimUrl).toString();
 const accountRemoveUrl = new URL('/pair/api/devices/remove', relayClaimUrl).toString();
 
 function sessionHash(token) { return createHash('sha256').update(token).digest('hex'); }
+function rawCookie(req, name) {
+  const pair = String(req.headers.cookie || '').split(';').map(s => s.trim()).find(s => s.startsWith(name + '='));
+  return pair ? pair.slice(name.length + 1) : '';
+}
+function browserFlowCookie(nonce, maxAge) {
+  return 'mecord_flow=' + nonce + '; Path=/pair/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=' + maxAge;
+}
+function bindBrowserFlow(state) {
+  const now = Date.now();
+  for (const [key, entry] of browserFlows) if (entry.expiresAt <= now) browserFlows.delete(key);
+  while (browserFlows.size >= 512) browserFlows.delete(browserFlows.keys().next().value);
+  const nonce = randomBytes(32).toString('base64url');
+  browserFlows.set(state, { nonceHash: sessionHash(nonce), expiresAt: now + 10 * 60_000 });
+  return nonce;
+}
+function consumeBrowserFlow(req, state) {
+  const record = browserFlows.get(state);
+  browserFlows.delete(state);
+  const nonce = rawCookie(req, 'mecord_flow');
+  if (!record || record.expiresAt <= Date.now() || !/^[A-Za-z0-9_-]{43}$/.test(nonce)) return false;
+  const actual = Buffer.from(sessionHash(nonce), 'hex'), expected = Buffer.from(record.nonceHash, 'hex');
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
 function pruneAccountSessions() {
   for (const [key, item] of accountSessions) if (item.expiresAt <= Date.now()) accountSessions.delete(key);
   while (accountSessions.size >= accountSessionLimit) accountSessions.delete(accountSessions.keys().next().value);
@@ -613,7 +637,9 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && requestURL.pathname === '/account/start') {
       if (!pairRateAllowed(clientIp(req))) return send(res, 429, { ok: false, error: 'Too many authorization attempts. Try again later.' });
       const started = pairing.startManagement();
-      return redirect(res, started.authorizationUrl);
+      const state = new URL(started.authorizationUrl).searchParams.get('state');
+      const nonce = bindBrowserFlow(state);
+      return redirect(res, started.authorizationUrl, browserFlowCookie(nonce, 600));
     }
     if (req.method === 'GET' && requestURL.pathname === '/account/api/session') {
       const session = currentAccountSession(req);
@@ -670,11 +696,17 @@ const server = createServer(async (req, res) => {
       const code = requestURL.searchParams.get('code');
       const state = requestURL.searchParams.get('state');
       if (oauthError || !code || !state) return send(res, 400, pairResultPage(false), 'text/html; charset=utf-8');
+      if (pairing.pendingKind(state) === 'management' && !consumeBrowserFlow(req, state)) {
+        return send(res, 400, pairResultPage(false), 'text/html; charset=utf-8', { 'set-cookie': browserFlowCookie('', 0) });
+      }
       try {
         const completed = await pairing.complete({ code, state });
         if (completed.status === 'management') {
           const session = newAccountSession(completed.accessToken, completed.expiresIn);
-          return redirect(res, '/account', accountCookie(session.token, Math.max(1, Math.floor((session.expiresAt - Date.now()) / 1000))));
+          return redirect(res, '/account', [
+            accountCookie(session.token, Math.max(1, Math.floor((session.expiresAt - Date.now()) / 1000))),
+            browserFlowCookie('', 0)
+          ]);
         }
         return send(res, 200, pairResultPage(true), 'text/html; charset=utf-8');
       } catch (error) {

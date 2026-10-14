@@ -156,5 +156,5 @@ export function createPairingService(options = {}) {
     return { status: 'claimed', userCode: entry.userCode, makeDefault: entry.makeDefault };
   }
 
-  return { start, startManagement, complete, pendingCount: () => pending.size };
+  return { start, startManagement, complete, pendingKind: state => pending.get(state)?.kind ?? null, pendingCount: () => pending.size };
 }

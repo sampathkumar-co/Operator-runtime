@@ -234,6 +234,9 @@ test('account management rejects unauthenticated listing and removal and starts 
     const authUrl = new URL(String(start.headers.get('location')));
     assert.equal(authUrl.searchParams.get('code_challenge_method'), 'S256');
     assert.ok(authUrl.searchParams.get('state'));
+    assert.match(String(start.headers.get('set-cookie')), /mecord_flow=/);
+    const forged = await fetch(`${origin}/pair/callback?code=forged&state=${encodeURIComponent(String(authUrl.searchParams.get('state')))}`, { redirect: 'manual' });
+    assert.equal(forged.status, 400);
     const status = await (await fetch(`${origin}/account/api/session`)).json() as any;
     assert.equal(status.active, false);
     assert.equal((await fetch(`${origin}/account/api/devices`)).status, 401);
