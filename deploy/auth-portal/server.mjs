@@ -317,12 +317,14 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
 .msg{min-height:22px;margin-top:12px;font-size:13px;line-height:1.4}.ok{color:#85dfa7}.bad{color:#ffaaaa}
 .consent-list{display:grid;gap:10px;margin:20px 0;padding:0;list-style:none}.consent-list li{display:flex;gap:10px;align-items:flex-start;padding:12px;border:1px solid #e2e8f0;border-radius:11px;background:#f8fafc;color:#334155;font-size:13px;line-height:1.45}.consent-list li:before{content:"✓";color:#2563eb;font-weight:850}.consent-target{margin-top:14px;padding:11px 12px;border-radius:10px;background:#eff6ff;color:#1e3a8a;font-size:12px;overflow-wrap:anywhere}
 .switch{text-align:center;margin-top:16px;color:#bbb;font-size:13px}
+.toplinks{display:flex;align-items:center;justify-content:flex-end;gap:20px;margin-bottom:22px;font-size:13px;font-weight:750;color:#2d5fd4}.toplinks a:hover{text-decoration:underline}.toplinks button:hover{text-decoration:underline}
 .footer{grid-column:2;text-align:center;color:#94a3b8;font-size:11px;margin:-38px 0 20px}
 @media(max-width:820px){body{padding:0;background:#fff}.shell{min-height:100vh;display:block;border:0;border-radius:0}.brand{display:none}.card{padding:34px 22px;min-height:calc(100vh - 48px)}.footer{grid-column:auto;margin:20px}}</style>
 </head>
 <body><main class="shell">
 <div class="brand"><div class="brand-lockup"><div class="mark">MC</div><span>Mecord Connect</span></div><div class="hero-copy"><div class="eyebrow">SECURE DEVICE BRIDGE</div><h1>Your computer, available to ChatGPT.</h1><p>Work with your authorized projects while your device permissions and local policy stay in control.</p></div><div class="hero-proof"><span>✓ Device-scoped access</span><span>✓ Local approval boundary</span><span>✓ One account, multiple devices</span></div></div>
 <section class="card">
+<div class="toplinks" aria-label="Account actions"><a href="/account">My devices</a><button id="changeAccount" class="secondary" type="button">Switch account</button></div>
 <div class="tabs">
 <button id="signInTab" class="tab active" type="button">Sign in</button>
 <button id="signUpTab" class="tab" type="button">Create account</button>
@@ -382,9 +384,21 @@ ${openSignup ? "" : '<label for="signupInvite">Registration code</label><input i
     document.querySelector('.tabs').style.display=consent?'none':'grid';
     setTimeout(()=>{ const el=byId(login?'loginUsername':'signupUsername'); if(el) el.focus(); },0);
   }
+  async function switchAccount(){
+    const button=byId('changeAccount');button.disabled=true;
+    try{
+      const r=await fetch('/api/logout',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({targetURL:'https://auth.splcart.in/signin'})});
+      if(!r.ok)throw new Error('Could not end the current sign-in session.');
+      location.replace('/signin?switched=1');
+    }catch(e){const m=byId('loginMsg');m.className='msg bad';m.textContent=e.message||'Switch account failed.';button.disabled=false;}
+  }
+  byId('changeAccount').onclick=switchAccount;
   signInTab.onclick=()=>show('signin'); signUpTab.onclick=()=>show('signup');
   byId('createInstead').onclick=()=>show('signup'); byId('signinInstead').onclick=()=>show('signin');
   if(location.pathname==='/signup') show('signup');
+  if(location.search.includes('logged_out=1')||location.search.includes('switched=1')){
+    const msg=byId('loginMsg');msg.className='msg';msg.textContent='Signed out. You can now use another account.';
+  }
   if(${openSignup})loadSignupChallenge().catch(()=>{});
   if(location.pathname==='/recover') {
     show('signin');
@@ -472,7 +486,7 @@ ${openSignup ? "" : '<label for="signupInvite">Registration code</label><input i
       byId('loginPassword').value='';
       if(redirect){ location.assign(redirect); return; }
       if(await loadOAuthConsent(false))return;
-      location.assign('/recover');
+      location.assign(activeOAuth?'/recover':'/account');
     }catch(err){
       msg.className='msg bad'; msg.textContent=(err&&err.message)||'Sign in failed.';
       byId('loginPassword').value=''; btn.disabled=false; byId('loginPassword').focus();
@@ -527,12 +541,20 @@ button{width:100%;height:48px;border:0;border-radius:10px;background:var(--brand
 <p class="help">Enter the one-time code shown by <strong>mecord-connect remote</strong>. You will authenticate with Mecord before the device is attached to your account.</p>
 <div class="notice">Pairing is single-use and short-lived. The browser never receives the relay control credential or your internal Mecord account ID.</div>
 <form id="pairForm"><label for="code">Pairing code</label><input id="code" name="code" required maxlength="9" placeholder="ABCD-2345" autocomplete="one-time-code"><div class="choice"><input id="makeDefault" type="checkbox" checked><label for="makeDefault">Use this computer as the default for requests that do not already have a project or device selection.</label></div><button id="pairButton" type="submit">Continue securely</button><div id="pairMsg" class="msg"></div></form>
-<div class="foot">Mecord Connect · Secure device enrollment</div>
+<div class="foot"><a href="/account">My devices</a> · <button id="pairSwitch" type="button" style="width:auto;height:auto;margin:0;background:transparent;color:#2563eb;padding:0;font-size:11px">Switch account</button><p>Already owned by another user? Release the computer from that account first.</p></div>
 </main>
 <script>
 (function(){
   const input=document.getElementById('code'),makeDefault=document.getElementById('makeDefault'),form=document.getElementById('pairForm'),button=document.getElementById('pairButton'),msg=document.getElementById('pairMsg');
   const q=new URLSearchParams(location.search),prefill=q.get('code');
+  document.getElementById('pairSwitch').addEventListener('click',async()=>{
+    const button=document.getElementById('pairSwitch');button.disabled=true;
+    try{
+      const r=await fetch('/api/logout',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({targetURL:'https://auth.splcart.in/signin'})});
+      if(!r.ok)throw new Error('Could not sign out.');
+      location.assign('/signin?switched=1');
+    }catch(e){msg.className='msg bad';msg.textContent=e.message||'Could not switch accounts.';button.disabled=false;}
+  });
   if(prefill)input.value=prefill;
   input.addEventListener('input',()=>{let v=input.value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,8);input.value=v.length>4?v.slice(0,4)+'-'+v.slice(4):v;});
   let starting=false;
