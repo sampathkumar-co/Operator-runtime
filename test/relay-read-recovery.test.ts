@@ -141,11 +141,11 @@ test('caller-mislabeled write cannot be treated as side-effect-free read failure
   const first = await req();
   assert.equal(first.status, 400);
   const record = await store.lookup(action as any);
-  assert.equal(record.status, 'processing', 'untrusted risk cannot finalize a potential mutation');
+  assert.equal(record.status, 'missing', 'static risk mismatch is rejected before receipt allocation');
   const duplicate = await req();
-  assert.equal(duplicate.status, 409);
-  assert.equal((await duplicate.json() as any).error.code, 'ACTION_EXECUTION_IN_PROGRESS');
-  assert.equal(executions, 1);
+  assert.equal(duplicate.status, 400);
+  assert.equal((await duplicate.json() as any).error.code, 'ACTION_RISK_MISMATCH');
+  assert.equal(executions, 0, 'risk-spoofed mutation never reaches a provider');
 });
 
 test('post-dispatch read completion failure is durably finalized rather than stranded', async (t) => {
