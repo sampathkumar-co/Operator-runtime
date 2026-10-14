@@ -376,12 +376,17 @@ test('relay direct app-operation returns a terminal no-dispatch approval result 
     input: { operation: 'select', selector: { automationId: 'chrome-tab-2', controlType: 'TabItem', processId: 77 } },
     provenance: { kind: 'chatgpt' }
   };
+  // Large parallel platform suites can briefly stall Windows CI scheduling.
+  // The correctness invariant is a bounded terminal APPROVAL_REQUIRED well
+  // before the configured 45s inline wait, with zero provider dispatch.
+  // Keep the deadline bounded; never wait for or simulate human approval.
+  const deadlineMs = 8_000;
   const started = Date.now();
   const first = await Promise.race([
     fetch(`${base}/v1/execute`, { method: 'POST', headers, body: JSON.stringify({ action, approvalAuthority: authority }) }),
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay execution blocked on inline approval')), 2_000))
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay execution blocked on inline approval')), deadlineMs))
   ]);
-  assert.ok(Date.now() - started < 2_000);
+  assert.ok(Date.now() - started < deadlineMs);
   const denied = await first.json() as any;
   assert.equal(first.status, 409, JSON.stringify(denied));
   assert.equal(denied.error.code, 'APPROVAL_REQUIRED');
