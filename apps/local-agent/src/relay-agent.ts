@@ -2,12 +2,14 @@ import path from 'node:path';
 import os from 'node:os';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { capabilityRiskRule } from '../../../src/core/capability-policy.ts';
 import { RelayClient, type RelayClientStatus, type RelayConnectionState, type RelayDelivery, type RelayExpiredRecoveryDecision, type RelayRecoveryDecision, type RelaySocketFactory } from '../../../src/core/relay-client.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import type { ActionRequest } from '../../../src/core/types.ts';
 import type { ApprovalAuthorityContext } from './approval-store.ts';
 import { containsRestrictedData } from '../../../src/core/public-restricted-data.ts';
 import { readRelaySessionTokenFile, type RelaySessionCredentialProvider } from './relay-session-credentials.ts';
+import { LocalActionExecutionStore } from './action-execution-store.ts';
 
 const MAX_RESULT_BYTES = 256 * 1024;
 const RESULT_SUBMIT_ATTEMPTS = 3;
@@ -45,6 +47,7 @@ export class LocalAgentRelayRunner {
   #client: RelayClient;
   #identity: DeviceIdentityStore;
   #outbox: RelayResultStore;
+  #mutationReceipts: LocalActionExecutionStore;
   #sessionCredentials: RelaySessionCredentialProvider;
   #resultUrl: string;
   #localAgentBaseUrl: string;
@@ -58,6 +61,7 @@ export class LocalAgentRelayRunner {
   constructor(options: LocalAgentRelayRunnerOptions) {
     this.#identity = options.identity;
     this.#outbox = new RelayResultStore(path.join(path.resolve(options.stateDir), 'relay-outbox'));
+    this.#mutationReceipts = new LocalActionExecutionStore(options.stateDir);
     const legacyFile = path.resolve(options.sessionTokenFile);
     this.#sessionCredentials = options.sessionCredentials ?? {
       forConnection: () => readRelaySessionTokenFile(legacyFile),
@@ -150,12 +154,36 @@ export class LocalAgentRelayRunner {
         await this.#submitResultWithRetry(seq, deliveryId, safe);
         return 'ack';
       }
-      // A nonmutating read with a durable in-progress receipt can be retried
-      // through the normal execution path after revalidating fresh relay
-      // authority. All side-effecting actions remain fail-closed: neither
-      // approval state nor a journal entry proves an unknown effect did not
-      // occur, so do not replay a mutation.
-      if (recovered.state === 'processing') return canRetryUncertainRelayDelivery(delivery) ? 'retry' : 'stop';
+      // Canonically read-only actions can be reissued only through the
+      // authenticated fresh-authority path. A mutation must NEVER be replayed
+      // just because its previous local receipt was missing or unfinished.
+      if (canRetryUncertainRelayDelivery(delivery)) return 'retry';
+      const uncertain = uncertainMutationRecoveryResult(delivery);
+      if (!uncertain) return 'stop';
+      // Quarantine is an explicit, non-retryable UNKNOWN outcome, not proof
+      // that the provider did not run. Keep the local processing receipt and
+      // kernel journal intact for human / provider-backed reconciliation.
+      // The server confirms the current authority before this new response
+      // can retire the stranded relay cursor.
+      await this.#assertFreshDeliveryAuthority(delivery);
+      // "processing" is not proof that a receipt exists: a timed-out HTTP
+      // lookup may have stalled BEFORE the local receipt-store begin(). Use
+      // the exact shared durable-state lock to establish a replay fence for
+      // EVERY non-completed mutation (missing OR processing) before sending
+      // terminal UNKNOWN. If an exact completed receipt won that race, return
+      // its authoritative result rather than inventing uncertainty.
+      const action = validateRemoteAction(delivery.payload.action);
+      const authority = validateApprovalAuthority(delivery.payload.approvalAuthority);
+      const receipt = await this.#mutationReceipts.begin(action, authority);
+      if (receipt.status === 'completed') {
+        const safe = boundedResult(receipt.result);
+        await this.#outbox.put(identity.deviceId, seq, deliveryId, safe);
+        await this.#submitResultWithRetry(seq, deliveryId, safe);
+        return 'ack';
+      }
+      await this.#outbox.put(identity.deviceId, seq, deliveryId, uncertain);
+      await this.#submitResultWithRetry(seq, deliveryId, uncertain);
+      return 'ack';
     }
     return delivery && canRetryUncertainRelayDelivery(delivery) ? 'retry' : 'stop';
   }
@@ -250,6 +278,40 @@ export class LocalAgentRelayRunner {
         retryable: true,
         details: { actionId: action.id, sideEffectState: 'uncertain' }
       });
+    }
+    // An ACTION_EXECUTION_* HTTP 409 may mean the local receipt was not
+    // durably finalized (including a post-dispatch reconciliation failure).
+    // It is NOT a normal completed tool error: recover exact receipt before
+    // acknowledging, especially for actions that could have changed state.
+    if (response.status === 409 && typeof body?.error?.code === 'string'
+      && body.error.code.startsWith('ACTION_EXECUTION_')) {
+      const recovered = await this.#recoverLocalActionReceipt(payload);
+      if (recovered.state === 'completed') return recovered.result;
+      throw new OperatorError('RELAY_LOCAL_EXECUTION_UNCERTAIN',
+        'Local execution returned a receipt-reconciliation error; action outcome is not confirmed.', {
+          retryable: true, details: { actionId: action.id, sideEffectState: 'uncertain' }
+        });
+    }
+    // Some read-only validations reject a request before a durable receipt is
+    // even created. Confirm the receipt is genuinely missing before returning
+    // a bounded error, rather than interpreting that HTTP 400 as uncertain
+    // execution and reconnecting forever. Never apply this rule to mutations.
+    if (response.status === 400 && action.risk === 'read' && capabilityRiskRule(action.capability) === 'read'
+      && body?.ok === false && typeof body?.error?.code === 'string'
+      && !body.error.code.startsWith('ACTION_EXECUTION_')) {
+      const recovered = await this.#recoverLocalActionReceipt(payload);
+      if (recovered.state === 'completed') return recovered.result;
+      if (recovered.state === 'missing') {
+        return boundedResult({
+          ok: false, capability: action.capability, provider: 'operator.local',
+          error: {
+            code: /^[A-Z][A-Z0-9_]{0,127}$/.test(body.error.code) ? body.error.code : 'LOCAL_READ_REJECTED',
+            message: 'Local read request was rejected before execution.',
+            retryable: false, sideEffectState: 'none'
+          },
+          evidence: [], durationMs: 0
+        });
+      }
     }
     if (publicBoundary && containsRestrictedPublicActionResult(action.capability, body)) return restrictedDataBlockedResult(action.capability);
     if (![200, 409, 423].includes(response.status)) {
@@ -497,6 +559,39 @@ function localResourceProfile() {
 
 export { readRelaySessionTokenFile } from './relay-session-credentials.ts';
 
+/**
+ * Do not confuse relay liveness with proof of successful execution. When a
+ * previous write's result cannot be reconstructed, report a durable UNKNOWN
+ * outcome to the original caller without running its provider again.
+ *
+ * This function deliberately does NOT finalize or delete the local mutation
+ * receipt. Identical action IDs stay fenced; users must inspect the original
+ * action journal before issuing a new command with the same intended effect.
+ */
+export function uncertainMutationRecoveryResult(delivery: RelayDelivery): JsonObject | null {
+  if (delivery.kind !== 'action') return null;
+  try {
+    const action = validateRemoteAction(delivery.payload.action);
+    if (action.risk === 'read' && capabilityRiskRule(action.capability) === 'read') return null;
+    return boundedResult({
+      ok: false,
+      capability: action.capability,
+      provider: 'relay.recovery',
+      error: {
+        code: 'RELAY_ACTION_OUTCOME_UNCERTAIN',
+        message: 'An earlier action may have reached its provider before the connection failed. Its outcome is unknown. The action was not replayed; review the original execution before any new mutation.',
+        retryable: false,
+        sideEffectState: 'uncertain'
+      },
+      evidence: [],
+      durationMs: 0
+    });
+  } catch {
+    // Malformed or untrusted recovery envelopes never earn an ACK.
+    return null;
+  }
+}
+
 export function canRetryUncertainRelayDelivery(delivery: RelayDelivery): boolean {
   try {
     if (delivery.kind === 'task') { validateRelayTaskRequest(delivery.payload.task); return true; }
@@ -505,7 +600,10 @@ export function canRetryUncertainRelayDelivery(delivery: RelayDelivery): boolean
       return request.operation !== 'submit' || typeof request.request.requestId === 'string';
     }
     if (delivery.kind === 'knowledge') { validateRelayKnowledgeQuery(delivery.payload.query); return true; }
-    if (delivery.kind === 'action') return validateRemoteAction(delivery.payload.action).risk === 'read';
+    if (delivery.kind === 'action') {
+      const action = validateRemoteAction(delivery.payload.action);
+      return action.risk === 'read' && capabilityRiskRule(action.capability) === 'read';
+    }
     return false;
   } catch {
     return false;

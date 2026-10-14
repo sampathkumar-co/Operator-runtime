@@ -543,7 +543,7 @@ test('stale downgraded session cannot retire work after a restored-capability se
 });
 
 
-test('read window keeps lightweight control traffic responsive beside one heavy read', { timeout: 20_000 }, async (t) => {
+test('static read window stays responsive while unverified dynamic commands remain serialized', { timeout: 20_000 }, async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-read-window-authority-');
   const deviceState = await tempDir(t, 'operator-relay-read-window-device-');
   const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
@@ -609,9 +609,9 @@ test('read window keeps lightweight control traffic responsive beside one heavy 
   const heavyOne = await hub.dispatch({
     accountId: account.accountId,
     explicitDeviceId: device.deviceId,
-    requiredCapabilities: ['project.command.run'],
+    requiredCapabilities: ['computer.inspect'],
     kind: 'action',
-    payload: { action: { id: 'heavy-one', capability: 'project.command.run', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } } }
+    payload: { action: { id: 'heavy-one', capability: 'computer.inspect', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } } }
   });
   assert.equal(heavyOne.delivery.seq, 1);
   await heavyOneSeen;
@@ -624,10 +624,13 @@ test('read window keeps lightweight control traffic responsive beside one heavy 
     payload: { action: { id: 'light-inspect', capability: 'computer.inspect', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } } }
   });
   assert.equal(light.delivery.seq, 2);
-  await Promise.race([
-    lightSeen,
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('lightweight read was starved behind heavy read')), 1_000))
+  // A static read must not starve other static reads, even while a slow
+  // operation is pending. The later dynamic command remains serialized.
+  const lightBeforeRelease = await Promise.race([
+    lightSeen.then(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100))
   ]);
+  assert.equal(lightBeforeRelease, true, 'static read control traffic must bypass a slow static read');
 
   const heavyTwo = await hub.dispatch({
     accountId: account.accountId,
@@ -645,8 +648,12 @@ test('read window keeps lightweight control traffic responsive beside one heavy 
 
   releaseHeavyOne();
   await Promise.race([
+    lightSeen,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('lightweight read did not resume after dynamic command completed')), 2_000))
+  ]);
+  await Promise.race([
     heavyTwoSeen,
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('second heavy read did not start after heavy slot cleared')), 2_000))
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('second dynamic read did not resume after first completed')), 2_000))
   ]);
   await waitFor(async () => (await hub.deliveryCursor(device.deviceId)).lastAckedSeq === 3);
   client.stop();

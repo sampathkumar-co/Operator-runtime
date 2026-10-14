@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { canRetryUncertainRelayDelivery, LocalAgentRelayRunner } from '../apps/local-agent/src/relay-agent.ts';
+import { canRetryUncertainRelayDelivery, uncertainMutationRecoveryResult, LocalAgentRelayRunner } from '../apps/local-agent/src/relay-agent.ts';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 import { LocalActionExecutionStore } from '../apps/local-agent/src/action-execution-store.ts';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
@@ -123,6 +123,8 @@ test('uncertain relay recovery retries only a validated read action when no stor
   };
   assert.equal(canRetryUncertainRelayDelivery(base), true);
   assert.equal(canRetryUncertainRelayDelivery({ ...base, payload: { action: { ...base.payload.action, risk: 'write' } } }), false);
+  assert.equal(canRetryUncertainRelayDelivery({ ...base, payload: { action: { ...base.payload.action, capability: 'file.write', risk: 'read' } } }), false,
+    'a caller-supplied read label must not authorize retry of a canonically mutating capability');
   assert.equal(canRetryUncertainRelayDelivery({ ...base, payload: { action: { ...base.payload.action, provenance: { kind: 'observed' } } } }), false);
   assert.equal(canRetryUncertainRelayDelivery({ ...base, kind: 'task.dispatch' }), false);
   const taskId = crypto.randomUUID();
@@ -218,6 +220,162 @@ for (const receiptState of ['missing', 'processing', 'revoked'] as const) {
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
   });
 }
+
+
+test('pre-receipt HTTP 400 rejection of read is ACKed without looping', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-public-pre-receipt-read-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Read Recovery PC');
+  const deliveryId = crypto.randomUUID();
+  let localHits = 0;
+  const localBase = await listen(t, async (req, res) => {
+    await readBody(req);
+    if (req.url === '/v1/action-receipt') {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: { code: 'ACTION_EXECUTION_RECEIPT_NOT_FOUND' } }));
+      return;
+    }
+    localHits += 1;
+    res.writeHead(400, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: { code: 'RESOURCE_TARGET_REQUIRED', message: 'Missing resource target' } }));
+  });
+  const resultBase = await listen(t, async (req, res) => {
+    await readBody(req);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const sessionTokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(sessionTokenFile, 'sessiontoken123456.signature123456', 'utf8');
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: { publicBoundary: true, approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 }, action: {
+      id: crypto.randomUUID(), capability: 'git.diff', risk: 'read', input: {}, provenance: { kind: 'chatgpt' }
+    } }
+  };
+  let resolveAck!: () => void;
+  const acked = new Promise<void>((resolve) => { resolveAck = resolve; });
+  const runner = new LocalAgentRelayRunner({
+    stateDir, relayUrl: 'ws://127.0.0.1:65433/device', resultUrl: `${resultBase}/v1/device-result`,
+    sessionTokenFile, identity, localAgentBaseUrl: localBase, agentToken: 'c'.repeat(64),
+    relayInternalToken: 'r'.repeat(64),
+    allowLoopbackInsecure: true, socketFactory: (url) => new ScriptedRelaySocket(url, delivery, resolveAck)
+  });
+  const running = runner.run();
+  await Promise.race([acked, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay ack timeout')), 3_000))]);
+  runner.stop();
+  await running;
+  assert.equal(localHits, 1);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
+});
+
+
+test('HTTP 409 reconciliation response is not ACKed without durable completed receipt', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-public-409-reconciliation-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Read Recovery PC');
+  const deliveryId = crypto.randomUUID();
+  let localHits = 0;
+  const authoritative = { ok: true, capability: 'git.diff', provider: 'git.native',
+    output: { files: ['authoritative'] }, evidence: [], durationMs: 1 };
+  let receiptLookups = 0;
+  const localBase = await listen(t, async (req, res) => {
+    await readBody(req);
+    if (req.url === '/v1/action-receipt') {
+      receiptLookups += 1;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, receipt: { status: 'completed', actionId: 'read-reconciled' }, result: authoritative }));
+      return;
+    }
+    localHits += 1;
+    res.writeHead(409, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: { code: 'ACTION_EXECUTION_RECONCILIATION_REQUIRED',
+      message: 'Durable completion was interrupted' } }));
+  });
+  const resultBase = await listen(t, async (req, res) => {
+    await readBody(req);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const sessionTokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(sessionTokenFile, 'sessiontoken123456.signature123456', 'utf8');
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: { publicBoundary: true, approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 }, action: {
+      id: crypto.randomUUID(), capability: 'git.diff', risk: 'read', input: {}, provenance: { kind: 'chatgpt' }
+    } }
+  };
+  let resolveAck!: () => void;
+  const acked = new Promise<void>((resolve) => { resolveAck = resolve; });
+  const runner = new LocalAgentRelayRunner({
+    stateDir, relayUrl: 'ws://127.0.0.1:65433/device', resultUrl: `${resultBase}/v1/device-result`,
+    sessionTokenFile, identity, localAgentBaseUrl: localBase, agentToken: 'c'.repeat(64),
+    relayInternalToken: 'r'.repeat(64),
+    allowLoopbackInsecure: true, socketFactory: (url) => new ScriptedRelaySocket(url, delivery, resolveAck)
+  });
+  const running = runner.run();
+  await Promise.race([acked, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay ack timeout')), 3_000))]);
+  runner.stop();
+  await running;
+  assert.equal(localHits, 1);
+  assert.equal(receiptLookups, 1, 'receipt is consulted before error response can be ACKed');
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
+});
+
+
+test('read-only processing receipt is safely retried following an interrupted relay session', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-public-processing-read-recovery-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Read Recovery PC');
+  const deliveryId = crypto.randomUUID();
+  await fs.writeFile(path.join(stateDir, 'relay-client.json'), JSON.stringify({
+    version: 1,
+    lastAckedServerSeq: 0,
+    processing: { seq: 1, id: deliveryId, startedAt: '2026-09-22T04:56:29.297Z' }
+  }, null, 2));
+  let localHits = 0;
+  const localBase = await listen(t, async (req, res) => {
+    await readBody(req);
+    if (req.url === '/v1/action-receipt') {
+      res.writeHead(202, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, receipt: { status: 'processing', actionId: 'read-recovered', startedAt: new Date().toISOString() } }));
+      return;
+    }
+    localHits += 1;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, capability: 'git.diff', provider: 'git.native', output: { files: [] }, evidence: [], durationMs: 1 }));
+  });
+  const resultBase = await listen(t, async (req, res) => {
+    await readBody(req);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const sessionTokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(sessionTokenFile, 'sessiontoken123456.signature123456', 'utf8');
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: { publicBoundary: true, approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 }, action: {
+      id: crypto.randomUUID(), capability: 'git.diff', risk: 'read', input: {}, provenance: { kind: 'chatgpt' }
+    } }
+  };
+  let resolveAck!: () => void;
+  const acked = new Promise<void>((resolve) => { resolveAck = resolve; });
+  const runner = new LocalAgentRelayRunner({
+    stateDir, relayUrl: 'ws://127.0.0.1:65433/device', resultUrl: `${resultBase}/v1/device-result`,
+    sessionTokenFile, identity, localAgentBaseUrl: localBase, agentToken: 'c'.repeat(64),
+    relayInternalToken: 'r'.repeat(64),
+    allowLoopbackInsecure: true, socketFactory: (url) => new ScriptedRelaySocket(url, delivery, resolveAck)
+  });
+  const running = runner.run();
+  await Promise.race([acked, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay ack timeout')), 10_000))]);
+  runner.stop();
+  await running;
+  assert.equal(localHits, 1);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
+});
 
 
 test('relay restart recovers a completed mutation with degraded audit evidence without replay', async (t) => {
@@ -990,4 +1148,304 @@ test('oversized local relay result is converted to a bounded non-retryable failu
   assert.equal(submitted.result?.error?.retryable, false);
   assert.match(submitted.result?.error?.message ?? '', /Do not retry automatically/);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
+});
+
+
+test('uncertain write returns explicit durable unknown outcome without replay or relay shutdown', { timeout: 20_000 }, async t => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-write-quarantine-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Write Quarantine PC');
+  const deliveryId = crypto.randomUUID();
+  const writeAction = {
+    id: crypto.randomUUID(),
+    capability: 'file.write', risk: 'write' as const,
+    input: { path: '/tmp/never-replay-write.txt', content: 'must never be dispatched' },
+    provenance: { kind: 'chatgpt' as const }
+  };
+  const writeAuthority = { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 };
+  await new LocalActionExecutionStore(stateDir).begin(writeAction, writeAuthority);
+  await fs.writeFile(path.join(stateDir, 'relay-client.json'), JSON.stringify({
+    version: 1, lastAckedServerSeq: 0,
+    processing: { seq: 1, id: deliveryId, startedAt: new Date().toISOString() }
+  }));
+  let providerCalls = 0;
+  const localBase = await listen(t, async (req, res) => {
+    await readBody(req);
+    if (req.url === '/v1/action-receipt') {
+      res.writeHead(202, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, receipt: { status: 'processing' } }));
+      return;
+    }
+    providerCalls += 1;
+    res.writeHead(500); res.end('must not execute');
+  });
+  const submitted: any[] = [];
+  const resultBase = await listen(t, async (req, res) => {
+    submitted.push(JSON.parse(await readBody(req)));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const tokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(tokenFile, 'sessiontoken123456.signature123456');
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: {
+      publicBoundary: true,
+      approvalAuthority: writeAuthority,
+      action: writeAction
+    }
+  };
+  let signalAck!: () => void;
+  const ack = new Promise<void>(resolve => { signalAck = resolve; });
+  const runner = new LocalAgentRelayRunner({
+    stateDir, relayUrl: 'ws://127.0.0.1:65433/device',
+    resultUrl: resultBase + '/v1/device-result', sessionTokenFile: tokenFile, identity,
+    localAgentBaseUrl: localBase, agentToken: 'c'.repeat(64),
+    relayInternalToken: 'r'.repeat(64),
+    allowLoopbackInsecure: true,
+    socketFactory: url => new ScriptedRelaySocket(url, delivery, signalAck)
+  });
+  const running = runner.run();
+  let watchdog: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([ack, new Promise<never>((_, reject) => {
+      watchdog = setTimeout(() => reject(new Error('quarantine ACK timed out')), 13_000);
+    })]);
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
+    runner.stop();
+    await running;
+  }
+  assert.equal(providerCalls, 0);
+  assert.equal(submitted.length, 1);
+  const outcome = submitted[0]?.result;
+  assert.equal(outcome?.ok, false);
+  assert.equal(outcome?.error?.code, 'RELAY_ACTION_OUTCOME_UNCERTAIN');
+  assert.equal(outcome?.error?.retryable, false);
+  assert.equal(outcome?.error?.sideEffectState, 'uncertain');
+  assert.equal(JSON.stringify(outcome).includes(writeAction.input.content), false);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json',), 'utf8')),
+    { version: 1, lastAckedServerSeq: 1 });
+  assert.equal((await new LocalActionExecutionStore(stateDir).lookup(writeAction, writeAuthority)).status, 'processing',
+    'UNKNOWN relay response cannot erase or falsely complete the local write receipt');
+  assert.equal(await new RelayResultStore(path.join(stateDir, 'relay-outbox')).has(
+    (await identity.loadExisting())!.deviceId, 1, deliveryId
+  ), false, 'ACK removes submitted outbox copy but not execution evidence');
+});
+
+test('quarantine rejects malformed actions and never quarantines canonical reads', () => {
+  const base = {
+    seq: 1, id: crypto.randomUUID(), kind: 'action',
+    payload: { action: {
+      id: crypto.randomUUID(), capability: 'file.read', risk: 'read',
+      input: { path: '/tmp/example' }, provenance: { kind: 'chatgpt' }
+    } }
+  } as any;
+  assert.equal(uncertainMutationRecoveryResult(base), null);
+  assert.equal(uncertainMutationRecoveryResult({ ...base, payload: { action: {
+    ...base.payload.action, risk: 'write', capability: 'file.write'
+  } } })?.error?.code, 'RELAY_ACTION_OUTCOME_UNCERTAIN');
+  assert.equal(uncertainMutationRecoveryResult({ ...base, payload: { action: {
+    ...base.payload.action, risk: 'write', provenance: { kind: 'untrusted' }
+  } } }), null);
+  assert.equal(uncertainMutationRecoveryResult({ ...base, kind: 'task' }), null);
+});
+
+
+test('quarantine refuses revoked delivery authority and does not retire the old cursor', { timeout: 12_000 }, async t => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-revoked-write-quarantine-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Revoked Write PC');
+  const deliveryId = crypto.randomUUID();
+  await fs.writeFile(path.join(stateDir, 'relay-client.json'), JSON.stringify({
+    version: 1, lastAckedServerSeq: 0,
+    processing: { seq: 1, id: deliveryId, startedAt: new Date().toISOString() }
+  }));
+  let providerCalls = 0;
+  const localBase = await listen(t, async (req, res) => {
+    await readBody(req);
+    if (req.url === '/v1/action-receipt') {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: { code: 'ACTION_EXECUTION_RECEIPT_NOT_FOUND' } }));
+      return;
+    }
+    providerCalls++;
+    res.writeHead(500); res.end('not permitted');
+  });
+  let resultCalls = 0;
+  const resultBase = await listen(t, async (req, res) => {
+    resultCalls++;
+    await readBody(req);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  }, 403);
+  const tokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(tokenFile, 'sessiontoken123456.signature123456');
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: {
+      approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 },
+      action: {
+        id: crypto.randomUUID(), capability: 'browser.navigate', risk: 'write',
+        input: { url: 'https://example.org/' }, provenance: { kind: 'chatgpt' }
+      }
+    }
+  };
+  const runner = new LocalAgentRelayRunner({
+    stateDir, relayUrl: 'ws://127.0.0.1:65433/device',
+    resultUrl: resultBase + '/v1/device-result', sessionTokenFile: tokenFile, identity,
+    localAgentBaseUrl: localBase, agentToken: 'c'.repeat(64), relayInternalToken: 'r'.repeat(64),
+    allowLoopbackInsecure: true,
+    socketFactory: url => new ScriptedRelaySocket(url, delivery, () => {
+      throw new Error('revoked delivery must never ACK');
+    })
+  });
+  try {
+    await assert.rejects(runner.run(), (err: any) => err?.code === 'RELAY_EXECUTION_AUTHORITY_UNCONFIRMED');
+  } finally {
+    runner.stop();
+  }
+  assert.equal(providerCalls, 0);
+  assert.equal(resultCalls, 0);
+  const saved = JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8'));
+  assert.equal(saved.lastAckedServerSeq, 0);
+  assert.equal(saved.processing?.id, deliveryId);
+  assert.equal((await new RelayResultStore(path.join(stateDir, 'relay-outbox')).has(
+    (await identity.loadExisting())!.deviceId, 1, deliveryId
+  )), false);
+});
+
+
+test('missing write receipt receives a permanent local replay fence before relay ACK', { timeout: 8_000 }, async t => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-quarantine-no-local-receipt-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Missing Receipt PC');
+  const deliveryId = crypto.randomUUID();
+  const action = {
+    id: crypto.randomUUID(), capability: 'browser.navigate', risk: 'write' as const,
+    input: { url: 'https://example.org/no-dispatch' }, provenance: { kind: 'chatgpt' as const }
+  };
+  await fs.writeFile(path.join(stateDir, 'relay-client.json'), JSON.stringify({
+    version: 1, lastAckedServerSeq: 0,
+    processing: { seq: 1, id: deliveryId, startedAt: new Date().toISOString() }
+  }));
+  let executed = 0;
+  const localBase = await listen(t, async (req, res) => {
+    await readBody(req);
+    if (req.url === '/v1/action-receipt') {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: { code: 'ACTION_EXECUTION_RECEIPT_NOT_FOUND' } }));
+      return;
+    }
+    executed++;
+    res.writeHead(500); res.end('provider must not execute');
+  });
+  const results: any[] = [];
+  const resultBase = await listen(t, async (req, res) => {
+    results.push(JSON.parse(await readBody(req)));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const tokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(tokenFile, 'sessiontoken123456.signature123456');
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: {
+      approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 },
+      action
+    }
+  };
+  let resolved!: () => void;
+  const ack = new Promise<void>(resolve => { resolved = resolve; });
+  const runner = new LocalAgentRelayRunner({
+    stateDir, relayUrl: 'ws://127.0.0.1:65433/device',
+    resultUrl: resultBase + '/v1/device-result', sessionTokenFile: tokenFile,
+    identity, localAgentBaseUrl: localBase, agentToken: 'c'.repeat(64),
+    relayInternalToken: 'r'.repeat(64), allowLoopbackInsecure: true,
+    socketFactory: url => new ScriptedRelaySocket(url, delivery, resolved)
+  });
+  const running = runner.run();
+  try {
+    await Promise.race([ack, new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('missing-receipt ACK timeout')), 5_000))]);
+  } finally {
+    runner.stop();
+    await running;
+  }
+  assert.equal(executed, 0);
+  assert.equal(results[0]?.result?.error?.sideEffectState, 'uncertain');
+  const persisted = await new LocalActionExecutionStore(stateDir).lookup(action as any, delivery.payload.approvalAuthority);
+  assert.equal(persisted.status, 'processing', 'the exact action is durably fenced against future replay');
+  assert.equal((await new LocalActionExecutionStore(stateDir).begin(action as any, delivery.payload.approvalAuthority)).status, 'processing');
+});
+
+
+test('timed-out receipt lookup still establishes a mutation replay fence before UNKNOWN ACK', { timeout: 16_000 }, async t => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-quarantine-timeout-receipt-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Missing Receipt PC');
+  const deliveryId = crypto.randomUUID();
+  const action = {
+    id: crypto.randomUUID(), capability: 'browser.navigate', risk: 'write' as const,
+    input: { url: 'https://example.org/no-dispatch' }, provenance: { kind: 'chatgpt' as const }
+  };
+  await fs.writeFile(path.join(stateDir, 'relay-client.json'), JSON.stringify({
+    version: 1, lastAckedServerSeq: 0,
+    processing: { seq: 1, id: deliveryId, startedAt: new Date().toISOString() }
+  }));
+  let executed = 0, receiptLookups = 0;
+  const localBase = await listen(t, async (req, res) => {
+    await readBody(req);
+    if (req.url === '/v1/action-receipt') {
+      // Simulate a durable receipt endpoint stuck before it can establish
+      // that begin() ever ran: transport timeout must not count as a fence.
+      receiptLookups++;
+      return;
+    }
+    executed++;
+    res.writeHead(500); res.end('provider must not execute');
+  });
+  const results: any[] = [];
+  const resultBase = await listen(t, async (req, res) => {
+    results.push(JSON.parse(await readBody(req)));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const tokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(tokenFile, 'sessiontoken123456.signature123456');
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: {
+      approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 },
+      action
+    }
+  };
+  let resolved!: () => void;
+  const ack = new Promise<void>(resolve => { resolved = resolve; });
+  const runner = new LocalAgentRelayRunner({
+    stateDir, relayUrl: 'ws://127.0.0.1:65433/device',
+    resultUrl: resultBase + '/v1/device-result', sessionTokenFile: tokenFile,
+    identity, localAgentBaseUrl: localBase, agentToken: 'c'.repeat(64),
+    relayInternalToken: 'r'.repeat(64), allowLoopbackInsecure: true,
+    socketFactory: url => new ScriptedRelaySocket(url, delivery, resolved)
+  });
+  const running = runner.run();
+  try {
+    await Promise.race([ack, new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('timed-out receipt ACK timeout')), 12_000))]);
+  } finally {
+    runner.stop();
+    await running;
+  }
+  assert.equal(receiptLookups > 0, true, 'receipt lookup must genuinely time out');
+  assert.equal(executed, 0);
+  assert.equal(results[0]?.result?.error?.sideEffectState, 'uncertain');
+  assert.equal(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')).lastAckedServerSeq, 1);
+  const persisted = await new LocalActionExecutionStore(stateDir).lookup(action as any, delivery.payload.approvalAuthority);
+  assert.equal(persisted.status, 'processing', 'the exact action is durably fenced against future replay');
+  assert.equal((await new LocalActionExecutionStore(stateDir).begin(action as any, delivery.payload.approvalAuthority)).status, 'processing');
 });

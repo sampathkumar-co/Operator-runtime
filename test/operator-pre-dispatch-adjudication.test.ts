@@ -229,3 +229,79 @@ test('Windows signed process-bound operator proof cannot fence a changed owner i
   }),(e:any)=>e?.code==='OPERATOR_RECOVERY_PROOF_INVALID');
   assert.equal((await journal.inspect(action.id)).state,'DEFERRED');
 });
+
+
+const preparedWriteAction = {
+  id: 'mcp-original-prepared-browser-write',
+  capability: 'browser.navigate',
+  risk: 'write' as const,
+  input: { url: 'https://example.org/recovery-test' },
+  provenance: { kind: 'chatgpt' as const }
+};
+async function setupPreparedWrite(t: test.TestContext, withOwnerProcess = true) {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-prepared-write-recovery-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  await new LocalActionExecutionStore(state).begin(preparedWriteAction);
+  const journal = new ActionTransitionJournal(state);
+  await journal.prepare({
+    action: preparedWriteAction,
+    ownerKind: 'local-api',
+    ownerId: preparedWriteAction.id,
+    resourceKeys: ['browser:global']
+  });
+  const file = path.join(state, 'action-executions.json');
+  const data = JSON.parse(await fs.readFile(file, 'utf8'));
+  if (withOwnerProcess) {
+    // Deliberately impossible Windows PID: no live user process is touched.
+    data.records[0].ownerProcess = { pid: 2_000_000_000, started: 'windows-filetime:134361639345200387' };
+  } else {
+    delete data.records[0].ownerProcess;
+  }
+  await fs.writeFile(file, JSON.stringify(data));
+  return { state, journal, identity: await signer(state) };
+}
+
+test('prepared write requires signed original-device review and fences browser navigation without dispatch', async t => {
+  if (process.platform !== 'win32') { t.skip('Windows process identity and original-host attestation'); return; }
+  const { state, journal, identity } = await setupPreparedWrite(t);
+  const op = new OperatorPreDispatchAdjudicator(state, { signer: identity });
+  const c = await op.inspect(preparedWriteAction.id);
+  await assert.rejects(op.adjudicate({
+    actionId: c.actionId, caseDigest: c.caseDigest, confirmation: 'yes',
+    ownerAttestation: 'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED'
+  }), denied);
+  const result = await op.adjudicate({
+    actionId: c.actionId, caseDigest: c.caseDigest,
+    confirmation: 'AUTHORIZE-NO-REPLAY:' + c.caseDigest,
+    ownerAttestation: 'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED'
+  });
+  assert.equal(result.state, 'INTERRUPTED');
+  assert.deepEqual((await journal.inspect(preparedWriteAction.id)).transitions.map(x => x.state),
+    ['PREPARED', 'INTERRUPTED']);
+  const repaired = await new LocalActionExecutionStore(state).reconcileWithKernel(
+    preparedWriteAction, undefined, journal
+  );
+  assert.equal(repaired.status, 'completed');
+  if (repaired.status === 'completed') {
+    assert.equal(repaired.result.ok, false);
+    assert.equal(repaired.result.error?.code, 'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH');
+    assert.equal(repaired.result.error?.sideEffectState, 'none');
+  }
+  await assert.rejects(journal.markDispatched(preparedWriteAction.id, 'late-browser-provider'),
+    (e: any) => e?.code === 'ACTION_JOURNAL_TRANSITION_INVALID');
+});
+
+test('unbound prepared write cannot be operator-recovered by inferring no dispatch from journal alone', async t => {
+  const { state, identity } = await setupPreparedWrite(t, false);
+  await assert.rejects(
+    new OperatorPreDispatchAdjudicator(state, { signer: identity }).inspect(preparedWriteAction.id), denied
+  );
+});
+
+test('already dispatched browser write is never a prepared-write recovery candidate', async t => {
+  const { state, journal, identity } = await setupPreparedWrite(t);
+  await journal.markDispatched(preparedWriteAction.id, 'browser');
+  await assert.rejects(
+    new OperatorPreDispatchAdjudicator(state, { signer: identity }).inspect(preparedWriteAction.id), denied
+  );
+});

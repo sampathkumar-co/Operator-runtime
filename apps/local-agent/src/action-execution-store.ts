@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
 import { actionHash, canonicalJson } from '../../../src/core/action-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { assertCanonicalRisk, capabilityRiskRule } from '../../../src/core/capability-policy.ts';
 import { readDurableStateText, writeDurableStateText } from '../../../src/core/durable-state.ts';
 import { withDurableStateLock } from '../../../src/core/durable-state-lock.ts';
 import {
@@ -66,6 +67,13 @@ export class LocalActionExecutionStore {
     | { status: 'processing'; record: LocalActionExecutionRecord }
     | { status: 'completed'; record: LocalActionExecutionRecord; result: ActionResult }
   > {
+    // Authoritative static capability risk must be checked BEFORE persisting a
+    // receipt. Otherwise untrusted risk='write' on file.read creates permanent
+    // non-dispatchable mutation fences and eventually exhausts MAX_RECORDS.
+    // Dynamic capabilities retain conservative receipt fencing until their
+    // provider-specific canonical risk can be established.
+    const canonical = capabilityRiskRule(action.capability);
+    if (canonical !== 'dynamic') assertCanonicalRisk(action, canonical);
     const identity = executionIdentity(action, authority);
     const ownerProcess = this.#ownerProcess ?? await currentProcessInstance();
     return await this.#mutate((state) => {
@@ -73,7 +81,7 @@ export class LocalActionExecutionStore {
       const existing = state.records.find((entry) => entry.actionId === action.id);
       if (existing) {
         assertIdentity(existing, identity);
-        if (existing.risk === 'read') {
+        if (existing.risk === 'read' && capabilityRiskRule(action.capability) === 'read') {
           if (existing.status === 'processing' && existing.ownerId === this.#ownerId) {
             return { status: 'processing', record: clone(existing) };
           }
@@ -171,7 +179,7 @@ export class LocalActionExecutionStore {
     | { status: 'completed'; record: LocalActionExecutionRecord; result: ActionResult }
   > {
     const local = await this.lookup(action, authority);
-    if (local.status === 'missing' || action.risk === 'read') return local;
+    if (local.status === 'missing' || (action.risk === 'read' && capabilityRiskRule(action.capability) === 'read')) return local;
 
     let entry;
     try {
@@ -361,6 +369,12 @@ function assertIdentity(record: LocalActionExecutionRecord, identity: { actionHa
 
 function prune(state: State, now: number): void {
   state.records = state.records.filter((record) => {
+    // Unresolved writes are permanent replay fences until reconciled against
+    // the authoritative kernel journal. Dropping one after 30 days could
+    // permit an old action ID to execute twice following a relay retry.
+    // Bounded capacity intentionally fails closed instead of silently
+    // deleting unknown mutation history.
+    if (record.status === 'processing' && record.risk !== 'read') return true;
     const anchor = record.completedAt ?? record.startedAt;
     const retention = record.status === 'completed' ? COMPLETED_RETENTION_MS : UNCERTAIN_RETENTION_MS;
     return Date.parse(anchor) > now - retention;
