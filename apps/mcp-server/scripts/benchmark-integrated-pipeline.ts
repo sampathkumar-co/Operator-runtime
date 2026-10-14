@@ -316,6 +316,7 @@ function boundedInt(input: string | undefined, fallback: number, min: number, ma
 }
 
 function parseConcurrency(input: string): number[] {
+  if (!input.trim()) return [];
   const values = input.split(',').map((value) => boundedInt(value.trim(), 1, 1, 100));
   return [...new Set(values)];
 }
