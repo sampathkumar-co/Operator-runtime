@@ -32,7 +32,19 @@ async function isolated(t: test.TestContext) {
 test('independent registry processes create one exact account for one principal without lost writes', async t => {
   const { stateDir, accounts } = await isolated(t);
   const principal = { issuer: 'multi-process-issuer', subject: 'same-identity' };
-  const responses = await Promise.all(Array.from({ length: 4 }, () => execute(stateDir, 'resolve', principal)));
+  // Exclusive lock acquisition is intentionally bounded and fail-closed.
+  // Under heavily oversubscribed CI a process may report the explicitly
+  // retryable LOCK_BUSY rather than stealing the active writer's lock.
+  // Reissue the SAME idempotent principal lookup on that one error only.
+  const resolveWithBoundedRetry = async () => {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const response = await execute(stateDir, 'resolve', principal);
+      if (response.ok || response.code !== 'DURABLE_STATE_LOCK_BUSY' || attempt === 3) return response;
+      await new Promise<void>(resolve => setTimeout(resolve, (attempt + 1) * 150));
+    }
+    throw new Error('unreachable bounded registry retry');
+  };
+  const responses = await Promise.all(Array.from({ length: 4 }, () => resolveWithBoundedRetry()));
   assert.ok(responses.every(item => item.ok), JSON.stringify(responses));
   const ids = new Set(responses.map(item => item.result.accountId));
   assert.equal(ids.size, 1, 'concurrent processes must converge to a single account identity');
