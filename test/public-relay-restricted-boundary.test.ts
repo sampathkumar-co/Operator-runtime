@@ -1163,7 +1163,8 @@ test('uncertain write returns explicit durable unknown outcome without replay or
     input: { path: '/tmp/never-replay-write.txt', content: 'must never be dispatched' },
     provenance: { kind: 'chatgpt' as const }
   };
-  await new LocalActionExecutionStore(stateDir).begin(writeAction);
+  const writeAuthority = { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 };
+  await new LocalActionExecutionStore(stateDir).begin(writeAction, writeAuthority);
   await fs.writeFile(path.join(stateDir, 'relay-client.json'), JSON.stringify({
     version: 1, lastAckedServerSeq: 0,
     processing: { seq: 1, id: deliveryId, startedAt: new Date().toISOString() }
@@ -1191,7 +1192,7 @@ test('uncertain write returns explicit durable unknown outcome without replay or
     type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
     payload: {
       publicBoundary: true,
-      approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 },
+      approvalAuthority: writeAuthority,
       action: writeAction
     }
   };
