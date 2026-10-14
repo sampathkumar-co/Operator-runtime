@@ -121,3 +121,14 @@ shown in `authelia-oidc-policy.example.yml`.
 Allow `operator:developer` only for this trusted Developer connection. The
 relay independently enforces the resolved Mecord account entitlement on every
 Developer action/task dispatch.
+
+
+## Account portal 2.0: self-service device management
+
+- `/signin` and `/signup` preserve the existing Authelia first-factor authentication and registration flow.
+- `/account` opens a short-lived OAuth PKCE flow using the existing device-pairing client and audience. The resulting access token remains only in server memory, never browser JavaScript or storage. Browser access is an opaque `HttpOnly; Secure; SameSite=Lax` cookie scoped to `/account` and expires within 10 minutes or earlier when the OAuth token expires.
+- `GET /account/api/devices` and `POST /account/api/remove` call the bearer-protected public edge. Removal requires a same-origin request and per-session CSRF token; the relay independently checks the verified OAuth principal and revokes the corresponding device's existing sessions and routes.
+- `POST /account/logout` destroys the portal management cookie/session. The browser also calls Authelia `POST /api/logout` to end the web login session. Neither action silently revokes previously granted ChatGPT OAuth authorizations or other devices.
+- The reverse proxy must route `/account*` and `/signin` to the portal, and `/pair/api/devices` plus `/pair/api/devices/remove` to the bearer-authenticated public edge. Deploy proxy, relay, public edge, and portal as a coordinated release, with rollback prepared.
+- The temporary dashboard reuses the established pairing OAuth client so it does not require a new Authelia client registration. Do not expand its existing scopes; a dedicated least-privilege management client is a future hardening option.
+- Do not delete local `.operator` state to transfer ownership. Release the device from its current owning account first, then pair to the new one with a fresh code.

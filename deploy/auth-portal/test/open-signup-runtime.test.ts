@@ -221,3 +221,32 @@ test('open signup challenge exposes relative delay for clients with skewed clock
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('account management rejects unauthenticated listing and removal and starts PKCE login', async () => {
+  const dir = await fixture();
+  const { child, origin } = await startPortal({ dir });
+  try {
+    const account = await fetch(`${origin}/account`, { redirect: 'manual' });
+    assert.equal(account.status, 303);
+    assert.equal(account.headers.get('location'), '/account/start');
+    const start = await fetch(`${origin}/account/start`, { redirect: 'manual' });
+    assert.equal(start.status, 303);
+    const authUrl = new URL(String(start.headers.get('location')));
+    assert.equal(authUrl.searchParams.get('code_challenge_method'), 'S256');
+    assert.ok(authUrl.searchParams.get('state'));
+    assert.match(String(start.headers.get('set-cookie')), /mecord_flow=/);
+    const forged = await fetch(`${origin}/pair/callback?code=forged&state=${encodeURIComponent(String(authUrl.searchParams.get('state')))}`, { redirect: 'manual' });
+    assert.equal(forged.status, 400);
+    const status = await (await fetch(`${origin}/account/api/session`)).json() as any;
+    assert.equal(status.active, false);
+    assert.equal((await fetch(`${origin}/account/api/devices`)).status, 401);
+    assert.equal((await fetch(`${origin}/account/api/remove`, {
+      method: 'POST', headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ deviceId: '33333333-3333-4333-8333-333333333333' })
+    })).status, 401);
+    assert.equal((await fetch(`${origin}/account/logout`, { method: 'POST', headers: { origin } })).status, 200);
+  } finally {
+    await stopPortal(child);
+    await rm(dir, { recursive: true, force: true });
+  }
+});

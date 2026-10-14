@@ -32,3 +32,5 @@ jobs:
         run: npm ci --prefix deploy/auth-portal --no-audit --no-fund
       - name: Exercise actual signup runtime and boundaries
         run: node --experimental-strip-types --test deploy/auth-portal/test/open-signup-runtime.test.ts
+      - name: Verify OAuth pairing, device management, and portal routing
+        run: node --experimental-strip-types --test test/device-pairing-web.test.ts test/auth-portal-deployment.test.ts

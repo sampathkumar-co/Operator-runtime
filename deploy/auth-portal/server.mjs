@@ -5,6 +5,7 @@ import { isIP } from 'node:net';
 import { Algorithm, hash as argon2Hash } from '@node-rs/argon2';
 import YAML from 'yaml';
 import { createPairingService } from './pairing.mjs';
+import { accountDashboardPage } from './account-dashboard.mjs';
 
 const port = Number(process.env.PORT || 8090);
 const usersFile = process.env.PORTAL_USERS_FILE || '/data/users_database.yml';
@@ -30,9 +31,97 @@ const maxRateBuckets = 10_000;
 const maxBody = 16 * 1024;
 const pairAttempts = new Map();
 const pairing = createPairingService();
+const accountSessions = new Map();
+const browserFlows = new Map();
+const accountSessionLifetimeMs = 10 * 60_000;
+const accountSessionLimit = 512;
+const publicOrigin = 'https://auth.splcart.in';
+const relayClaimUrl = new URL(process.env.PORTAL_PAIR_CLAIM_URL || 'https://operator.splcart.in/pair/api/claim');
+if (relayClaimUrl.protocol !== 'https:' || relayClaimUrl.pathname !== '/pair/api/claim' || relayClaimUrl.username || relayClaimUrl.password || relayClaimUrl.search || relayClaimUrl.hash) {
+  throw new Error('INVALID_PORTAL_PAIR_CLAIM_URL');
+}
+const accountListUrl = new URL('/pair/api/devices', relayClaimUrl).toString();
+const accountRemoveUrl = new URL('/pair/api/devices/remove', relayClaimUrl).toString();
+
+function sessionHash(token) { return createHash('sha256').update(token).digest('hex'); }
+function rawCookie(req, name) {
+  const pair = String(req.headers.cookie || '').split(';').map(s => s.trim()).find(s => s.startsWith(name + '='));
+  return pair ? pair.slice(name.length + 1) : '';
+}
+function browserFlowCookie(nonce, maxAge) {
+  return 'mecord_flow=' + nonce + '; Path=/pair/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=' + maxAge;
+}
+function bindBrowserFlow(state) {
+  const now = Date.now();
+  for (const [key, entry] of browserFlows) if (entry.expiresAt <= now) browserFlows.delete(key);
+  while (browserFlows.size >= 512) browserFlows.delete(browserFlows.keys().next().value);
+  const nonce = randomBytes(32).toString('base64url');
+  browserFlows.set(state, { nonceHash: sessionHash(nonce), expiresAt: now + 10 * 60_000 });
+  return nonce;
+}
+function consumeBrowserFlow(req, state) {
+  const record = browserFlows.get(state);
+  browserFlows.delete(state);
+  const nonce = rawCookie(req, 'mecord_flow');
+  if (!record || record.expiresAt <= Date.now() || !/^[A-Za-z0-9_-]{43}$/.test(nonce)) return false;
+  const actual = Buffer.from(sessionHash(nonce), 'hex'), expected = Buffer.from(record.nonceHash, 'hex');
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+function pruneAccountSessions() {
+  for (const [key, item] of accountSessions) if (item.expiresAt <= Date.now()) accountSessions.delete(key);
+  while (accountSessions.size >= accountSessionLimit) accountSessions.delete(accountSessions.keys().next().value);
+}
+function newAccountSession(accessToken, expiresIn) {
+  pruneAccountSessions();
+  const token = randomBytes(32).toString('base64url');
+  const csrf = randomBytes(32).toString('base64url');
+  const expiresAt = Date.now() + Math.min(accountSessionLifetimeMs, Math.max(1, expiresIn) * 1000);
+  accountSessions.set(sessionHash(token), { accessToken, csrf, expiresAt });
+  return { token, expiresAt };
+}
+function currentAccountSession(req) {
+  const cookies = String(req.headers.cookie || '').split(';').map(s => s.trim());
+  const found = cookies.find(s => s.startsWith('mecord_account='));
+  const token = found?.slice('mecord_account='.length) ?? '';
+  if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
+  const key = sessionHash(token);
+  const record = accountSessions.get(key);
+  if (!record) return null;
+  if (record.expiresAt <= Date.now()) { accountSessions.delete(key); return null; }
+  return { ...record, key };
+}
+function accountCookie(token, maxAge) {
+  // The management token is opaque, HttpOnly and never shared with the relay API.
+  return 'mecord_account=' + token + '; Path=/account; HttpOnly; Secure; SameSite=Lax; Max-Age=' + maxAge;
+}
+function sameOriginPost(req) {
+  return req.headers.origin === (process.env.NODE_ENV === 'test' ? 'http://127.0.0.1:' + port : publicOrigin);
+}
+function accountCsrfAuthorized(req, session) {
+  return session && sameOriginPost(req) && typeof req.headers['x-mecord-csrf'] === 'string' &&
+    req.headers['x-mecord-csrf'].length === session.csrf.length &&
+    timingSafeEqual(Buffer.from(req.headers['x-mecord-csrf']), Buffer.from(session.csrf));
+}
+async function relayAccountRequest(url, token, body) {
+  const response = await fetch(url, {
+    method: body ? 'POST' : 'GET', redirect: 'error',
+    headers: { authorization: 'Bearer ' + token, accept: 'application/json', ...(body ? { 'content-type': 'application/json' } : {}) },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(15_000)
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || result?.ok !== true) {
+    return { ok: false, status: response.status === 401 ? 401 : response.status === 403 ? 403 : 503 };
+  }
+  return { ok: true, result };
+}
+function redirect(res, target, cookie) {
+  res.writeHead(303, { location: target, 'cache-control': 'no-store', ...(cookie ? { 'set-cookie': cookie } : {}) });
+  res.end();
+}
 let writeQueue = Promise.resolve();
 
-function send(res, status, body, type = 'application/json; charset=utf-8') {
+function send(res, status, body, type = 'application/json; charset=utf-8', extraHeaders = {}) {
   const payload = typeof body === 'string' ? body : JSON.stringify(body);
   res.writeHead(status, {
     'content-type': type,
@@ -40,7 +129,8 @@ function send(res, status, body, type = 'application/json; charset=utf-8') {
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
-    'x-frame-options': 'DENY'
+    'x-frame-options': 'DENY',
+    ...extraHeaders
   });
   res.end(payload);
 }
@@ -251,12 +341,14 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
 .msg{min-height:22px;margin-top:12px;font-size:13px;line-height:1.4}.ok{color:#85dfa7}.bad{color:#ffaaaa}
 .consent-list{display:grid;gap:10px;margin:20px 0;padding:0;list-style:none}.consent-list li{display:flex;gap:10px;align-items:flex-start;padding:12px;border:1px solid #e2e8f0;border-radius:11px;background:#f8fafc;color:#334155;font-size:13px;line-height:1.45}.consent-list li:before{content:"✓";color:#2563eb;font-weight:850}.consent-target{margin-top:14px;padding:11px 12px;border-radius:10px;background:#eff6ff;color:#1e3a8a;font-size:12px;overflow-wrap:anywhere}
 .switch{text-align:center;margin-top:16px;color:#bbb;font-size:13px}
+.toplinks{display:flex;align-items:center;justify-content:flex-end;gap:20px;margin-bottom:22px;font-size:13px;font-weight:750;color:#2d5fd4}.toplinks a:hover{text-decoration:underline}.toplinks button:hover{text-decoration:underline}
 .footer{grid-column:2;text-align:center;color:#94a3b8;font-size:11px;margin:-38px 0 20px}
 @media(max-width:820px){body{padding:0;background:#fff}.shell{min-height:100vh;display:block;border:0;border-radius:0}.brand{display:none}.card{padding:34px 22px;min-height:calc(100vh - 48px)}.footer{grid-column:auto;margin:20px}}</style>
 </head>
 <body><main class="shell">
 <div class="brand"><div class="brand-lockup"><div class="mark">MC</div><span>Mecord Connect</span></div><div class="hero-copy"><div class="eyebrow">SECURE DEVICE BRIDGE</div><h1>Your computer, available to ChatGPT.</h1><p>Work with your authorized projects while your device permissions and local policy stay in control.</p></div><div class="hero-proof"><span>✓ Device-scoped access</span><span>✓ Local approval boundary</span><span>✓ One account, multiple devices</span></div></div>
 <section class="card">
+<div class="toplinks" aria-label="Account actions"><a href="/account">My devices</a><button id="changeAccount" class="secondary" type="button">Switch account</button></div>
 <div class="tabs">
 <button id="signInTab" class="tab active" type="button">Sign in</button>
 <button id="signUpTab" class="tab" type="button">Create account</button>
@@ -316,9 +408,30 @@ ${openSignup ? "" : '<label for="signupInvite">Registration code</label><input i
     document.querySelector('.tabs').style.display=consent?'none':'grid';
     setTimeout(()=>{ const el=byId(login?'loginUsername':'signupUsername'); if(el) el.focus(); },0);
   }
+  async function clearDashboardSession(){
+    const session=await fetch('/account/api/session',{credentials:'same-origin',cache:'no-store'});
+    if(!session.ok)throw new Error('Could not validate account session.');
+    const data=await session.json();
+    if(!data.active)return;
+    const closed=await fetch('/account/logout',{method:'POST',credentials:'same-origin',headers:{'x-mecord-csrf':data.csrf}});
+    if(!closed.ok)throw new Error('Could not clear existing device-management session.');
+  }
+  async function switchAccount(){
+    const button=byId('changeAccount');button.disabled=true;
+    try{
+      await clearDashboardSession();
+      const r=await fetch('/api/logout',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({targetURL:'https://auth.splcart.in/signin'})});
+      if(!r.ok)throw new Error('Could not end the current sign-in session.');
+      location.replace('/signin?switched=1');
+    }catch(e){const m=byId('loginMsg');m.className='msg bad';m.textContent=e.message||'Switch account failed.';button.disabled=false;}
+  }
+  byId('changeAccount').onclick=switchAccount;
   signInTab.onclick=()=>show('signin'); signUpTab.onclick=()=>show('signup');
   byId('createInstead').onclick=()=>show('signup'); byId('signinInstead').onclick=()=>show('signin');
   if(location.pathname==='/signup') show('signup');
+  if(location.search.includes('logged_out=1')||location.search.includes('switched=1')){
+    const msg=byId('loginMsg');msg.className='msg';msg.textContent='Signed out. You can now use another account.';
+  }
   if(${openSignup})loadSignupChallenge().catch(()=>{});
   if(location.pathname==='/recover') {
     show('signin');
@@ -355,11 +468,11 @@ ${openSignup ? "" : '<label for="signupInvite">Registration code</label><input i
     if(!data||!data.client_id)return false;
     oauthConsent=data;
     const pairingClient=data.client_id==='mecord-device-pairing-v1';
-    byId('oauthConsentTitle').textContent=pairingClient?'Approve this computer':'Connect to ChatGPT';
+    byId('oauthConsentTitle').textContent=pairingClient?'Authorize Mecord access':'Connect to ChatGPT';
     byId('oauthConsentHelp').textContent=pairingClient
-      ?'Confirm this one-time request to attach the computer that opened this secure pairing flow to your Mecord account.'
+      ?'Approve access to pair or manage computers under your currently signed-in Mecord account.'
       :'Review the access requested for this Mecord Connect session.';
-    byId('oauthConsentButton').textContent=pairingClient?'Approve device':'Allow and continue';
+    byId('oauthConsentButton').textContent=pairingClient?'Continue securely':'Allow and continue';
     const list=byId('oauthConsentScopes');list.textContent='';
     for(const scope of (data.scopes||[])){
       const item=document.createElement('li');item.textContent=scopeLabels[scope]||('Grant '+scope+' access');list.appendChild(item);
@@ -406,7 +519,7 @@ ${openSignup ? "" : '<label for="signupInvite">Registration code</label><input i
       byId('loginPassword').value='';
       if(redirect){ location.assign(redirect); return; }
       if(await loadOAuthConsent(false))return;
-      location.assign('/recover');
+      location.assign(activeOAuth?'/recover':'/account');
     }catch(err){
       msg.className='msg bad'; msg.textContent=(err&&err.message)||'Sign in failed.';
       byId('loginPassword').value=''; btn.disabled=false; byId('loginPassword').focus();
@@ -461,12 +574,27 @@ button{width:100%;height:48px;border:0;border-radius:10px;background:var(--brand
 <p class="help">Enter the one-time code shown by <strong>mecord-connect remote</strong>. You will authenticate with Mecord before the device is attached to your account.</p>
 <div class="notice">Pairing is single-use and short-lived. The browser never receives the relay control credential or your internal Mecord account ID.</div>
 <form id="pairForm"><label for="code">Pairing code</label><input id="code" name="code" required maxlength="9" placeholder="ABCD-2345" autocomplete="one-time-code"><div class="choice"><input id="makeDefault" type="checkbox" checked><label for="makeDefault">Use this computer as the default for requests that do not already have a project or device selection.</label></div><button id="pairButton" type="submit">Continue securely</button><div id="pairMsg" class="msg"></div></form>
-<div class="foot">Mecord Connect · Secure device enrollment</div>
+<div class="foot"><a href="/account">My devices</a> · <button id="pairSwitch" type="button" style="width:auto;height:auto;margin:0;background:transparent;color:#2563eb;padding:0;font-size:11px">Switch account</button><p>Already owned by another user? Release the computer from that account first.</p></div>
 </main>
 <script>
 (function(){
   const input=document.getElementById('code'),makeDefault=document.getElementById('makeDefault'),form=document.getElementById('pairForm'),button=document.getElementById('pairButton'),msg=document.getElementById('pairMsg');
   const q=new URLSearchParams(location.search),prefill=q.get('code');
+  document.getElementById('pairSwitch').addEventListener('click',async()=>{
+    const button=document.getElementById('pairSwitch');button.disabled=true;
+    try{
+      const s=await fetch('/account/api/session',{credentials:'same-origin',cache:'no-store'});
+      if(!s.ok)throw new Error('Could not validate account session.');
+      const data=await s.json();
+      if(data.active){
+        const cleared=await fetch('/account/logout',{method:'POST',credentials:'same-origin',headers:{'x-mecord-csrf':data.csrf}});
+        if(!cleared.ok)throw new Error('Could not clear the previous account session.');
+      }
+      const r=await fetch('/api/logout',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({targetURL:'https://auth.splcart.in/signin'})});
+      if(!r.ok)throw new Error('Could not sign out.');
+      location.assign('/signin?switched=1');
+    }catch(e){msg.className='msg bad';msg.textContent=e.message||'Could not switch accounts.';button.disabled=false;}
+  });
   if(prefill)input.value=prefill;
   input.addEventListener('input',()=>{let v=input.value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,8);input.value=v.length>4?v.slice(0,4)+'-'+v.slice(4):v;});
   let starting=false;
@@ -488,17 +616,60 @@ function pairResultPage(success) {
   const title = success ? 'Device paired' : 'Pairing failed';
   const message = success
     ? 'This computer is now attached to your Mecord account. You can close this page and return to ChatGPT.'
-    : 'The pairing request could not be completed. Generate a fresh code with mecord-connect remote and try again.';
+    : 'Pairing failed. If this computer belongs to another account, open My Devices in that account and release it first; then generate a fresh code.';
   const tone = success ? '#15803d' : '#b91c1c';
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mecord Connect - ${title}</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f7fb;font-family:Inter,system-ui,sans-serif;color:#0f172a;padding:24px}.card{width:min(520px,100%);background:#fff;border:1px solid #e2e8f0;border-radius:22px;padding:36px;box-shadow:0 22px 70px rgba(30,41,59,.12)}.mark{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;background:#172554;color:#fff;font-weight:850;margin-bottom:24px}h1{font-size:30px;letter-spacing:-.03em;margin:0 0 10px;color:${tone}}p{color:#64748b;line-height:1.6;margin:0}.foot{margin-top:24px;color:#94a3b8;font-size:11px}</style></head><body><main class="card"><div class="mark">MC</div><h1>${title}</h1><p>${message}</p><div class="foot">Mecord Connect · Secure device enrollment</div></main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mecord Connect - ${title}</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f7fb;font-family:Inter,system-ui,sans-serif;color:#0f172a;padding:24px}.card{width:min(520px,100%);background:#fff;border:1px solid #e2e8f0;border-radius:22px;padding:36px;box-shadow:0 22px 70px rgba(30,41,59,.12)}.mark{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;background:#172554;color:#fff;font-weight:850;margin-bottom:24px}h1{font-size:30px;letter-spacing:-.03em;margin:0 0 10px;color:${tone}}p{color:#64748b;line-height:1.6;margin:0}.foot{margin-top:24px;color:#94a3b8;font-size:11px}</style></head><body><main class="card"><div class="mark">MC</div><h1>${title}</h1><p>${message}</p><div class="foot"><a href="/account">My devices</a> · <a href="/pair">Try pairing again</a></div></main></body></html>`;
 }
 
 const server = createServer(async (req, res) => {
   try {
     const requestURL = new URL(req.url || '/', 'http://portal.internal');
     const oauthEntry = (requestURL.pathname === '/' || requestURL.pathname === '/consent/openid/decision') && requestURL.searchParams.get('flow') === 'openid_connect';
-    if (req.method === 'GET' && (requestURL.pathname === '/signup' || requestURL.pathname === '/recover' || oauthEntry)) {
+    if (req.method === 'GET' && (requestURL.pathname === '/signin' || requestURL.pathname === '/signup' || requestURL.pathname === '/recover' || oauthEntry)) {
       return send(res, 200, page, 'text/html; charset=utf-8');
+    }
+    if (req.method === 'GET' && requestURL.pathname === '/account') {
+      if (!currentAccountSession(req)) return redirect(res, '/account/start');
+      return send(res, 200, accountDashboardPage, 'text/html; charset=utf-8', {
+        'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+      });
+    }
+    if (req.method === 'GET' && requestURL.pathname === '/account/start') {
+      if (!pairRateAllowed(clientIp(req))) return send(res, 429, { ok: false, error: 'Too many authorization attempts. Try again later.' });
+      const started = pairing.startManagement();
+      const state = new URL(started.authorizationUrl).searchParams.get('state');
+      const nonce = bindBrowserFlow(state);
+      return redirect(res, started.authorizationUrl, browserFlowCookie(nonce, 600));
+    }
+    if (req.method === 'GET' && requestURL.pathname === '/account/api/session') {
+      const session = currentAccountSession(req);
+      return send(res, 200, { ok: true, active: Boolean(session), ...(session ? { csrf: session.csrf } : {}) });
+    }
+    if (req.method === 'GET' && requestURL.pathname === '/account/api/devices') {
+      const session = currentAccountSession(req);
+      if (!session) return send(res, 401, { ok: false, error: 'SESSION_EXPIRED' });
+      const result = await relayAccountRequest(accountListUrl, session.accessToken);
+      if (!result.ok) return send(res, result.status, { ok: false, error: result.status === 401 ? 'SESSION_EXPIRED' : 'DEVICE_LIST_UNAVAILABLE' });
+      const devices = Array.isArray(result.result.devices) ? result.result.devices : [];
+      return send(res, 200, { ok: true, devices, csrf: session.csrf });
+    }
+    if (req.method === 'POST' && requestURL.pathname === '/account/api/remove') {
+      const session = currentAccountSession(req);
+      if (!session) return send(res, 401, { ok: false, error: 'SESSION_EXPIRED' });
+      if (!accountCsrfAuthorized(req, session)) return send(res, 403, { ok: false, error: 'REQUEST_NOT_AUTHORIZED' });
+      const payload = await readJson(req);
+      if (typeof payload?.deviceId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(payload.deviceId))
+        return send(res, 400, { ok: false, error: 'DEVICE_ID_INVALID' });
+      const result = await relayAccountRequest(accountRemoveUrl, session.accessToken, { deviceId: payload.deviceId });
+      if (!result.ok) return send(res, result.status, { ok: false, error: 'DEVICE_REMOVE_FAILED' });
+      return send(res, 200, { ok: true, status: 'removed' });
+    }
+    if (req.method === 'POST' && requestURL.pathname === '/account/logout') {
+      const session = currentAccountSession(req);
+      if (session && !accountCsrfAuthorized(req, session)) return send(res, 403, { ok: false, error: 'REQUEST_NOT_AUTHORIZED' });
+      if (!sameOriginPost(req)) return send(res, 403, { ok: false, error: 'REQUEST_NOT_AUTHORIZED' });
+      if (session) accountSessions.delete(session.key);
+      return send(res, 200, { ok: true }, 'application/json; charset=utf-8', { 'set-cookie': accountCookie('', 0) });
     }
     if (req.method === 'GET' && requestURL.pathname === '/pair') {
       return send(res, 200, pairPage, 'text/html; charset=utf-8');
@@ -525,8 +696,18 @@ const server = createServer(async (req, res) => {
       const code = requestURL.searchParams.get('code');
       const state = requestURL.searchParams.get('state');
       if (oauthError || !code || !state) return send(res, 400, pairResultPage(false), 'text/html; charset=utf-8');
+      if (pairing.pendingKind(state) === 'management' && !consumeBrowserFlow(req, state)) {
+        return send(res, 400, pairResultPage(false), 'text/html; charset=utf-8', { 'set-cookie': browserFlowCookie('', 0) });
+      }
       try {
-        await pairing.complete({ code, state });
+        const completed = await pairing.complete({ code, state });
+        if (completed.status === 'management') {
+          const session = newAccountSession(completed.accessToken, completed.expiresIn);
+          return redirect(res, '/account', [
+            accountCookie(session.token, Math.max(1, Math.floor((session.expiresAt - Date.now()) / 1000))),
+            browserFlowCookie('', 0)
+          ]);
+        }
         return send(res, 200, pairResultPage(true), 'text/html; charset=utf-8');
       } catch (error) {
         console.error('[auth-portal] pairing callback failed safely:', error instanceof Error ? error.message : 'UNKNOWN');

@@ -67,6 +67,8 @@ type Executor = {
   controlOperation(operationId: string, operation: OperationControlOperation, verificationDigest?: string): Promise<OperationTransportResult>;
   inspectKnowledge(input: KnowledgeInspectInput): Promise<KnowledgeTransportResult>;
   claimDevice?(userCode: string, makeDefault?: boolean): Promise<{ status: 'claimed' }>;
+  listAccountDevices?(): Promise<Array<{ deviceId: string; deviceName: string; addedAt: string }>>;
+  removeAccountDevice?(deviceId: string): Promise<void>;
 };
 
 export class LocalAgentClient {
@@ -117,6 +119,16 @@ export class LocalAgentClient {
 
   async inspectKnowledge(input: KnowledgeInspectInput): Promise<KnowledgeTransportResult> {
     return await this.#executor.inspectKnowledge(input);
+  }
+
+  async listAccountDevices(): Promise<Array<{ deviceId: string; deviceName: string; addedAt: string }>> {
+    if (!this.#executor.listAccountDevices) throw new Error('Account device management requires relay execution.');
+    return await this.#executor.listAccountDevices();
+  }
+
+  async removeAccountDevice(deviceId: string): Promise<void> {
+    if (!this.#executor.removeAccountDevice) throw new Error('Account device management requires relay execution.');
+    await this.#executor.removeAccountDevice(deviceId);
   }
 
   async claimDevice(userCode: string, makeDefault = false): Promise<{ status: 'claimed' }> {
