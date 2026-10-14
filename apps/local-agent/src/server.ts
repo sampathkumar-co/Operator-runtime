@@ -18,6 +18,7 @@ import { validateWorldObservation, type WorldModelStore } from '../../../src/cor
 import type { DevicePoolScheduler } from '../../../src/core/device-pool.ts';
 import type { ExecutionOptimizerStore } from '../../../src/core/execution-optimizer.ts';
 import type { OrganizationCoordinator } from '../../../src/core/organization-coordinator.ts';
+import type { SignedProviderQuarantineClaim } from '../../../src/core/organization-quarantine-adjudication.ts';
 import type { DigitalOperationsLayer, DigitalOperationSubmit } from '../../../src/core/digital-operations.ts';
 import type { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
@@ -119,6 +120,8 @@ export function createLocalAgentServer(options: {
   devicePool?: DevicePoolScheduler;
   optimizer?: ExecutionOptimizerStore;
   organizations?: OrganizationCoordinator;
+  /** Independent trusted operator verifier; validate a fresh request-bound human session, never body-claimed operatorId or bearer token alone. */
+  quarantineReviewAuthorization?: (input: { programId: string; targetKey: string; returnedMissionId: string }, request: http.IncomingMessage) => Promise<{ operatorId: string }>;
   operations?: DigitalOperationsLayer;
   events?: DurableEventRuntime;
   perception?: PerceptionGraphStore;
@@ -1470,6 +1473,60 @@ export function createLocalAgentServer(options: {
       return;
     }
 
+    // Provider classifications are evidence, NOT cancellation authority.
+    // An ordinary agent bearer token or a body-supplied operatorId can never
+    // authorize reconciliation. Deployment must supply a separately trusted
+    // scoped operator identity verifier, independent provider signature key,
+    // and rollback-protected adjudication anchor in the coordinator.
+    const quarantineReviewRoute = /^\/v1\/organizations\/([0-9a-f-]{36})\/quarantines\/review$/i.exec(pathname);
+    if (quarantineReviewRoute && req.method === 'POST') {
+      if (!options.organizations || !options.quarantineReviewAuthorization || !options.recoveryToken) {
+        send(res, 503, { ok: false, error: { code: 'QUARANTINE_REVIEW_NOT_CONFIGURED', message: 'Independent signed-provider and scoped operator review must be configured.' } });
+        return;
+      }
+      // Do not allow a remote relay action to smuggle review authority via an
+      // otherwise authorized local-agent operation.
+      if (relayRequest) {
+        send(res, 403, { ok: false, error: { code: 'QUARANTINE_REVIEW_RELAY_DENIED', message: 'Recovery review requires an independent local operator session.' } });
+        return;
+      }
+      const rawRecovery = req.headers['x-operator-recovery-token'];
+      const suppliedRecovery = Array.isArray(rawRecovery) ? undefined : rawRecovery;
+      if (!timingSafeSecretMatch(suppliedRecovery, options.recoveryToken)) {
+        send(res, 401, { ok: false, error: { code: 'RECOVERY_UNAUTHORIZED', message: 'A separate recovery authority token is required.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        if (!body || typeof body !== 'object' || Array.isArray(body) ||
+            Object.prototype.hasOwnProperty.call(body, 'operatorId') ||
+            typeof body.targetKey !== 'string' || body.targetKey.length < 1 || body.targetKey.length > 256 ||
+            typeof body.returnedMissionId !== 'string' ||
+            !body.providerClaim || typeof body.providerClaim !== 'object' || Array.isArray(body.providerClaim)) {
+          throw new OperatorError('QUARANTINE_REVIEW_INVALID', 'A signed provider claim and exact target identity are required; operatorId cannot be supplied by clients.');
+        }
+        const programId = quarantineReviewRoute[1]!;
+        const targetKey = body.targetKey;
+        const returnedMissionId = body.returnedMissionId;
+        const authorized = await options.quarantineReviewAuthorization({ programId, targetKey, returnedMissionId }, req);
+        if (!authorized || typeof authorized.operatorId !== 'string' || !authorized.operatorId.trim()) {
+          throw new OperatorError('QUARANTINE_OPERATOR_UNAUTHORIZED', 'Independent operator identity has not been verified.');
+        }
+        const decision = await options.organizations.adjudicateQuarantinedIdentity({
+          programId, targetKey, returnedMissionId, operatorId: authorized.operatorId,
+          providerClaim: body.providerClaim as SignedProviderQuarantineClaim
+        });
+        send(res, 200, { ok: true, decision });
+      } catch (error) {
+        const code = typeof (error as { code?: unknown })?.code === 'string'
+          ? (error as { code: string }).code : 'QUARANTINE_REVIEW_DENIED';
+        // Never reveal provider signing material, MAC secrets, or permission internals.
+        send(res, code === 'QUARANTINE_REVIEW_INVALID' ? 400 : 403,
+          { ok: false, error: { code, message: 'Quarantine review rejected or could not verify independent authority.' } });
+      }
+      return;
+    }
+
     if (pathname === '/v1/operations' && req.method === 'GET') {
       const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
       const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
@@ -2389,7 +2446,14 @@ export function createLocalAgentServer(options: {
         let autoResumedAfterApproval = false;
         if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED' && options.approvals) {
           const pending = await options.approvals.register(action, approvalAuthority);
-          const decision = options.recoveryToken
+          // A relay/MCP request cannot promise an inline approval window:
+          // its upstream deadline may be shorter than the local 45-second wait.
+          // If a user approves after the caller times out, a delayed mutation
+          // would strand the durable receipt and poison the relay cursor.
+          // Return APPROVAL_REQUIRED promptly, persist its no-dispatch receipt,
+          // and require a *new explicit action* after any session grant.
+          // Interactive local-only requests retain the old inline behavior.
+          const decision = options.recoveryToken && !relayRequest
             ? await waitForApprovalDecision(action.id, pending.approvalRequestId)
             : null;
           if (decision === 'deny') {

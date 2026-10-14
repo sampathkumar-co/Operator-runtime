@@ -7,28 +7,36 @@ on:
   pull_request:
     paths:
       - 'packages/mecord-connect/**'
+      - 'packages/adaptive-intelligence/src/**'
+      - 'packages/verified-plan-runtime/src/**'
       - 'apps/local-agent/**'
       - 'src/**'
       - 'native/windows-dpapi/**'
       - 'native/windows-uia/**'
       - 'native/windows-path-lease/**'
       - 'test/npm-remote-runtime.test.ts'
+      - 'scripts/verify_npm_generated_witness.py'
       - 'test/npm-policy-continuity.test.ts'
       - 'scripts/verify-npm-policy-continuity.mjs'
+      - '.gitattributes'
       - '.github/workflows/npm-remote-ci.yml'
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
+  # Push runs must never cancel one another or collide with PR verification.
+  # Only superseded PR runs may be canceled.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'push' && github.run_id || github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   windows-runtime:
     name: Windows npm runtime certification
     runs-on: windows-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -97,7 +105,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'required relay fail-closed test failed' }
 
       - name: Certify packed npm artifact
+        id: candidate
         shell: pwsh
+        env:
+          OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
           $packDir = Join-Path $env:RUNNER_TEMP 'mecrod-pack'
@@ -128,6 +139,46 @@ jobs:
             throw "packed artifact must not contain TypeScript runtime files: $($typescriptRuntime -join ', ')"
           }
           $tgz = Join-Path $packDir $pack[0].filename
+          $runtimeManifestPath = 'packages/mecord-connect/runtime/runtime-manifest.json'
+          $runtimeManifest = Get-Content -LiteralPath $runtimeManifestPath -Raw | ConvertFrom-Json
+          if ($runtimeManifest.sourceCommit -ne $env:OPERATOR_SOURCE_COMMIT) {
+            throw "runtime manifest source $($runtimeManifest.sourceCommit) does not match workflow source $env:OPERATOR_SOURCE_COMMIT"
+          }
+          if ($runtimeManifest.version -ne $pkg.version) {
+            throw "runtime manifest version $($runtimeManifest.version) does not match package version $($pkg.version)"
+          }
+          $tgzHash = (Get-FileHash -LiteralPath $tgz -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksumPath = "$tgz.sha256"
+          Set-Content -LiteralPath $checksumPath -Value "$tgzHash  $($pack[0].filename)" -NoNewline -Encoding ascii
+          $manifestHash = (Get-FileHash -LiteralPath $runtimeManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $inventoryPath = Join-Path $packDir 'artifact-inventory.json'
+          $inventory = [ordered]@{
+            schemaVersion = 1
+            package = [ordered]@{
+              name = $pkg.name
+              version = $pkg.version
+              filename = $pack[0].filename
+              sizeBytes = (Get-Item -LiteralPath $tgz).Length
+              sha256 = $tgzHash
+              integrity = $pack[0].integrity
+            }
+            source = [ordered]@{
+              repository = $env:GITHUB_REPOSITORY
+              commit = $env:OPERATOR_SOURCE_COMMIT
+              workflow = $env:GITHUB_WORKFLOW
+              runId = $env:GITHUB_RUN_ID
+              runAttempt = $env:GITHUB_RUN_ATTEMPT
+            }
+            runtimeManifest = [ordered]@{
+              sourceCommit = $runtimeManifest.sourceCommit
+              sha256 = $manifestHash
+              fileCount = @($runtimeManifest.files).Count
+            }
+            contents = @($pack[0].files | Sort-Object path | ForEach-Object {
+              [ordered]@{ path = $_.path; sizeBytes = $_.size; mode = $_.mode }
+            })
+          }
+          Set-Content -LiteralPath $inventoryPath -Value ($inventory | ConvertTo-Json -Depth 8) -Encoding utf8
           npm install --prefix $installDir --ignore-scripts $tgz
           if ($LASTEXITCODE -ne 0) { throw 'packed artifact install failed' }
           node (Join-Path $installDir 'node_modules/mecord-connect/bin/operator.mjs') doctor
@@ -151,6 +202,361 @@ jobs:
             throw "installed runtime did not execute from node_modules to the secure launcher guard: $($remoteGuard -join ' | ')"
           }
           $global:LASTEXITCODE = 0
+          "package_version=$($pkg.version)" >> $env:GITHUB_OUTPUT
+          "package_path=$tgz" >> $env:GITHUB_OUTPUT
+          "package_sha256=$tgzHash" >> $env:GITHUB_OUTPUT
+          "checksum_path=$checksumPath" >> $env:GITHUB_OUTPUT
+          "inventory_path=$inventoryPath" >> $env:GITHUB_OUTPUT
+
+      - name: Upload exact-source npm candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mecord-connect-${{ steps.candidate.outputs.package_version }}-${{ github.sha }}
+          path: |
+            ${{ steps.candidate.outputs.package_path }}
+            ${{ steps.candidate.outputs.checksum_path }}
+            ${{ steps.candidate.outputs.inventory_path }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+
+  # Rebuild in a physically separate GitHub Windows worker with read-only
+  # permissions. This runner never receives an OIDC or attestation token.
+  windows-generated-witness:
+    name: Independent Windows native and JavaScript runtime rebuild
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+
+      - name: Install pinned Rust compiler
+        shell: pwsh
+        run: |
+          rustup default 1.98.1
+          rustc --version
+          cargo --version
+
+      - name: Rebuild native helpers and generated runtime from exact source
+        shell: pwsh
+        env:
+          OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --locked --manifest-path native/windows-dpapi/Cargo.toml --release
+          if ($LASTEXITCODE -ne 0) { throw 'independent DPAPI compilation failed' }
+          cargo build --locked --manifest-path native/windows-uia/Cargo.toml --release
+          if ($LASTEXITCODE -ne 0) { throw 'independent UIA compilation failed' }
+          ./native/windows-path-lease/build.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'independent path-lease compilation failed' }
+          node packages/mecord-connect/scripts/build-runtime-payload.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'independent runtime payload generation failed' }
+
+      - name: Upload independent runtime build witness
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mecord-runtime-witness-${{ github.sha }}
+          path: packages/mecord-connect/runtime/
+          if-no-files-found: error
+          retention-days: 14
+
+  # All comparisons execute read-only. Two disjoint Windows jobs must pass
+  # before the separate push-only OIDC job may sign the candidate.
+  compare-generated-witness:
+    name: Certify independently reproduced generated runtime
+    needs: [windows-runtime, windows-generated-witness]
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download original npm candidate from this run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mecord-connect-2.0.6-${{ github.sha }}
+          path: ${{ runner.temp }}/candidate
+
+      - name: Download independent rebuilt runtime from this run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mecord-runtime-witness-${{ github.sha }}
+          path: ${{ runner.temp }}/witness
+
+      - name: Compare all generated JavaScript and normalized native PE bytes
+        shell: bash
+        run: |
+          python3 -I scripts/verify_npm_generated_witness.py \
+            --candidate-tarball "${{ runner.temp }}/candidate/mecord-connect-2.0.6.tgz" \
+            --witness-runtime "${{ runner.temp }}/witness" \
+            --expected-source "${{ github.sha }}"
+
+  # A separate push-only job has OIDC/attestation authority; the PR-controlled
+  # Windows build and its installation/security tests remain read-only.
+  attest-candidate:
+    name: Attest exact-source npm candidate (push only)
+    if: github.event_name == 'push'
+    needs: [windows-runtime, compare-generated-witness]
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Download immutable Windows candidate from this workflow run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mecord-connect-2.0.6-${{ github.sha }}
+          path: ${{ runner.temp }}/candidate
+
+      - name: Verify candidate digest, inventory, and embedded source SHA
+        id: verify
+        shell: bash
+        env:
+          CANDIDATE_DIR: ${{ runner.temp }}/candidate
+          EXPECTED_SOURCE: ${{ github.sha }}
+          GH_READ_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+          import tarfile
+          import urllib.request
+
+          folder = pathlib.Path(os.environ['CANDIDATE_DIR']).resolve(strict=True)
+          expected = os.environ['EXPECTED_SOURCE'].lower()
+          assert re.fullmatch(r'[0-9a-f]{40}', expected), 'invalid workflow source SHA'
+          inventory = json.loads((folder / 'artifact-inventory.json').read_text(encoding='utf-8-sig'))
+          package, source = inventory['package'], inventory['source']
+          assert package['name'] == 'mecord-connect' and package['version'] == '2.0.6'
+          assert source['repository'] == os.environ['GITHUB_REPOSITORY']
+          assert source['commit'] == expected
+          assert str(source['runId']) == os.environ['GITHUB_RUN_ID']
+          assert package['filename'] == 'mecord-connect-2.0.6.tgz'
+          assert set(p.name for p in folder.iterdir()) == {
+              'artifact-inventory.json', package['filename'], package['filename'] + '.sha256'
+          }, 'unexpected or missing candidate artifact files'
+          tarball = folder / package['filename']
+          digest = hashlib.sha256(tarball.read_bytes()).hexdigest()
+          assert digest == package['sha256'], 'candidate inventory digest mismatch'
+          assert tarball.stat().st_size == package['sizeBytes'], 'candidate size mismatch'
+          checksum = (folder / (package['filename'] + '.sha256')).read_text(encoding='ascii')
+          assert checksum.strip() == digest + '  ' + package['filename'], 'checksum file mismatch'
+          with tarfile.open(tarball, 'r:gz') as archive:
+              # Never execute any bytes from the untrusted build artifact.
+              # Reject duplicate, special, or path-traversing tar entries.
+              # Reject archive paths that Windows/npm could interpret as aliases.
+              # Preserve a single canonical key for case-insensitive extraction.
+              def windows_key(name):
+                  assert isinstance(name, str) and name, 'empty archive path'
+                  assert '\\' not in name, 'Windows alias separator in archive'
+                  parts = name.split('/')
+                  assert all(part not in ('', '.', '..') for part in parts), 'unsafe archive path'
+                  for part in parts:
+                      assert not any(ord(ch) < 32 or ch in '<>:"|?*' for ch in part), 'illegal Windows archive name'
+                      assert not part.endswith((' ', '.')), 'trailing Windows archive alias'
+                      stem = part.split('.')[0].upper()
+                      assert stem not in {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$'}, 'Windows device name'
+                      assert not re.fullmatch(r'(COM|LPT)[1-9¹²³]', stem), 'Windows device name'
+                  return '/'.join(parts).casefold()
+
+              file_map = {}
+              member_names = set()
+              for member in archive.getmembers():
+                  # GNU sparse S is treated as a file by TarInfo.isfile(),
+                  # but npm Windows tar extraction does not share its meaning.
+                  assert member.type in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE), 'special archive member'
+                  assert not getattr(member, 'sparse', None), 'GNU sparse archive member'
+                  assert not any(k.startswith('GNU.sparse') for k in member.pax_headers), 'sparse PAX archive metadata'
+                  name = member.name.rstrip('/') if member.isdir() else member.name
+                  assert name == 'package' or name.startswith('package/'), 'unexpected archive root'
+                  canonical = windows_key(name)
+                  assert canonical not in member_names, 'duplicate Windows-canonical archive path'
+                  member_names.add(canonical)
+                  if member.isdir():
+                      continue
+                  assert member.type in (tarfile.REGTYPE, tarfile.AREGTYPE), 'non-regular file'
+                  relative = name[len('package/'):]
+                  file_map[relative] = member
+
+              # No file may also be an ancestor directory of another member,
+              # even if npm's tar omitted explicit directory headers.
+              file_members = {windows_key('package/' + path) for path in file_map}
+              for member_path in member_names:
+                  segments = member_path.split('/')
+                  for depth in range(1, len(segments)):
+                      assert '/'.join(segments[:depth]) not in file_members, 'file ancestor collision'
+
+              # Do not trust a self-consistent inventory to prove this is a
+              # usable npm package. Independently require the install contract.
+              required_package = {
+                  'package.json', 'bin/operator.mjs', 'LICENSE',
+                  'DISCLOSURE', 'runtime/runtime-manifest.json'
+              }
+              assert required_package <= set(file_map), 'missing required npm package files'
+              assert all(file_map[path].size > 0 for path in required_package), 'empty required npm file'
+              pkg_json_bytes = archive.extractfile(file_map['package.json']).read()
+              pkg_json_text = pkg_json_bytes.decode('utf-8', errors='strict')
+              assert not pkg_json_text.startswith('\ufeff'), 'npm package JSON UTF-8 BOM'
+              # Match Node JSON.parse: reject non-JSON NaN/Infinity tokens.
+              def reject_non_json_constant(value):
+                  raise ValueError('Nonstandard JSON constant: ' + value)
+
+              embedded_pkg = json.loads(pkg_json_text, parse_constant=reject_non_json_constant)
+              assert isinstance(embedded_pkg, dict), 'invalid embedded npm package metadata'
+              assert embedded_pkg.get('name') == 'mecord-connect', 'embedded npm package identity'
+              assert embedded_pkg.get('version') == package['version'], 'embedded npm version mismatch'
+              assert embedded_pkg.get('license') == 'SEE LICENSE IN LICENSE', 'embedded npm license mismatch'
+              assert embedded_pkg.get('contentPolicy') == {'class': 'dual-use'}, 'embedded dual-use disclosure mismatch'
+              assert embedded_pkg.get('bin', {}).get('mecord-connect') == 'bin/operator.mjs', 'embedded npm CLI entrypoint mismatch'
+              # Reject unexpected installer lifecycle authority before signing.
+              # Match the actual approved source package's inert script set.
+              approved_scripts = {
+                  'build:runtime': 'node ./scripts/build-runtime-payload.mjs',
+                  'prepublishOnly': 'node ./src/publish-check.mjs'
+              }
+              assert embedded_pkg.get('scripts') == approved_scripts, 'unexpected npm lifecycle scripts'
+              assert 'gypfile' not in embedded_pkg, 'unapproved npm node-gyp metadata'
+              assert 'binding.gyp' not in {name.casefold() for name in file_map}, 'implicit npm native build hook'
+              assert embedded_pkg.get('type') == 'module', 'unexpected package module type'
+              assert embedded_pkg.get('os') == ['win32'] and embedded_pkg.get('cpu') == ['x64'], 'npm OS/CPU contract mismatch'
+              assert embedded_pkg.get('engines') == {
+                  'node': '>=22.14.0 <23 || >=24.0.0 <25 || >=26.0.0 <27'
+              }, 'npm supported Node contract mismatch'
+              for dependency_key in (
+                  'dependencies', 'devDependencies', 'optionalDependencies',
+                  'peerDependencies', 'bundledDependencies', 'bundleDependencies'
+              ):
+                  assert dependency_key not in embedded_pkg, 'unexpected npm dependency/install authority'
+
+              inventory_files = inventory['contents']
+              assert len(inventory_files) == len(file_map), 'packed inventory count mismatch'
+              assert {entry['path'] for entry in inventory_files} == set(file_map), 'packed inventory paths mismatch'
+              for entry in inventory_files:
+                  assert file_map[entry['path']].size == entry['sizeBytes'], 'packed inventory size mismatch'
+
+              manifest_member = file_map.get('runtime/runtime-manifest.json')
+              assert manifest_member is not None, 'packed runtime manifest missing'
+              manifest_bytes = archive.extractfile(manifest_member).read()
+              manifest_text = manifest_bytes.decode('utf-8', errors='strict')
+              assert not manifest_text.startswith('\ufeff'), 'runtime manifest UTF-8 BOM'
+              manifest = json.loads(manifest_text, parse_constant=reject_non_json_constant)
+              # Enforce the installed CLI's validateRuntimeManifest contract,
+              # not just the untrusted tarball's self-consistent inventory.
+              assert isinstance(manifest, dict), 'runtime manifest not an object'
+              assert type(manifest.get('schemaVersion')) is int and manifest['schemaVersion'] == 1, 'manifest schema version'
+              assert manifest.get('package') == 'mecord-connect', 'manifest package identity'
+              assert manifest.get('platform') == 'win32' and manifest.get('arch') == 'x64', 'manifest platform identity'
+              assert manifest['version'] == package['version'], 'packed version mismatch'
+              assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', manifest['version']), 'invalid runtime version'
+              assert manifest['sourceCommit'] == expected, 'packed source SHA mismatch'
+              assert inventory['runtimeManifest']['sourceCommit'] == expected
+              assert inventory['runtimeManifest']['sha256'] == hashlib.sha256(manifest_bytes).hexdigest()
+              declared_files = manifest['files']
+              assert isinstance(declared_files, list) and 5 <= len(declared_files) <= 4096, 'runtime manifest list limits'
+              assert inventory['runtimeManifest']['fileCount'] == len(declared_files)
+              required_runtime = {
+                  'app/apps/local-agent/src/remote.js',
+                  'app/apps/local-agent/src/benchmark-runner.js',
+                  'native/operator-windows-dpapi.exe',
+                  'native/operator-windows-uia.exe',
+                  'native/operator-windows-path-lease.exe'
+              }
+              runtime_declared = set()
+              for entry in declared_files:
+                  assert isinstance(entry, dict), 'invalid runtime manifest entry'
+                  relative = entry['path']
+                  assert isinstance(relative, str) and relative, 'invalid runtime manifest path'
+                  assert windows_key('package/runtime/' + relative) == ('package/runtime/' + relative).casefold(), 'unsafe runtime manifest path'
+                  assert type(entry['sizeBytes']) is int and 1 <= entry['sizeBytes'] <= 64 * 1024 * 1024, 'runtime manifest size limit'
+                  assert isinstance(entry['sha256'], str) and re.fullmatch(r'[0-9a-f]{64}', entry['sha256']), 'runtime manifest digest'
+                  canonical = relative.casefold()
+                  assert canonical not in runtime_declared, 'duplicate Windows-canonical runtime path'
+                  runtime_declared.add(canonical)
+              assert required_runtime <= {e['path'] for e in declared_files}, 'missing required native/runtime files'
+              assert len(runtime_declared) == len(declared_files), 'duplicate runtime manifest path'
+              runtime_actual = {p[len('runtime/'):].casefold() for p in file_map if p.casefold().startswith('runtime/')}
+              assert runtime_actual == runtime_declared | {'runtime-manifest.json'}, 'runtime file set mismatch'
+
+              # Independently hash every compiled JS/native runtime byte from the
+              # downloaded tarball against the embedded manifest, not just its count.
+              for entry in declared_files:
+                  archived = file_map['runtime/' + entry['path']]
+                  assert archived.size == entry['sizeBytes'], 'runtime file size mismatch'
+                  content = archive.extractfile(archived).read()
+                  assert hashlib.sha256(content).hexdigest() == entry['sha256'], 'runtime file digest mismatch'
+
+              # Bind every shipped non-generated file to immutable GitHub
+              # source bytes at this exact reviewed commit. Read source as data;
+              # never checkout or execute repository code with write authority.
+              def get_source_json(endpoint):
+                  request = urllib.request.Request(
+                      'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + endpoint,
+                      headers={
+                          'Authorization': 'Bearer ' + os.environ['GH_READ_TOKEN'],
+                          'Accept': 'application/vnd.github+json',
+                          'X-GitHub-Api-Version': '2022-11-28'
+                      }
+                  )
+                  with urllib.request.urlopen(request, timeout=20) as response:
+                      return json.loads(response.read().decode('utf-8'))
+
+              commit_data = get_source_json('/git/commits/' + expected)
+              assert commit_data['sha'].lower() == expected, 'GitHub source commit mismatch'
+              tree_sha = commit_data['tree']['sha']
+              assert re.fullmatch(r'[0-9a-f]{40}', tree_sha), 'invalid Git tree digest'
+              source_tree = get_source_json('/git/trees/' + tree_sha + '?recursive=1')
+              assert source_tree['sha'] == tree_sha and not source_tree['truncated'], 'incomplete Git source tree'
+              package_prefix = 'packages/mecord-connect/'
+              approved_root_files = {'package.json', 'README.md', 'LICENSE', 'DISCLOSURE'}
+              source_files = {}
+              for item in source_tree['tree']:
+                  if not item['path'].startswith(package_prefix) or item['type'] != 'blob':
+                      continue
+                  relative = item['path'][len(package_prefix):]
+                  if relative in approved_root_files or relative.startswith(('src/', 'bin/')):
+                      assert item['mode'] in ('100644', '100755'), 'non-regular source tree entry'
+                      assert relative not in source_files, 'duplicate committed source entry'
+                      source_files[relative] = item['sha']
+
+              packaged_static = {
+                  path for path in file_map
+                  if path in approved_root_files or path.startswith(('src/', 'bin/'))
+              }
+              assert set(source_files) == packaged_static, 'packaged source file set differs from Git commit'
+              assert set(file_map) == packaged_static | {
+                  path for path in file_map if path.casefold().startswith('runtime/')
+              }, 'unexpected npm package payload path'
+              for relative, blob_sha in source_files.items():
+                  assert re.fullmatch(r'[0-9a-f]{40}', blob_sha), 'invalid source blob digest'
+                  blob = get_source_json('/git/blobs/' + blob_sha)
+                  assert blob['sha'] == blob_sha and blob['encoding'] == 'base64', 'untrusted source blob metadata'
+                  source_bytes = base64.b64decode(blob['content'])
+                  packaged_bytes = archive.extractfile(file_map[relative]).read()
+                  assert source_bytes == packaged_bytes, 'shipped JS/package bytes differ from reviewed Git commit'
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('subject_path=' + str(tarball) + chr(10))
+          print('EXACT_SOURCE_NPM_CANDIDATE_VERIFIED', expected, digest)
+          PY
+
+      - name: Attest verified candidate with push-only authority
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: ${{ steps.verify.outputs.subject_path }}
 
   node-compatibility:
     name: Node ${{ matrix.node }} launcher compatibility

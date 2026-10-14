@@ -150,6 +150,8 @@ export interface RelayClientOptions {
   sleep?: (ms: number) => Promise<void>;
   connectTimeoutMs?: number;
   maxConcurrentReadDeliveries?: number;
+  /** Recovery-only guard: accept one exact saved delivery and disconnect after its ACK. */
+  singleDeliveryRecovery?: { previousSeq: number; seq: number; deliveryId: string };
 }
 
 export class RelayClient {
@@ -173,6 +175,7 @@ export class RelayClient {
   #sleep: (ms: number) => Promise<void>;
   #connectTimeoutMs: number;
   #maxConcurrentReadDeliveries: number;
+  #singleDeliveryRecovery?: { previousSeq: number; seq: number; deliveryId: string };
   #stopped = false;
   #socket: RelaySocketLike | null = null;
   #attempt = 0;
@@ -215,6 +218,18 @@ export class RelayClient {
     this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.#connectTimeoutMs = boundedConnectTimeout(options.connectTimeoutMs);
     this.#maxConcurrentReadDeliveries = boundedReadConcurrency(options.maxConcurrentReadDeliveries ?? DEFAULT_CONCURRENT_READS);
+    const recovery = options.singleDeliveryRecovery;
+    if (recovery) {
+      if (!Number.isSafeInteger(recovery.previousSeq) || recovery.previousSeq < 0 ||
+          !Number.isSafeInteger(recovery.seq) || recovery.seq !== recovery.previousSeq + 1 ||
+          typeof recovery.deliveryId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(recovery.deliveryId)) {
+        throw new OperatorError('RELAY_SINGLE_RECOVERY_CONFIG_INVALID', 'Single-delivery recovery requires an exact contiguous sequence and delivery UUID.', { retryable: false });
+      }
+      if (this.#maxConcurrentReadDeliveries !== 1) {
+        throw new OperatorError('RELAY_SINGLE_RECOVERY_CONFIG_INVALID', 'Single-delivery recovery requires serial read delivery.', { retryable: false });
+      }
+      this.#singleDeliveryRecovery = { ...recovery };
+    }
   }
 
   async run(): Promise<void> {
@@ -272,6 +287,9 @@ export class RelayClient {
 
   async #connectOnce(): Promise<void> {
     const state = await this.#readState();
+    if (this.#singleDeliveryRecovery && (state.lastAckedServerSeq !== this.#singleDeliveryRecovery.previousSeq || state.processing)) {
+      throw new OperatorError('RELAY_SINGLE_RECOVERY_STATE_CHANGED', 'Original relay cursor or processing state changed before recovery.', { retryable: false });
+    }
     const token = await this.#getSessionToken();
     const supportedCapabilities = await this.#getSupportedCapabilities();
     const resourceProfile = this.#getResourceProfile ? await this.#getResourceProfile() : undefined;
@@ -400,6 +418,10 @@ export class RelayClient {
         if (frame.type === 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a duplicate welcome frame.');
         validateDeliveryCapabilityAuthority(frame, capabilityAuthority);
         const delivery = validateDelivery(frame);
+        if (this.#singleDeliveryRecovery &&
+            (delivery.seq !== this.#singleDeliveryRecovery.seq || delivery.id !== this.#singleDeliveryRecovery.deliveryId)) {
+          throw new OperatorError('RELAY_SINGLE_RECOVERY_DELIVERY_MISMATCH', 'Hosted relay tried to deliver work beyond the one saved recovery receipt.', { retryable: false });
+        }
         if (readConcurrency > 1 && isConcurrentReadDelivery(delivery)) {
           const durable = await this.#readState();
           if (delivery.seq <= durable.lastAckedServerSeq) {
@@ -448,6 +470,7 @@ export class RelayClient {
           }
         }
         await this.#handleDelivery(socket, frame);
+        if (this.#singleDeliveryRecovery && delivery.seq === this.#singleDeliveryRecovery.seq) this.stop();
         const durable = await this.#readState();
         nextReceiveSeq = durable.lastAckedServerSeq + 1;
         nextAckSeq = durable.lastAckedServerSeq + 1;
@@ -501,6 +524,9 @@ export class RelayClient {
     identity: { deviceId: string; fingerprint: string }
   ): Promise<{ capabilities: string[]; readConcurrency: number; capabilityAuthority: Readonly<RelayCapabilitySessionBinding> | null }> {
     if (frame.protocol !== PROTOCOL) throw new OperatorError('RELAY_PROTOCOL_VERSION', 'Relay protocol version mismatch.');
+    if (this.#singleDeliveryRecovery && frame.resumeFromSeq !== this.#singleDeliveryRecovery.previousSeq) {
+      throw new OperatorError('RELAY_SINGLE_RECOVERY_CURSOR_MISMATCH', 'Hosted relay cursor does not match the single-delivery recovery fence.', { retryable: false });
+    }
     let effectiveCapabilities = [...supportedCapabilities];
     let capabilityAuthority: Readonly<RelayCapabilitySessionBinding> | null = null;
     if (this.#requireCapabilityBinding) {

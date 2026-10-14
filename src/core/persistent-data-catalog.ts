@@ -88,7 +88,12 @@ export const PERSISTENT_DATA_CATALOG: readonly PersistentDataEntry[] = Object.fr
     ['action-journal', 'action-transitions.json'], ['action-results', 'action-results'], ['sagas', 'durable-sagas.json'],
     ['compensation', 'compensation-intents.json'], ['intent-registry', 'intent'], ['studio-teach', 'studio-teach.json'],
     ['studio-workflows', 'studio-workflows'], ['studio-runs', 'studio-runs.json'], ['events', 'events.json'],
-    ['desired-state', 'desired-state.json'], ['digital-operations', 'digital-operations.json'], ['organization-programs', 'organization-programs.json'],
+    ['desired-state', 'desired-state.json'], ['digital-operations', 'digital-operations.json'],
+    // The local replay-history initialization marker MUST share the parent
+    // task's privacy purge / backup lifecycle, not survive an intentional
+    // category purge as a permanent false "missing authority" error.
+    ['digital-operations-initialized', 'digital-operations-initialized.json'],
+    ['organization-programs', 'organization-programs.json'],
     ['semantic-migrations', 'semantic-migrations.json']
   ].map(([id, location]) => entry({ id, owner: id, location, category: 'tasks', sensitivity: 'sensitive', retention: 'terminal-retention-or-archive', deletion: 'privacy-category', backup: 'include', restore: id.includes('lock') || id.includes('lease') ? 'never' : 'optional', scope: id === 'tasks' || id === 'task-leases' ? 'task' : 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: id.includes('lock') || id.includes('lease') ? 'PROCESS_LOCKED' : id === 'action-journal' || id === 'compensation' ? 'APPEND_ONLY_JOURNALED' : 'SINGLE_PROCESS_ONLY' })),
   ...[
@@ -109,6 +114,7 @@ export const PERSISTENT_DATA_CATALOG: readonly PersistentDataEntry[] = Object.fr
   // Tamper-evident child-origin operator decisions retain replay history through restarts.
   // The ledger MAC secret is injected separately; no signing key is persisted here.
   entry({ id: 'quarantine-adjudications', owner: 'organization-quarantine', location: 'quarantine-adjudications.json', category: 'tasks', sensitivity: 'sensitive', retention: 'while-quarantine-and-replay-authority-exists', deletion: 'privacy-category', backup: 'include', restore: 'required', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'PROCESS_LOCKED' }),
+  entry({ id: 'operator-pre-dispatch-adjudications', owner: 'local-operator-recovery', location: 'operator-pre-dispatch-adjudications.json', category: 'tasks', sensitivity: 'sensitive', retention: 'while-recovery-and-replay-authority-exists', deletion: 'privacy-category', backup: 'include', restore: 'required', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'PROCESS_LOCKED' }),
   entry({ id: 'operation-traces', owner: 'operation-trace', location: 'operation-traces.ndjson', category: 'activity', sensitivity: 'sensitive', retention: 'bounded-operational-history', deletion: 'privacy-category', backup: 'include', restore: 'optional', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'APPEND_ONLY_JOURNALED' }),
   entry({ id: 'control-plane-store', owner: 'production-trust', location: 'control-plane-store.json', category: 'session-state', sensitivity: 'sensitive', retention: 'policy-bounded-control-plane-state', deletion: 'privacy-category', backup: 'include', restore: 'optional', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'REVISION_CAS' }),
   entry({ id: 'relay-cluster-fences', owner: 'production-trust', location: 'relay-cluster-fences.json', category: 'session-state', sensitivity: 'operational', retention: 'active-lease-until-expiry', deletion: 'privacy-category', backup: 'ephemeral', restore: 'never', scope: 'device', secretMaterial: 'derived', participatesInDeletion: false, concurrency: 'REVISION_CAS' }),
@@ -120,6 +126,8 @@ export const PERSISTENT_DATA_CATALOG: readonly PersistentDataEntry[] = Object.fr
   entry({ id: 'device-identity', owner: 'device-identity', location: 'device-identity.json', category: 'device-identity', sensitivity: 'secret', retention: 'device-lifetime', deletion: 'device-reset-only', backup: 'exclude-secret', restore: 'never', scope: 'device', secretMaterial: 'encrypted', participatesInDeletion: true, concurrency: 'SINGLE_PROCESS_ONLY' }),
   ...[
     ['device-registry', 'device-registry.json'], ['device-routing', 'device-routing.json'], ['device-pool', 'device-pool.json'],
+    // Monotonic local reservation-history marker must be backed up and purged with its owner.
+    ['device-pool-initialized', 'device-pool-initialized.json'],
     ['device-enrollments', 'device-enrollments.json'], ['device-resets', 'device-resets.json'], ['account-devices', 'account-devices.json'],
     ['enterprise-policy', 'enterprise-policy.json'], ['bootstrap', 'bootstrap.json'], ['local-device-reset', 'local-device-reset.json']
   ].map(([id, location]) => entry({ id, owner: id, location, category: 'pairing-state', sensitivity: 'sensitive', retention: 'account-or-device-lifetime', deletion: 'account-device-erasure', backup: 'include', restore: id === 'device-registry' || id === 'account-devices' ? 'required' : 'optional', scope: id === 'account-devices' ? 'account' : 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: id === 'account-devices' ? 'PROCESS_LOCKED' : 'SINGLE_PROCESS_ONLY' }))

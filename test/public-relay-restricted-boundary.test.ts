@@ -12,7 +12,7 @@ import { DeviceIdentityStore } from '../src/core/device-identity.ts';
 import { RelayResultStore } from '../src/core/relay-result-store.ts';
 import type { RelaySocketLike } from '../src/core/relay-client.ts';
 
-async function listen(t: test.TestContext, handler: http.RequestListener): Promise<string> {
+async function listen(t: test.TestContext, handler: http.RequestListener, authorityStatus = 200): Promise<string> {
   // Transport/fault-injection suites below use a scripted relay socket and an
   // in-memory HTTP result server, not the real RelayResultService. Supply the
   // newly required fresh-authority RPC contract here without consuming the
@@ -20,6 +20,11 @@ async function listen(t: test.TestContext, handler: http.RequestListener): Promi
   // decisions are tested using actual session+store state in result-service.test.
   const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/v1/device-authority/check') {
+      if (authorityStatus !== 200) {
+        res.writeHead(authorityStatus, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: { code: 'RELAY_EXECUTION_AUTHORITY_UNCONFIRMED' } }));
+        return;
+      }
       try {
         const body = JSON.parse(await readBody(req));
         if (!Number.isSafeInteger(body.seq) || body.seq < 1 ||
@@ -66,10 +71,12 @@ class ScriptedRelaySocket implements RelaySocketLike {
   readonly url: string;
   private readonly delivery: Record<string, unknown>;
   private readonly onAck: () => void;
-  constructor(url: string, delivery: Record<string, unknown>, onAck: () => void) {
+  private readonly resumeFromSeq: number;
+  constructor(url: string, delivery: Record<string, unknown>, onAck: () => void, resumeFromSeq = 0) {
     this.url = url;
     this.delivery = delivery;
     this.onAck = onAck;
+    this.resumeFromSeq = resumeFromSeq;
     queueMicrotask(() => this.#open());
   }
 
@@ -86,7 +93,7 @@ class ScriptedRelaySocket implements RelaySocketLike {
     const frame = JSON.parse(data);
     if (frame.type === 'hello') {
       queueMicrotask(() => this.#emit('message', { data: JSON.stringify({
-        type: 'welcome', protocol: 1, connectionId: 'test-connection', resumeFromSeq: 0, heartbeatMs: 60_000
+        type: 'welcome', protocol: 1, connectionId: 'test-connection', resumeFromSeq: this.resumeFromSeq, heartbeatMs: 60_000
       }) }));
       setTimeout(() => this.#emit('message', { data: JSON.stringify(this.delivery) }), 0);
     } else if (frame.type === 'ack') this.onAck();
@@ -123,7 +130,8 @@ test('uncertain relay recovery retries only a validated read action when no stor
   assert.equal(canRetryUncertainRelayDelivery({ ...base, kind: 'task', payload: { task: { operation: 'resume', taskId, approvedActionId: 'forbidden' } } }), false);
 });
 
-test('missing crash-window result replays a read through the normal bounded execution path', async (t) => {
+for (const receiptState of ['missing', 'processing', 'revoked'] as const) {
+  test(`crash-window read recovery retries a ${receiptState} receipt only through fresh authority checks`, { timeout: 20_000 }, async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-public-read-recovery-'));
   t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
   const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
@@ -138,19 +146,25 @@ test('missing crash-window result replays a read through the normal bounded exec
   const localBase = await listen(t, async (req, res) => {
     await readBody(req);
     if (req.url === '/v1/action-receipt') {
-      res.writeHead(404, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: { code: 'ACTION_EXECUTION_RECEIPT_NOT_FOUND' } }));
+      if (receiptState !== 'missing') {
+        res.writeHead(202, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, receipt: { status: 'processing' } }));
+      } else {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: { code: 'ACTION_EXECUTION_RECEIPT_NOT_FOUND' } }));
+      }
       return;
     }
     localHits += 1;
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true, capability: 'git.diff', provider: 'git.native', output: { files: [] }, evidence: [], durationMs: 1 }));
   });
+  const resultBodies: any[] = [];
   const resultBase = await listen(t, async (req, res) => {
-    await readBody(req);
+    resultBodies.push(JSON.parse(await readBody(req)));
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
-  });
+  }, receiptState === 'revoked' ? 403 : 200);
   const sessionTokenFile = path.join(stateDir, 'relay-session.token');
   await fs.writeFile(sessionTokenFile, 'sessiontoken123456.signature123456', 'utf8');
   const delivery = {
@@ -168,12 +182,42 @@ test('missing crash-window result replays a read through the normal bounded exec
     allowLoopbackInsecure: true, socketFactory: (url) => new ScriptedRelaySocket(url, delivery, resolveAck)
   });
   const running = runner.run();
-  await Promise.race([acked, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay ack timeout')), 3_000))]);
-  runner.stop();
-  await running;
+  if (receiptState === 'revoked') {
+    // An unconfirmed hosted generation fails closed. No result is submitted,
+    // the local read is never executed and the original cursor is preserved.
+    try {
+      await assert.rejects(running, (error: any) =>
+        error?.code === 'RELAY_EXECUTION_AUTHORITY_UNCONFIRMED');
+    } finally {
+      runner.stop();
+    }
+    assert.equal(localHits, 0);
+    assert.equal(resultBodies.length, 0);
+    const preserved = JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8'));
+    assert.equal(preserved.version, 1);
+    assert.equal(preserved.lastAckedServerSeq, 0);
+    assert.equal(preserved.processing?.seq, 1);
+    assert.equal(preserved.processing?.id, deliveryId);
+    assert.ok(Number.isFinite(Date.parse(preserved.processing?.startedAt)),
+      'the rejected read must remain durably unresolved');
+    return;
+  }
+  let watchdog: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([acked, new Promise<never>((_, reject) => {
+      watchdog = setTimeout(() => reject(new Error('relay read recovery ACK timed out')), 12_000);
+    })]);
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
+    runner.stop();
+    await running;
+  }
   assert.equal(localHits, 1);
+  assert.equal(resultBodies.length, 1);
+  assert.equal(resultBodies[0]!.result?.ok, true);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
-});
+  });
+}
 
 
 test('relay restart recovers a completed mutation with degraded audit evidence without replay', async (t) => {
@@ -253,6 +297,84 @@ test('relay restart recovers a completed mutation with degraded audit evidence w
   const remaining = JSON.parse(await fs.readFile(path.join(stateDir, 'relay-outbox', 'relay-results.json'), 'utf8'));
   assert.deepEqual(remaining.streams, []);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
+});
+
+test('physical crash-window shape ACK 3134 with durable result 3135 resubmits only the receipt, never the mutation', { timeout: 15_000 }, async t => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-seq3135-no-replay-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  const device = await identity.loadOrCreate('Synthetic Original Owner');
+  const deliveryId = crypto.randomUUID();
+  const originalResult = {
+    ok: true, capability: 'app.operate', provider: 'windows.uia',
+    output: { operation: 'select', postcondition: { verified: true } },
+    evidence: [], durationMs: 1
+  };
+  await fs.writeFile(path.join(stateDir, 'relay-client.json'),
+    JSON.stringify({ version: 1, lastAckedServerSeq: 3134 }), 'utf8');
+  // Simulate a device remaining offline past the old 24h result TTL.
+  // The original effect happened once, long before the eventual reconnect.
+  await new RelayResultStore(path.join(stateDir, 'relay-outbox'), {
+    clock: () => new Date('2026-09-01T00:00:00.000Z')
+  }).put(device.deviceId, 3135, deliveryId, originalResult);
+  let localMutations = 0;
+  const localBase = await listen(t, async (_req, res) => {
+    localMutations++;
+    res.writeHead(500, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: false }));
+  });
+  const received: any[] = [];
+  const resultBase = await listen(t, async (req, res) => {
+    received.push(JSON.parse(await readBody(req)));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const sessionTokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(sessionTokenFile, 'sessiontoken123456.signature123456', 'utf8');
+  const frame = {
+    type: 'delivery', seq: 3135, id: deliveryId, kind: 'action',
+    payload: {
+      publicBoundary: false, approvalAuthority: {
+        accountId: crypto.randomUUID(), deviceId: device.deviceId, generation: 1
+      }, action: {
+        id: crypto.randomUUID(), capability: 'app.operate', risk: 'external',
+        input: { operation: 'select', selector: { automationId: 'synthetic-tab' } },
+        provenance: { kind: 'chatgpt' }
+      }
+    }
+  };
+  let acknowledge!: () => void;
+  const acked = new Promise<void>(resolve => { acknowledge = resolve; });
+  const runner = new LocalAgentRelayRunner({
+    stateDir, relayUrl: 'ws://127.0.0.1:65435/device',
+    resultUrl: `${resultBase}/v1/device-result`,
+    sessionTokenFile, identity, localAgentBaseUrl: localBase,
+    agentToken: 'e'.repeat(64), relayInternalToken: 'r'.repeat(64),
+    allowLoopbackInsecure: true,
+    socketFactory: url => new ScriptedRelaySocket(url, frame, acknowledge, 3134)
+  });
+  const running = runner.run();
+  let ackDeadline: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      acked,
+      new Promise<never>((_, reject) => {
+        ackDeadline = setTimeout(() => reject(new Error('durable 3135 result ACK timed out')), 12_000);
+      })
+    ]);
+  } finally {
+    if (ackDeadline) clearTimeout(ackDeadline);
+    runner.stop();
+    await running;
+  }
+  assert.equal(localMutations, 0, 'the original provider must never execute twice');
+  assert.equal(received.length, 1, 'exact existing result may be submitted once');
+  assert.deepEqual(received[0].result, originalResult);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')),
+    { version: 1, lastAckedServerSeq: 3135 });
+  assert.deepEqual(JSON.parse(await fs.readFile(
+    path.join(stateDir, 'relay-outbox', 'relay-results.json'), 'utf8'
+  )).streams, []);
 });
 
 test('transient result submission failure retries in place without replay or transport flap', { timeout: 8_000 }, async (t) => {
