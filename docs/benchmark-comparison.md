@@ -2,7 +2,7 @@
 
 Baseline: `3cd251187e09eb2948e530f1056bbd0744b10fc1`  
 Optimized measurement: `be520640ee7c28d3dbf5797e6240a9aa224e1add`  
-Final reviewed source: `c1456bb98ccd7f21222c11bb15c3bdeb8509686e`
+Final PR source: see immutable PR head (runtime/benchmark code reviewed through `c1456bb98ccd7f21222c11bb15c3bdeb8509686e`)
 
 Each row below is a fresh-state, sequential 100-call run on the same laptop and Node 22.23.2 binary.
 

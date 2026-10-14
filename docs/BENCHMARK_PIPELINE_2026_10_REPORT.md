@@ -15,7 +15,7 @@ No production service, credential, durable state, or laptop runtime was changed 
 | Tracing branch baseline | `1103e818373dd798e58f2692cc983a138d1274b8` |
 | Matched A/B baseline | `3cd251187e09eb2948e530f1056bbd0744b10fc1` |
 | Optimized measured source | `be520640ee7c28d3dbf5797e6240a9aa224e1add` |
-| Final reviewed branch source | `c1456bb98ccd7f21222c11bb15c3bdeb8509686e` |
+| Final PR source | See immutable PR head; runtime/benchmark code security-reviewed through `c1456bb98ccd7f21222c11bb15c3bdeb8509686e` |
 | Runtime | Node `v22.23.2`, Windows x64 `10.0.26200` |
 | Node binary SHA-256 | `0d0f5e39f9f3d9587bc19f73eab3c2c9c4903fd02d6dbf9c853dd81b3d95fad4` |
 | Path-lease helper SHA-256 | `a94b9c71184322ae50e8802a5a86187ed141d797e0c363530cf9749f85b99824` |
@@ -109,7 +109,7 @@ The requested background-tab comparison was not independently certified. The bro
 - The existing polling path is retained for older mocks and stores; a 50 ms fallback covers shared/cross-process writers.
 - Trace capacity remains opt-in, disabled by default and bounded at 65,536. Trace schemas retain only opaque IDs and allowlisted metadata.
 - Benchmark tokens are random per process and ambient credentials are not inherited by the MCP child.
-- The final Codex Security diff scan `7fb519b3-c423-4e0f-852a-1a460990f1b2` reviewed all four changed source files and two changed tests, with complete coverage and zero reportable findings.
+- The final Codex Security diff scan `7fb519b3-c423-4e0f-852a-1a460990f1b2` reviewed all four changed runtime/benchmark source files and two changed tests through `c1456bb98ccd7f21222c11bb15c3bdeb8509686e`, with complete coverage and zero reportable findings. The only later codebase change is the package-local TypeScript exclusion for this cross-package benchmark; its exact CI command passes locally.
 
 Verification: production TypeScript check passed; 106/106 selected relay/tracing tests passed with an exact-source path-lease helper; the post-hardening harness smoke passed 20/20 calls and dropped zero spans. The helper build used the available .NET Framework compiler, which does not provide the repository's preferred deterministic-build evidence, so source/binary equivalence is supported by exact-source build and self-test rather than deterministic reproduction.
 
