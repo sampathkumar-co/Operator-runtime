@@ -69,8 +69,26 @@ export function createPairingService(options = {}) {
     const state = randomToken(32);
     const verifier = randomToken(48);
     const createdAt = clock();
-    pending.set(state, { userCode, makeDefault: makeDefaultInput, verifier, createdAt, expiresAt: createdAt + ttlMs });
+    pending.set(state, { kind: 'pair', userCode, makeDefault: makeDefaultInput, verifier, createdAt, expiresAt: createdAt + ttlMs });
 
+    const url = new URL(authorizationUrl);
+    url.searchParams.set('response_type', 'code');
+    url.searchParams.set('client_id', clientId);
+    url.searchParams.set('redirect_uri', redirectUri.toString());
+    url.searchParams.set('scope', 'openid operator:read operator:write');
+    url.searchParams.set('state', state);
+    url.searchParams.set('code_challenge', pkceChallenge(verifier));
+    url.searchParams.set('code_challenge_method', 'S256');
+    url.searchParams.set('resource', resource.toString());
+    return { authorizationUrl: url.toString(), expiresAt: new Date(createdAt + ttlMs).toISOString() };
+  }
+
+  function startManagement() {
+    prune();
+    const state = randomToken(32);
+    const verifier = randomToken(48);
+    const createdAt = clock();
+    pending.set(state, { kind: 'management', verifier, createdAt, expiresAt: createdAt + ttlMs });
     const url = new URL(authorizationUrl);
     url.searchParams.set('response_type', 'code');
     url.searchParams.set('client_id', clientId);
@@ -114,6 +132,11 @@ export function createPairingService(options = {}) {
       throw new Error('PAIR_TOKEN_EXCHANGE_FAILED');
     }
 
+    if (entry.kind === 'management') {
+      const seconds = Number(tokenJson?.expires_in);
+      // Never place this credential into browser code, HTML, URLs or browser storage.
+      return { status: 'management', accessToken, expiresIn: Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 600) : 300 };
+    }
     const claimResponse = await fetchFn(claimUrl, {
       method: 'POST',
       redirect: 'error',
@@ -133,5 +156,5 @@ export function createPairingService(options = {}) {
     return { status: 'claimed', userCode: entry.userCode, makeDefault: entry.makeDefault };
   }
 
-  return { start, complete, pendingCount: () => pending.size };
+  return { start, startManagement, complete, pendingCount: () => pending.size };
 }

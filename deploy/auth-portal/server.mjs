@@ -5,6 +5,7 @@ import { isIP } from 'node:net';
 import { Algorithm, hash as argon2Hash } from '@node-rs/argon2';
 import YAML from 'yaml';
 import { createPairingService } from './pairing.mjs';
+import { accountDashboardPage } from './account-dashboard.mjs';
 
 const port = Number(process.env.PORT || 8090);
 const usersFile = process.env.PORTAL_USERS_FILE || '/data/users_database.yml';
@@ -30,9 +31,73 @@ const maxRateBuckets = 10_000;
 const maxBody = 16 * 1024;
 const pairAttempts = new Map();
 const pairing = createPairingService();
+const accountSessions = new Map();
+const accountSessionLifetimeMs = 10 * 60_000;
+const accountSessionLimit = 512;
+const publicOrigin = 'https://auth.splcart.in';
+const relayClaimUrl = new URL(process.env.PORTAL_PAIR_CLAIM_URL || 'https://operator.splcart.in/pair/api/claim');
+if (relayClaimUrl.protocol !== 'https:' || relayClaimUrl.pathname !== '/pair/api/claim' || relayClaimUrl.username || relayClaimUrl.password || relayClaimUrl.search || relayClaimUrl.hash) {
+  throw new Error('INVALID_PORTAL_PAIR_CLAIM_URL');
+}
+const accountListUrl = new URL('/pair/api/devices', relayClaimUrl).toString();
+const accountRemoveUrl = new URL('/pair/api/devices/remove', relayClaimUrl).toString();
+
+function sessionHash(token) { return createHash('sha256').update(token).digest('hex'); }
+function pruneAccountSessions() {
+  for (const [key, item] of accountSessions) if (item.expiresAt <= Date.now()) accountSessions.delete(key);
+  while (accountSessions.size >= accountSessionLimit) accountSessions.delete(accountSessions.keys().next().value);
+}
+function newAccountSession(accessToken, expiresIn) {
+  pruneAccountSessions();
+  const token = randomBytes(32).toString('base64url');
+  const csrf = randomBytes(32).toString('base64url');
+  const expiresAt = Date.now() + Math.min(accountSessionLifetimeMs, Math.max(1, expiresIn) * 1000);
+  accountSessions.set(sessionHash(token), { accessToken, csrf, expiresAt });
+  return { token, expiresAt };
+}
+function currentAccountSession(req) {
+  const cookies = String(req.headers.cookie || '').split(';').map(s => s.trim());
+  const found = cookies.find(s => s.startsWith('mecord_account='));
+  const token = found?.slice('mecord_account='.length) ?? '';
+  if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
+  const key = sessionHash(token);
+  const record = accountSessions.get(key);
+  if (!record) return null;
+  if (record.expiresAt <= Date.now()) { accountSessions.delete(key); return null; }
+  return { ...record, key };
+}
+function accountCookie(token, maxAge) {
+  // The management token is opaque, HttpOnly and never shared with the relay API.
+  return 'mecord_account=' + token + '; Path=/account; HttpOnly; Secure; SameSite=Lax; Max-Age=' + maxAge;
+}
+function sameOriginPost(req) {
+  return req.headers.origin === (process.env.NODE_ENV === 'test' ? 'http://127.0.0.1:' + port : publicOrigin);
+}
+function accountCsrfAuthorized(req, session) {
+  return session && sameOriginPost(req) && typeof req.headers['x-mecord-csrf'] === 'string' &&
+    req.headers['x-mecord-csrf'].length === session.csrf.length &&
+    timingSafeEqual(Buffer.from(req.headers['x-mecord-csrf']), Buffer.from(session.csrf));
+}
+async function relayAccountRequest(url, token, body) {
+  const response = await fetch(url, {
+    method: body ? 'POST' : 'GET', redirect: 'error',
+    headers: { authorization: 'Bearer ' + token, accept: 'application/json', ...(body ? { 'content-type': 'application/json' } : {}) },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(15_000)
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || result?.ok !== true) {
+    return { ok: false, status: response.status === 401 ? 401 : response.status === 403 ? 403 : 503 };
+  }
+  return { ok: true, result };
+}
+function redirect(res, target, cookie) {
+  res.writeHead(303, { location: target, 'cache-control': 'no-store', ...(cookie ? { 'set-cookie': cookie } : {}) });
+  res.end();
+}
 let writeQueue = Promise.resolve();
 
-function send(res, status, body, type = 'application/json; charset=utf-8') {
+function send(res, status, body, type = 'application/json; charset=utf-8', extraHeaders = {}) {
   const payload = typeof body === 'string' ? body : JSON.stringify(body);
   res.writeHead(status, {
     'content-type': type,
@@ -40,7 +105,8 @@ function send(res, status, body, type = 'application/json; charset=utf-8') {
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
-    'x-frame-options': 'DENY'
+    'x-frame-options': 'DENY',
+    ...extraHeaders
   });
   res.end(payload);
 }
@@ -488,17 +554,53 @@ function pairResultPage(success) {
   const title = success ? 'Device paired' : 'Pairing failed';
   const message = success
     ? 'This computer is now attached to your Mecord account. You can close this page and return to ChatGPT.'
-    : 'The pairing request could not be completed. Generate a fresh code with mecord-connect remote and try again.';
+    : 'Pairing failed. If this computer belongs to another account, open My Devices in that account and release it first; then generate a fresh code.';
   const tone = success ? '#15803d' : '#b91c1c';
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mecord Connect - ${title}</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f7fb;font-family:Inter,system-ui,sans-serif;color:#0f172a;padding:24px}.card{width:min(520px,100%);background:#fff;border:1px solid #e2e8f0;border-radius:22px;padding:36px;box-shadow:0 22px 70px rgba(30,41,59,.12)}.mark{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;background:#172554;color:#fff;font-weight:850;margin-bottom:24px}h1{font-size:30px;letter-spacing:-.03em;margin:0 0 10px;color:${tone}}p{color:#64748b;line-height:1.6;margin:0}.foot{margin-top:24px;color:#94a3b8;font-size:11px}</style></head><body><main class="card"><div class="mark">MC</div><h1>${title}</h1><p>${message}</p><div class="foot">Mecord Connect · Secure device enrollment</div></main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mecord Connect - ${title}</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f7fb;font-family:Inter,system-ui,sans-serif;color:#0f172a;padding:24px}.card{width:min(520px,100%);background:#fff;border:1px solid #e2e8f0;border-radius:22px;padding:36px;box-shadow:0 22px 70px rgba(30,41,59,.12)}.mark{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;background:#172554;color:#fff;font-weight:850;margin-bottom:24px}h1{font-size:30px;letter-spacing:-.03em;margin:0 0 10px;color:${tone}}p{color:#64748b;line-height:1.6;margin:0}.foot{margin-top:24px;color:#94a3b8;font-size:11px}</style></head><body><main class="card"><div class="mark">MC</div><h1>${title}</h1><p>${message}</p><div class="foot"><a href="/account">My devices</a> · <a href="/pair">Try pairing again</a></div></main></body></html>`;
 }
 
 const server = createServer(async (req, res) => {
   try {
     const requestURL = new URL(req.url || '/', 'http://portal.internal');
     const oauthEntry = (requestURL.pathname === '/' || requestURL.pathname === '/consent/openid/decision') && requestURL.searchParams.get('flow') === 'openid_connect';
-    if (req.method === 'GET' && (requestURL.pathname === '/signup' || requestURL.pathname === '/recover' || oauthEntry)) {
+    if (req.method === 'GET' && (requestURL.pathname === '/signin' || requestURL.pathname === '/signup' || requestURL.pathname === '/recover' || oauthEntry)) {
       return send(res, 200, page, 'text/html; charset=utf-8');
+    }
+    if (req.method === 'GET' && requestURL.pathname === '/account') {
+      if (!currentAccountSession(req)) return redirect(res, '/account/start');
+      return send(res, 200, accountDashboardPage, 'text/html; charset=utf-8', {
+        'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+      });
+    }
+    if (req.method === 'GET' && requestURL.pathname === '/account/start') {
+      const started = pairing.startManagement();
+      return redirect(res, started.authorizationUrl);
+    }
+    if (req.method === 'GET' && requestURL.pathname === '/account/api/devices') {
+      const session = currentAccountSession(req);
+      if (!session) return send(res, 401, { ok: false, error: 'SESSION_EXPIRED' });
+      const result = await relayAccountRequest(accountListUrl, session.accessToken);
+      if (!result.ok) return send(res, result.status, { ok: false, error: result.status === 401 ? 'SESSION_EXPIRED' : 'DEVICE_LIST_UNAVAILABLE' });
+      const devices = Array.isArray(result.result.devices) ? result.result.devices : [];
+      return send(res, 200, { ok: true, devices, csrf: session.csrf });
+    }
+    if (req.method === 'POST' && requestURL.pathname === '/account/api/remove') {
+      const session = currentAccountSession(req);
+      if (!session) return send(res, 401, { ok: false, error: 'SESSION_EXPIRED' });
+      if (!accountCsrfAuthorized(req, session)) return send(res, 403, { ok: false, error: 'REQUEST_NOT_AUTHORIZED' });
+      const payload = await readJson(req);
+      if (typeof payload?.deviceId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(payload.deviceId))
+        return send(res, 400, { ok: false, error: 'DEVICE_ID_INVALID' });
+      const result = await relayAccountRequest(accountRemoveUrl, session.accessToken, { deviceId: payload.deviceId });
+      if (!result.ok) return send(res, result.status, { ok: false, error: 'DEVICE_REMOVE_FAILED' });
+      return send(res, 200, { ok: true, status: 'removed' });
+    }
+    if (req.method === 'POST' && requestURL.pathname === '/account/logout') {
+      const session = currentAccountSession(req);
+      if (session && !accountCsrfAuthorized(req, session)) return send(res, 403, { ok: false, error: 'REQUEST_NOT_AUTHORIZED' });
+      if (!sameOriginPost(req)) return send(res, 403, { ok: false, error: 'REQUEST_NOT_AUTHORIZED' });
+      if (session) accountSessions.delete(session.key);
+      return send(res, 200, { ok: true }, 'application/json; charset=utf-8', { 'set-cookie': accountCookie('', 0) });
     }
     if (req.method === 'GET' && requestURL.pathname === '/pair') {
       return send(res, 200, pairPage, 'text/html; charset=utf-8');
@@ -526,7 +628,11 @@ const server = createServer(async (req, res) => {
       const state = requestURL.searchParams.get('state');
       if (oauthError || !code || !state) return send(res, 400, pairResultPage(false), 'text/html; charset=utf-8');
       try {
-        await pairing.complete({ code, state });
+        const completed = await pairing.complete({ code, state });
+        if (completed.status === 'management') {
+          const session = newAccountSession(completed.accessToken, completed.expiresIn);
+          return redirect(res, '/account', accountCookie(session.token, Math.max(1, Math.floor((session.expiresAt - Date.now()) / 1000))));
+        }
         return send(res, 200, pairResultPage(true), 'text/html; charset=utf-8');
       } catch (error) {
         console.error('[auth-portal] pairing callback failed safely:', error instanceof Error ? error.message : 'UNKNOWN');
