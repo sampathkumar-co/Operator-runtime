@@ -187,8 +187,13 @@ export class ActionTransitionJournal {
         throw new OperatorError('ACTION_JOURNAL_ID_CONFLICT', 'Pre-dispatch interruption requires exact mutation identity.');
       }
       if (entry.state === 'INTERRUPTED') return entry;
-      if (entry.generation !== 1 || entry.state !== 'PREPARED' || entry.transitions.length !== 1 ||
-          entry.transitions[0]?.state !== 'PREPARED') {
+      const initiallyPrepared = entry.state === 'PREPARED' && entry.transitions.length === 1;
+      const initiallyPolicyDeferred = entry.state === 'DEFERRED' && entry.transitions.length === 2
+        && entry.transitions[1]?.state === 'DEFERRED'
+        && entry.transitions[1]?.provider === 'policy'
+        && typeof entry.transitions[1]?.resultDigest === 'string';
+      if (entry.generation !== 1 || entry.transitions[0]?.state !== 'PREPARED' ||
+          (!initiallyPrepared && !initiallyPolicyDeferred)) {
         throw new OperatorError('ACTION_JOURNAL_PRE_DISPATCH_UNPROVEN',
           'Execution history does not prove the provider was never dispatched.');
       }
@@ -483,7 +488,7 @@ export class ActionTransitionJournal {
 function allowedTransition(current: ActionJournalState, next: ActionJournalState): boolean {
   if (current === next) return true;
   if (current === 'PREPARED') return next === 'DEFERRED' || next === 'DISPATCHED' || next === 'COMPLETED' || next === 'INTERRUPTED';
-  if (current === 'DEFERRED') return next === 'DEFERRED' || next === 'DISPATCHED' || next === 'COMPLETED';
+  if (current === 'DEFERRED') return next === 'DEFERRED' || next === 'DISPATCHED' || next === 'COMPLETED' || next === 'INTERRUPTED';
   if (current === 'DISPATCHED') return next === 'PREPARED' || next === 'OBSERVED' || next === 'UNCERTAIN' || next === 'RECONCILED' || next === 'COMPLETED';
   if (current === 'OBSERVED') return next === 'RECONCILED' || next === 'COMPLETED' || next === 'UNCERTAIN';
   if (current === 'UNCERTAIN') return next === 'RECONCILED' || next === 'UNCERTAIN';
@@ -577,11 +582,16 @@ function validateState(input: unknown): JournalState {
     }
     if (entry.transitions.at(-1)?.state !== entry.state) throw corrupt('Entry state does not match its latest transition.');
     if (entry.state === 'INTERRUPTED') {
-      const proof = entry.transitions[1];
+      const policyDeferred = entry.transitions.length === 3
+        && entry.transitions[1]?.state === 'DEFERRED'
+        && entry.transitions[1]?.provider === 'policy'
+        && typeof entry.transitions[1]?.resultDigest === 'string';
+      const initiallyPrepared = entry.transitions.length === 2;
+      const proof = entry.transitions.at(-1);
       const expectedDigest = digest({
         actionId: entry.actionId, actionDigest: entry.actionDigest, kind: 'pre_dispatch_interrupted'
       });
-      if (entry.risk === 'read' || entry.generation !== 1 || entry.transitions.length !== 2 ||
+      if (entry.risk === 'read' || entry.generation !== 1 || (!initiallyPrepared && !policyDeferred) ||
           proof?.state !== 'INTERRUPTED' || proof.provider !== 'agent-kernel' ||
           proof.resultDigest !== expectedDigest) {
         throw corrupt('Interrupted journal is not bound to an original never-dispatched mutation.');
