@@ -24,9 +24,9 @@ import { RelayResultService } from '../../relay-server/src/result-service.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..', '..', '..');
 const MCP_ROOT = path.resolve(import.meta.dirname, '..');
-const CONTROL_TOKEN = 'isolated-relay-control-token-0123456789abcdef';
-const AGENT_TOKEN = 'a'.repeat(64);
-const INTERNAL_TOKEN = 'r'.repeat(64);
+const CONTROL_TOKEN = crypto.randomBytes(32).toString('hex');
+const AGENT_TOKEN = crypto.randomBytes(32).toString('hex');
+const INTERNAL_TOKEN = crypto.randomBytes(32).toString('hex');
 const repetitions = boundedInt(process.env.MECORD_BENCH_REPS, 1000, 1, 10_000);
 const requestedConcurrency = parseConcurrency(process.env.MECORD_BENCH_CONCURRENCY ?? '1,5,10,25,50,100');
 const concurrencyRuns = requestedConcurrency.filter((value) => value <= 16);
@@ -131,7 +131,15 @@ try {
   mcp = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
     cwd: MCP_ROOT,
     env: {
-      ...process.env,
+      // Deliberately do not inherit credentials or production service settings.
+      PATH: process.env.PATH,
+      Path: process.env.Path,
+      PATHEXT: process.env.PATHEXT,
+      SYSTEMROOT: process.env.SYSTEMROOT,
+      SystemRoot: process.env.SystemRoot,
+      TEMP: process.env.TEMP,
+      TMP: process.env.TMP,
+      NODE_OPTIONS: process.env.NODE_OPTIONS,
       OPERATOR_EXECUTION_MODE: 'relay',
       OPERATOR_AGENT_TOKEN: CONTROL_TOKEN,
       OPERATOR_RELAY_CONTROL_TOKEN: CONTROL_TOKEN,

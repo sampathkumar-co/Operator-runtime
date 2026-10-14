@@ -146,6 +146,9 @@ export class RelayResultStore {
       timer.unref();
       poller.unref();
       signal?.addEventListener('abort', aborted, { once: true });
+      // Close the pre-check/listener-registration race without waiting for the
+      // timeout when cancellation arrives between those two operations.
+      if (signal?.aborted) return aborted();
       void this.get(deviceId, seq).then((result) => { if (result) finish(result); }, failed);
     });
   }
