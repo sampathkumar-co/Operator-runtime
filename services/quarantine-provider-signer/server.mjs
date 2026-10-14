@@ -56,6 +56,22 @@ async function readBoundedBody(req,maxBytes) {
   }
   return JSON.parse(Buffer.concat(chunks,total).toString('utf8'));
 }
+// Validate static cryptographic authority BEFORE readiness; a service with
+// an RSA signer or unusable request token must not advertise a healthy API.
+export function validateSignerMaterial({signerPem,originPem,requestToken,upstreamToken}) {
+  if(typeof requestToken!=='string' || typeof upstreamToken!=='string'
+    || requestToken.length<32 || requestToken.length>512
+    || upstreamToken.length<32 || upstreamToken.length>512 || requestToken===upstreamToken)
+    throw new Error('SIGNER_TOKEN_INVALID');
+  let signer,upstream;
+  try {signer=crypto.createPrivateKey(signerPem);}
+  catch {throw new Error('SIGNER_KEY_INVALID');}
+  try {upstream=crypto.createPublicKey(originPem);}
+  catch {throw new Error('ORIGIN_SIGNATURE_INVALID');}
+  if(signer.asymmetricKeyType!=='ed25519')throw new Error('SIGNER_KEY_INVALID');
+  if(upstream.asymmetricKeyType!=='ed25519')throw new Error('ORIGIN_SIGNATURE_INVALID');
+  return signer;
+}
 export async function start(env=process.env) {
   const vars=['SIGNER_TLS_CERT_FILE','SIGNER_TLS_KEY_FILE','SIGNER_CLIENT_CA_FILE',
     'SIGNER_PRIVATE_KEY_FILE','SIGNER_ORIGIN_PUBKEY_FILE','SIGNER_REQUEST_TOKEN_FILE',
@@ -65,7 +81,7 @@ export async function start(env=process.env) {
   if(new Set(vars.map(v=>path.resolve(env[v]))).size!==vars.length)throw new Error('SIGNER_FILE_REUSE');
   const [cert,key,ca,signerPem,originPem,requestKey,originKey]=await Promise.all(vars.map(v=>fileFromEnv(env,v)));
   const token=requestKey.toString('utf8').trim(),upstreamToken=originKey.toString('utf8').trim();
-  if(token.length<32 || upstreamToken.length<32 || token===upstreamToken)throw new Error('SIGNER_TOKEN_INVALID');
+  const signer=validateSignerMaterial({signerPem,originPem,requestToken:token,upstreamToken});
   const origin=originUrl(env.SIGNER_ORIGIN_API_URL);
   const sign=createSigner({requestToken:token,signerPrivateKey:signerPem,
     originPublicKey:originPem,issuer:env.SIGNER_ORIGIN_ISSUER,
@@ -77,7 +93,7 @@ export async function start(env=process.env) {
       return boundedJson(response,8192);
     }});
   const fingerprint=crypto.createHash('sha256')
-    .update(crypto.createPublicKey(signerPem).export({type:'spki',format:'der'})).digest('hex');
+    .update(crypto.createPublicKey(signer).export({type:'spki',format:'der'})).digest('hex');
   const server=https.createServer({cert,key,ca,requestCert:true,rejectUnauthorized:true,
     minVersion:'TLSv1.3'},async(req,res)=>{
     res.setHeader('cache-control','no-store');
