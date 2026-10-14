@@ -382,10 +382,13 @@ test('relay direct app-operation returns a terminal no-dispatch approval result 
   // Keep the deadline bounded; never wait for or simulate human approval.
   const deadlineMs = 8_000;
   const started = Date.now();
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   const first = await Promise.race([
     fetch(`${base}/v1/execute`, { method: 'POST', headers, body: JSON.stringify({ action, approvalAuthority: authority }) }),
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay execution blocked on inline approval')), deadlineMs))
-  ]);
+    new Promise<never>((_, reject) => {
+      deadlineTimer = setTimeout(() => reject(new Error('relay execution blocked on inline approval')), deadlineMs);
+    })
+  ]).finally(() => { if (deadlineTimer) clearTimeout(deadlineTimer); });
   assert.ok(Date.now() - started < deadlineMs);
   const denied = await first.json() as any;
   assert.equal(first.status, 409, JSON.stringify(denied));
