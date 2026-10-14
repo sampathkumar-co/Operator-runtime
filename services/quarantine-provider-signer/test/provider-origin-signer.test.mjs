@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import {originUrl} from '../server.mjs';
+import {originUrl,validateSignerMaterial} from '../server.mjs';
 import {authenticateToken,stableMissionId,quarantineIntentId,
   signFromVerifiedObservation,createSigner} from '../provider-origin-signer.mjs';
 
@@ -112,4 +112,30 @@ test('provider origin URL rejects literal IPs, IPv6 loopback, local aliases and 
   for(const url of invalid) assert.throws(()=>originUrl(url),/ORIGIN_URL_INVALID/,url);
   assert.equal(originUrl('https://origin.external.example.org/v1').href,
     'https://origin.external.example.org/v1/');
+});
+
+test('canonical UUID binding rejects uppercased requester and origin IDs before signing',()=>{
+  const upperProgram=programId.toUpperCase();
+  const upperReturned=returnedMissionId.toUpperCase();
+  assert.notEqual(upperProgram,programId);
+  assert.throws(()=>stableMissionId(upperProgram,targetKey),/ORIGIN_INVALID/);
+  assert.throws(()=>quarantineIntentId(programId,upperReturned),/ORIGIN_INVALID/);
+  assert.throws(()=>exercise(source(),{...query,programId:upperProgram}),/REQUEST_INVALID/);
+  assert.throws(()=>exercise(source(),{...query,returnedMissionId:upperReturned}),/REQUEST_INVALID/);
+  assert.throws(()=>exercise(source({...record,providerDeviceId:record.providerDeviceId.toUpperCase()})),/ORIGIN_INVALID/);
+  assert.throws(()=>exercise(source({...record,providerSessionId:record.providerSessionId.toUpperCase()})),/ORIGIN_INVALID/);
+});
+
+test('signer configuration refuses invalid Ed25519 keys and unusable startup tokens',()=>{
+  const rsa=crypto.generateKeyPairSync('rsa',{modulusLength:2048});
+  const config={signerPem:privatePem(signer.privateKey),originPem:publicPem(origin.publicKey),
+    requestToken:'r'.repeat(64),upstreamToken:'u'.repeat(64)};
+  assert.equal(validateSignerMaterial(config).asymmetricKeyType,'ed25519');
+  assert.throws(()=>validateSignerMaterial({...config,signerPem:privatePem(rsa.privateKey)}),/SIGNER_KEY_INVALID/);
+  assert.throws(()=>validateSignerMaterial({...config,originPem:publicPem(rsa.publicKey)}),/ORIGIN_SIGNATURE_INVALID/);
+  for(const token of ['a'.repeat(31),'a'.repeat(513)]){
+    assert.throws(()=>validateSignerMaterial({...config,requestToken:token}),/SIGNER_TOKEN_INVALID/);
+    assert.throws(()=>validateSignerMaterial({...config,upstreamToken:token}),/SIGNER_TOKEN_INVALID/);
+  }
+  assert.throws(()=>validateSignerMaterial({...config,upstreamToken:config.requestToken}),/SIGNER_TOKEN_INVALID/);
 });
