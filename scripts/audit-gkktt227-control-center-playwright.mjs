@@ -111,8 +111,14 @@ try {
       for (const id of tabs) {
         const selector = '[role=tab][data-tab="' + id + '"]';
         try {
-          await page.locator(selector).click({ timeout: 5000 });
-          assert.equal(await page.locator(selector).getAttribute('aria-selected'), 'true');
+          const tab = page.locator(selector);
+          // Home is active on initial load. Assert its state here; a later
+          // keyboard test clicks Home from another tab to prove actionability.
+          // Avoid a redundant first click while Chrome stabilizes the new page.
+          const initiallySelectedHome = id === 'tasks'
+            && (await tab.getAttribute('aria-selected')) === 'true';
+          if (!initiallySelectedHome) await tab.click({ timeout: 5000 });
+          assert.equal(await tab.getAttribute('aria-selected'), 'true');
           assert.equal(await page.locator('#' + id).evaluate(el => getComputedStyle(el).display !== 'none'), true);
           await page.screenshot({ path: path.join(output, viewport.name + '-' + id + '.png'), fullPage: true });
           results.push({ viewport: viewport.name, type: 'tab', id, passed: true });
