@@ -444,11 +444,11 @@ ${openSignup ? "" : '<label for="signupInvite">Registration code</label><input i
     if(!data||!data.client_id)return false;
     oauthConsent=data;
     const pairingClient=data.client_id==='mecord-device-pairing-v1';
-    byId('oauthConsentTitle').textContent=pairingClient?'Approve this computer':'Connect to ChatGPT';
+    byId('oauthConsentTitle').textContent=pairingClient?'Authorize Mecord access':'Connect to ChatGPT';
     byId('oauthConsentHelp').textContent=pairingClient
-      ?'Confirm this one-time request to attach the computer that opened this secure pairing flow to your Mecord account.'
+      ?'Approve access to pair or manage computers under your currently signed-in Mecord account.'
       :'Review the access requested for this Mecord Connect session.';
-    byId('oauthConsentButton').textContent=pairingClient?'Approve device':'Allow and continue';
+    byId('oauthConsentButton').textContent=pairingClient?'Continue securely':'Allow and continue';
     const list=byId('oauthConsentScopes');list.textContent='';
     for(const scope of (data.scopes||[])){
       const item=document.createElement('li');item.textContent=scopeLabels[scope]||('Grant '+scope+' access');list.appendChild(item);
