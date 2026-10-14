@@ -2,6 +2,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { capabilityRiskRule } from '../../../src/core/capability-policy.ts';
 import { RelayClient, type RelayClientStatus, type RelayConnectionState, type RelayDelivery, type RelayExpiredRecoveryDecision, type RelayRecoveryDecision, type RelaySocketFactory } from '../../../src/core/relay-client.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import type { ActionRequest } from '../../../src/core/types.ts';
@@ -150,7 +151,12 @@ export class LocalAgentRelayRunner {
         await this.#submitResultWithRetry(seq, deliveryId, safe);
         return 'ack';
       }
-      if (recovered.state === 'processing') return 'stop';
+      if (recovered.state === 'processing') {
+        // A canonically read-only action can be revalidated and retried without
+        // replaying a mutation. The local receipt owner will still refuse a
+        // concurrent in-flight read; backoff prevents a rapid reconnect loop.
+        return canRetryUncertainRelayDelivery(delivery) ? 'retry' : 'stop';
+      }
     }
     return delivery && canRetryUncertainRelayDelivery(delivery) ? 'retry' : 'stop';
   }
@@ -245,6 +251,40 @@ export class LocalAgentRelayRunner {
         retryable: true,
         details: { actionId: action.id, sideEffectState: 'uncertain' }
       });
+    }
+    // An ACTION_EXECUTION_* HTTP 409 may mean the local receipt was not
+    // durably finalized (including a post-dispatch reconciliation failure).
+    // It is NOT a normal completed tool error: recover exact receipt before
+    // acknowledging, especially for actions that could have changed state.
+    if (response.status === 409 && typeof body?.error?.code === 'string'
+      && body.error.code.startsWith('ACTION_EXECUTION_')) {
+      const recovered = await this.#recoverLocalActionReceipt(payload);
+      if (recovered.state === 'completed') return recovered.result;
+      throw new OperatorError('RELAY_LOCAL_EXECUTION_UNCERTAIN',
+        'Local execution returned a receipt-reconciliation error; action outcome is not confirmed.', {
+          retryable: true, details: { actionId: action.id, sideEffectState: 'uncertain' }
+        });
+    }
+    // Some read-only validations reject a request before a durable receipt is
+    // even created. Confirm the receipt is genuinely missing before returning
+    // a bounded error, rather than interpreting that HTTP 400 as uncertain
+    // execution and reconnecting forever. Never apply this rule to mutations.
+    if (response.status === 400 && action.risk === 'read' && capabilityRiskRule(action.capability) === 'read'
+      && body?.ok === false && typeof body?.error?.code === 'string'
+      && !body.error.code.startsWith('ACTION_EXECUTION_')) {
+      const recovered = await this.#recoverLocalActionReceipt(payload);
+      if (recovered.state === 'completed') return recovered.result;
+      if (recovered.state === 'missing') {
+        return boundedResult({
+          ok: false, capability: action.capability, provider: 'operator.local',
+          error: {
+            code: /^[A-Z][A-Z0-9_]{0,127}$/.test(body.error.code) ? body.error.code : 'LOCAL_READ_REJECTED',
+            message: 'Local read request was rejected before execution.',
+            retryable: false, sideEffectState: 'none'
+          },
+          evidence: [], durationMs: 0
+        });
+      }
     }
     if (publicBoundary && containsRestrictedPublicActionResult(action.capability, body)) return restrictedDataBlockedResult(action.capability);
     if (![200, 409, 423].includes(response.status)) {
@@ -500,7 +540,10 @@ export function canRetryUncertainRelayDelivery(delivery: RelayDelivery): boolean
       return request.operation !== 'submit' || typeof request.request.requestId === 'string';
     }
     if (delivery.kind === 'knowledge') { validateRelayKnowledgeQuery(delivery.payload.query); return true; }
-    if (delivery.kind === 'action') return validateRemoteAction(delivery.payload.action).risk === 'read';
+    if (delivery.kind === 'action') {
+      const action = validateRemoteAction(delivery.payload.action);
+      return action.risk === 'read' && capabilityRiskRule(action.capability) === 'read';
+    }
     return false;
   } catch {
     return false;

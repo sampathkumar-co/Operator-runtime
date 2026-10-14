@@ -29,6 +29,7 @@ import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
 import { renderControlCenter } from './control-center.ts';
 import { resourceKeysForAction } from '../../../src/core/resource-identity.ts';
+import { capabilityRiskRule } from '../../../src/core/capability-policy.ts';
 import type { EnterpriseAuthorizationContext, EnterprisePolicyStore } from '../../../src/core/enterprise-policy.ts';
 import type { TeachModeStore } from '../../../src/core/studio-teach.ts';
 import type { DesiredStateController } from '../../../src/core/desired-state.ts';
@@ -2339,6 +2340,7 @@ export function createLocalAgentServer(options: {
     }
 
     if (pathname === '/v1/execute' && req.method === 'POST') {
+      let unfinishedRead: { action: ActionRequest; authority?: ApprovalAuthorityContext } | undefined;
       try {
         if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
           await options.audit?.append({
@@ -2360,6 +2362,9 @@ export function createLocalAgentServer(options: {
         assertEnterpriseApprovalBinding(relayRequest, requestEnterpriseContext, approvalAuthority);
         if (options.actionExecutions) {
           let receipt = await options.actionExecutions.begin(action, approvalAuthority);
+          if (receipt.status === 'started' && action.risk === 'read' && capabilityRiskRule(action.capability) === 'read') {
+            unfinishedRead = { action, authority: approvalAuthority };
+          }
           if (options.agentKernel && receipt.status !== 'started') {
             const reconciled = await options.actionExecutions.reconcileWithKernel(action, approvalAuthority, options.agentKernel.journal);
             if (reconciled.status === 'missing') {
@@ -2385,7 +2390,31 @@ export function createLocalAgentServer(options: {
             return;
           }
         }
-        let result = await executeActionWithCurrentApproval(action, approvalAuthority, undefined, requestPermissions);
+        let result: ActionResult;
+        try {
+          result = await executeActionWithCurrentApproval(action, approvalAuthority, undefined, requestPermissions);
+        } catch (error) {
+          // A failed read has no side effect to reconcile. Persist its structured
+          // failure so the relay can acknowledge it instead of leaving a durable
+          // 'processing' receipt and reconnecting on every HTTP 400 response.
+          // Mutations retain their existing fail-closed uncertain-execution path.
+          // Do not trust the caller's risk label: only canonically read-only
+          // capabilities may be finalized without an execution proof.
+          if (action.risk !== 'read' || capabilityRiskRule(action.capability) !== 'read') throw error;
+          result = {
+            ok: false,
+            capability: action.capability,
+            provider: 'operator.local',
+            evidence: [],
+            error: {
+              code: error instanceof OperatorError ? error.code : 'LOCAL_READ_EXECUTION_FAILED',
+              message: error instanceof OperatorError ? error.message : 'Local read execution failed.',
+              retryable: false,
+              sideEffectState: 'none'
+            },
+            durationMs: 0
+          };
+        }
         let autoResumedAfterApproval = false;
         if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED' && options.approvals) {
           const pending = await options.approvals.register(action, approvalAuthority);
@@ -2448,6 +2477,9 @@ export function createLocalAgentServer(options: {
         }
         if (options.actionExecutions) {
           await options.beforeActionReceiptCompletion?.({ action, result });
+          // A successful kernel result has already passed authoritative dynamic-risk
+          // resolution. For a validated read operation it does not create a
+          // mutation journal entry, including trusted project.command.run reads.
           if (options.agentKernel && action.risk !== 'read' && result.ok) {
             const reconciled = await options.actionExecutions.reconcileWithKernel(action, approvalAuthority, options.agentKernel.journal);
             if (reconciled.status !== 'completed') {
@@ -2457,8 +2489,36 @@ export function createLocalAgentServer(options: {
             await options.actionExecutions.complete(action, result, approvalAuthority);
           }
         }
+        unfinishedRead = undefined;
         send(res, result.ok ? 200 : 409, result);
       } catch (error) {
+        // Any exception after a canonically read-only receipt starts (including
+        // approval, verification or post-execution hooks) must not leave it
+        // permanently processing. A failed read has no mutating outcome to replay.
+        // Receipt persistence failure still fails closed; never fabricate a write
+        // or a successful outcome when durable completion cannot be proven.
+        if (unfinishedRead && options.actionExecutions) {
+          const failure: ActionResult = {
+            ok: false,
+            capability: unfinishedRead.action.capability,
+            provider: 'operator.local',
+            evidence: [],
+            error: {
+              code: error instanceof OperatorError ? error.code : 'LOCAL_READ_EXECUTION_FAILED',
+              message: error instanceof OperatorError ? error.message : 'Local read request failed.',
+              retryable: false,
+              sideEffectState: 'none'
+            },
+            durationMs: 0
+          };
+          try {
+            await options.actionExecutions.complete(unfinishedRead.action, failure, unfinishedRead.authority);
+            send(res, 409, failure);
+            return;
+          } catch {
+            // Durable receipt could not be completed; preserve uncertain state.
+          }
+        }
         const message = error instanceof Error ? error.message : String(error);
         const explicitCode = typeof (error as any)?.code === 'string' ? String((error as any).code) : undefined;
         const code = message === 'REQUEST_TOO_LARGE' ? 'REQUEST_TOO_LARGE' : explicitCode ?? 'BAD_REQUEST';
