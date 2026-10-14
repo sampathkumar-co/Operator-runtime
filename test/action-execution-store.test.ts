@@ -420,16 +420,26 @@ test('legacy result-first crash window is upgraded only with embedded kernel ver
   assert.deepEqual(await new ActionTransitionJournal(state).replayCompleted(request.id), output);
 });
 
-test('mislabeled write may not reclaim a processing receipt as if it were a harmless read', async (t) => {
+test('static risk mismatches never enter durable receipt capacity or dispatch on restart', async (t) => {
   const state = await temp(t);
-  const spoofed = {
-    ...action('spoofed-read-label'),
-    risk: 'read' as const
-  };
   const first = new LocalActionExecutionStore(state);
-  assert.equal((await first.begin(spoofed, authority)).status, 'started');
+  for (let i = 0; i < 260; i++) {
+    const spoofed = {
+      id: 'spoofed-static-read-' + i,
+      capability: 'file.read',
+      risk: 'write' as const,
+      input: { path: 'C:\\\\repo\\\\file.txt' },
+      provenance: { kind: 'chatgpt' as const }
+    };
+    await assert.rejects(first.begin(spoofed, authority), (e: any) => e?.code === 'ACTION_RISK_MISMATCH');
+    assert.equal((await first.lookup(spoofed, authority)).status, 'missing');
+  }
+  const mislabeledWrite = { ...action('spoofed-write-label'), risk: 'read' as const };
+  await assert.rejects(first.begin(mislabeledWrite, authority), (e: any) => e?.code === 'ACTION_RISK_MISMATCH');
   const restarted = new LocalActionExecutionStore(state);
-  assert.equal((await restarted.begin(spoofed, authority)).status, 'processing');
+  assert.equal((await restarted.lookup(mislabeledWrite, authority)).status, 'missing');
+  assert.equal((await restarted.begin(action('real-write-after-rejected-spoofs'), authority)).status, 'started',
+    'rejected risk spoofs must not exhaust receipt capacity for a real mutation');
 });
 
 
