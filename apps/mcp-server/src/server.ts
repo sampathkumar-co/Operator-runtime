@@ -109,6 +109,7 @@ if (publicEdge) {
 
   // Device administration derives the account exclusively from verified OAuth tokens.
   if (!developerEdge) {
+    const deviceAdminEdge = publicEdge;
     async function authorizeDeviceAdmin(request: any, reply: FastifyReply, write: boolean): Promise<{ issuer: string; subject: string } | null> {
       const webRequest = await toWebRequest(request.raw, request.body);
       const rejected = validatePublicHeaders(webRequest);
@@ -118,18 +119,18 @@ if (publicEdge) {
       if (!rate.allowed) { sendRateLimit(reply, rate); return null; }
       const lock = publicAuthFailureLimiter!.isLimited(key);
       if (!lock.allowed) { sendRateLimit(reply, lock); return null; }
-      const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(publicEdge.publicUrl);
-      const requiredScopes = [write ? publicEdge.writeScope : publicEdge.readScope];
+      const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(deviceAdminEdge.publicUrl);
+      const requiredScopes = [write ? deviceAdminEdge.writeScope : deviceAdminEdge.readScope];
       let authInfo: AuthInfo;
       try {
-        authInfo = await verifyBearerToken(request.headers.authorization, { verifier: publicEdge.verifier, requiredScopes, resourceMetadataUrl });
+        authInfo = await verifyBearerToken(request.headers.authorization, { verifier: deviceAdminEdge.verifier, requiredScopes, resourceMetadataUrl });
       } catch (error) {
         publicAuthFailureLimiter!.hit(key);
         await sendSdkResponse(reply, bearerAuthChallengeResponse(error, { requiredScopes, resourceMetadataUrl }));
         return null;
       }
       publicAuthFailureLimiter!.clear(key);
-      const principal = principalFromAuthInfo(authInfo, publicEdge.publicUrl);
+      const principal = principalFromAuthInfo(authInfo, deviceAdminEdge.publicUrl);
       const accountRate = publicPrincipalLimiter!.hit(principalRateKey(principal.issuer, principal.subject));
       if (!accountRate.allowed) { sendRateLimit(reply, accountRate); return null; }
       return principal;

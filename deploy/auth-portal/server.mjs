@@ -611,6 +611,7 @@ const server = createServer(async (req, res) => {
       });
     }
     if (req.method === 'GET' && requestURL.pathname === '/account/start') {
+      if (!pairRateAllowed(clientIp(req))) return send(res, 429, { ok: false, error: 'Too many authorization attempts. Try again later.' });
       const started = pairing.startManagement();
       return redirect(res, started.authorizationUrl);
     }
