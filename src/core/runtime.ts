@@ -3,6 +3,7 @@ import { AuthorityKernel } from './authority-kernel.ts';
 import { CapabilityRouter } from './router.ts';
 import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
+import { pipelineLatency } from './pipeline-latency.ts';
 import type { ProviderLearning } from './provider-learning.ts';
 import { conservativeExecutionPhase, conservativeSideEffectState, retrySafeWithoutReconciliation, validExecutionPhase, validSideEffectState } from './side-effect.ts';
 import { MUTATION_RECONCILIATION_POLICIES, assertRegisteredMutationReconciliation, reconcileFromDurableResult } from './reconciliation-coverage.ts';
@@ -55,12 +56,12 @@ export class OperatorRuntime {
     if (context.signal?.aborted) return abortedResult(action, start);
     let canonicalAction = action;
     try {
-      const decision = await this.authority.authorize(
+      const decision = await pipelineLatency.measure({ stage: 'local.authorization_approval', origin: 'local-agent', traceId: action.taskId ?? action.id }, () => this.authority.authorize(
         action,
         permissions,
         (candidate) => this.router.resolveRisk(candidate),
         context.authorityToken
-      );
+      ));
       canonicalAction = decision.canonicalAction;
     } catch (error) {
       const op = error instanceof OperatorError ? error : new OperatorError('POLICY_ERROR', String(error));
@@ -76,7 +77,8 @@ export class OperatorRuntime {
 
     let ranked: Awaited<ReturnType<CapabilityRouter['rank']>>;
     try {
-      ranked = await this.router.rank(canonicalAction, context.learningContext ?? 'global');
+      ranked = await pipelineLatency.measure({ stage: 'local.capability_routing', origin: 'local-agent', traceId: canonicalAction.taskId ?? canonicalAction.id },
+        () => this.router.rank(canonicalAction, context.learningContext ?? 'global'));
     } catch (error) {
       const op = error instanceof OperatorError
         ? error
@@ -110,7 +112,7 @@ export class OperatorRuntime {
           continue;
         }
         try {
-          const dispatchDecision = await this.authority.authorize(
+          const dispatchDecision = await pipelineLatency.measure({ stage: 'local.authorization_approval', origin: 'local-agent', traceId: canonicalAction.taskId ?? canonicalAction.id }, () => this.authority.authorize(
             canonicalAction,
             permissions,
             async (candidate) => {
@@ -118,7 +120,7 @@ export class OperatorRuntime {
               return await provider.resolveRisk(candidate);
             },
             context.authorityToken
-          );
+          ));
           canonicalAction = dispatchDecision.canonicalAction;
         } catch (error) {
           return policyDeniedBeforeDispatch(canonicalAction, error, start);

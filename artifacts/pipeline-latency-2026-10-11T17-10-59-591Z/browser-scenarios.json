@@ -1,0 +1,66 @@
+{
+  "sourceCommit": null,
+  "platform": "win32",
+  "node": "v22.14.0",
+  "suite": "isolated real-Chrome CDP provider; excludes MCP/relay/model latency",
+  "browserPath": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  "coldNavigationMs": 253.9,
+  "warmTabDiscovery": [],
+  "warmSemanticInspection": [],
+  "warmClick": [],
+  "tenFieldForm": [],
+  "navigation": {
+    "count": 30,
+    "p50Ms": 23.1,
+    "p95Ms": 46.5,
+    "maxMs": 88.4,
+    "meanMs": 27.6
+  },
+  "spa": {
+    "count": 30,
+    "p50Ms": 358.4,
+    "p95Ms": 372.6,
+    "maxMs": 373.3,
+    "meanMs": 356
+  },
+  "tabSwitch": {
+    "count": 30,
+    "p50Ms": 13.3,
+    "p95Ms": 16,
+    "maxMs": 17.8,
+    "meanMs": 13.6
+  },
+  "fiveStep": {
+    "count": 30,
+    "p50Ms": 11187.2,
+    "p95Ms": 11213.3,
+    "maxMs": 11214.6,
+    "meanMs": 11186.5
+  },
+  "failedRecovery": {
+    "count": 30,
+    "p50Ms": 189.8,
+    "p95Ms": 204.2,
+    "maxMs": 204.5,
+    "meanMs": 193.9
+  },
+  "coldSessionInspection": {
+    "count": 30,
+    "p50Ms": 108.9,
+    "p95Ms": 110.7,
+    "maxMs": 111.5,
+    "meanMs": 106.6
+  },
+  "warmSessionInspection": {
+    "count": 30,
+    "p50Ms": 94.1,
+    "p95Ms": 109,
+    "maxMs": 109.6,
+    "meanMs": 95.6
+  },
+  "scenarioMode": "extended",
+  "sourceSha": "dada203688ac3cd8084eab0c994e5664a753f592",
+  "chromeVersion": "Chrome/154.0.8037.98",
+  "repetitions": 30,
+  "measuredAt": "2026-10-11T17:10:59.594Z"
+}

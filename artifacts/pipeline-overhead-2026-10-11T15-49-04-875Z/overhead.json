@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-10-11T15:49:04.875Z",
+  "metadata": {
+    "sourceSha": "0a32475bdad430d44f139113a137699b8b5bc163",
+    "runtimeVersion": "v22.14.0",
+    "os": "Windows_NT 10.0.26200",
+    "machine": "Sampath-isolated-synthetic",
+    "batches": 30,
+    "operationsPerBatch": 1000,
+    "tracingEnabledFlag": "explicit per recorder",
+    "workload": "in-process async no-op only, NOT hosted or browser"
+  },
+  "baselineDisabled": {
+    "count": 30,
+    "minMs": 0.3067000000000064,
+    "maxMs": 2.8892999999999915,
+    "meanMs": 0.8358133333333319,
+    "p50Ms": 0.3942000000000121,
+    "p95Ms": 2.8463000000000136,
+    "p99Ms": 2.8892999999999915
+  },
+  "tracedEnabled": {
+    "count": 30,
+    "minMs": 3.2807999999999993,
+    "maxMs": 10.888900000000007,
+    "meanMs": 4.8172700000000015,
+    "p50Ms": 3.744400000000013,
+    "p95Ms": 9.852800000000002,
+    "p99Ms": 10.888900000000007
+  },
+  "pairedOverheadPerBatch": {
+    "count": 30,
+    "minMs": 0.48629999999999995,
+    "maxMs": 9.237800000000007,
+    "meanMs": 3.9814566666666695,
+    "p50Ms": 3.1561000000000092,
+    "p95Ms": 8.879800000000003,
+    "p99Ms": 9.237800000000007
+  },
+  "pairedOverheadPerOperationMs": {
+    "count": 30,
+    "minMs": 0.00048629999999999995,
+    "maxMs": 0.009237800000000008,
+    "meanMs": 0.003981456666666669,
+    "p50Ms": 0.0031561000000000093,
+    "p95Ms": 0.008879800000000004,
+    "p99Ms": 0.009237800000000008
+  },
+  "totalOperationsPerMode": 30000,
+  "warnings": [
+    "Single-machine microbenchmark: OS scheduling, JIT and GC can affect percentiles.",
+    "Does not measure production network, disk audit writes, Chrome, hosted or model overhead.",
+    "Negative per-batch deltas are retained without clipping."
+  ]
+}

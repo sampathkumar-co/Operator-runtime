@@ -1,4 +1,5 @@
 import { OperatorError } from '../core/errors.ts';
+import { pipelineLatency } from '../core/pipeline-latency.ts';
 
 const DEFAULT_TIMEOUT_MS = 8_000;
 const MAX_CDP_MESSAGE_BYTES = 4 * 1024 * 1024;
@@ -139,19 +140,26 @@ export class CdpConnection {
   get closed(): boolean { return this.#closed; }
 
   async send(method: string, params: JsonMap = {}, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<JsonMap> {
-    return this.#send(method, params, timeoutMs, undefined, signal);
+    return await pipelineLatency.measure({ stage: 'browser.cdp_roundtrip', origin: 'browser', networkRoundTrips: 1, command: method },
+      () => this.#send(method, params, timeoutMs, undefined, signal));
   }
 
   async sendInSession(sessionId: string, method: string, params: JsonMap = {}, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<JsonMap> {
     if (!sessionId || sessionId.length > 256) {
       throw new OperatorError('INVALID_CDP_SESSION', 'Flattened CDP session id must contain 1-256 characters.');
     }
-    return this.#send(method, params, timeoutMs, sessionId, signal);
+    return await pipelineLatency.measure({ stage: 'browser.cdp_roundtrip', origin: 'browser', networkRoundTrips: 1, command: method },
+      () => this.#send(method, params, timeoutMs, sessionId, signal));
   }
 
   async #send(method: string, params: JsonMap, timeoutMs: number, sessionId?: string, signal?: AbortSignal): Promise<JsonMap> {
     if (signal?.aborted) throw aborted();
-    await this.#ready;
+    if (this.#socket.readyState !== WebSocket.OPEN) {
+      await pipelineLatency.measure({ stage: 'browser.cdp_connection', origin: 'browser', warm: false, networkRoundTrips: 1 },
+        () => this.#ready);
+    } else {
+      await this.#ready;
+    }
     if (signal?.aborted) throw aborted();
     if (this.#closed || this.#socket.readyState !== WebSocket.OPEN) {
       throw new OperatorError('CDP_CONNECTION_CLOSED', 'Browser target connection is not open.', { retryable: true });

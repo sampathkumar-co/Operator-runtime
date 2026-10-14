@@ -1,0 +1,40 @@
+{
+  "sourceCommit": null,
+  "platform": "win32",
+  "node": "v22.14.0",
+  "suite": "isolated real-Chrome CDP provider; excludes MCP/relay/model latency",
+  "browserPath": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  "coldNavigationMs": 202.9,
+  "warmTabDiscovery": {
+    "count": 30,
+    "p50Ms": 1.1,
+    "p95Ms": 2.6,
+    "maxMs": 4.1,
+    "meanMs": 1.2
+  },
+  "warmSemanticInspection": {
+    "count": 30,
+    "p50Ms": 93.1,
+    "p95Ms": 108.2,
+    "maxMs": 110,
+    "meanMs": 96.4
+  },
+  "warmClick": {
+    "count": 30,
+    "p50Ms": 351,
+    "p95Ms": 364.4,
+    "maxMs": 410.2,
+    "meanMs": 355.1
+  },
+  "tenFieldForm": {
+    "count": 30,
+    "p50Ms": 3511,
+    "p95Ms": 3604.6,
+    "maxMs": 3606.6,
+    "meanMs": 3517.5
+  },
+  "sourceSha": "0a32475bdad430d44f139113a137699b8b5bc163",
+  "chromeVersion": "Chrome/154.0.8037.98",
+  "repetitions": 30,
+  "measuredAt": "2026-10-11T15:46:06.906Z"
+}

@@ -8,6 +8,7 @@ import { OperatorError } from './errors.ts';
 import { executionContextDigest, executionContextIdentityFrom } from './execution-context-identity.ts';
 import type { OperationTraceOutcome, OperationTraceStage } from './operation-trace.ts';
 import { OperationTraceStore } from './operation-trace.ts';
+import { pipelineLatency } from './pipeline-latency.ts';
 import { canonicalResourceKeys, resolvePhysicalResourceKeysForAction, resourceKeysConflict } from './resource-identity.ts';
 import type { ResourceLeaseStore } from './resource-leases.ts';
 import type { OperatorRuntime } from './runtime.ts';
@@ -128,14 +129,16 @@ export class AgentKernel {
         const denied = authorityFailure(action, error);
         if (denied.error?.code === 'APPROVAL_REQUIRED') {
           await this.#trace(action, 'APPROVAL', 'BLOCKED', { code: 'APPROVAL_REQUIRED' });
-          prepared = await this.#journal.prepare({ action, ownerKind, ownerId, resourceKeys });
+          prepared = await pipelineLatency.measure({ stage: 'local.journal_audit', origin: 'local-agent', traceId: action.taskId ?? action.id },
+        () => this.#journal.prepare({ action, ownerKind, ownerId, resourceKeys }));
           await this.#journal.defer(action.id, denied);
         }
         return denied;
       }
     }
 
-    prepared = await this.#journal.prepare({ action, ownerKind, ownerId, resourceKeys });
+    prepared = await pipelineLatency.measure({ stage: 'local.journal_audit', origin: 'local-agent', traceId: action.taskId ?? action.id },
+      () => this.#journal.prepare({ action, ownerKind, ownerId, resourceKeys }));
     if (action.risk !== 'read') prepared = await this.#journal.recoverPendingCompletion(action.id, action);
 
     // This exact action was conclusively interrupted before provider dispatch.
@@ -216,12 +219,13 @@ export class AgentKernel {
       }
     }
 
-    const lease = await this.#leases.acquire(
+    const lease = await pipelineLatency.measure({ stage: 'local.resource_lease', origin: 'local-agent',
+      traceId: action.taskId ?? action.id }, () => this.#leases.acquire(
       `kernel:${ownerKind}:${ownerId}:${crypto.randomUUID()}`,
       resourceKeys,
       action.risk === 'read' ? 'shared' : 'exclusive',
       action.risk === 'read' ? {} : { mutationActionId: action.id }
-    );
+    ));
     await this.#trace(action, 'LEASE', 'OK', { resourceCount: resourceKeys.length, mode: action.risk === 'read' ? 'shared' : 'exclusive' });
     let quarantineArmed = false;
     let retainQuarantine = false;
@@ -241,15 +245,17 @@ export class AgentKernel {
             quarantineArmed = true;
             retainQuarantine = true;
           }
-          await this.#journal.markDispatched(action.id, providerName);
+          await pipelineLatency.measure({ stage: 'local.journal_audit', origin: 'local-agent', traceId: action.taskId ?? action.id },
+            () => this.#journal.markDispatched(action.id, providerName));
           await this.#trace(action, 'DISPATCH', 'OK', { provider: providerName, capability: action.capability });
           dispatched = true;
           await context.onProviderDispatch?.(providerName);
         }
       });
-      let journalEntry = !dispatched && result.error?.executionPhase === 'pre_dispatch'
-        ? await this.#journal.defer(action.id, result)
-        : await this.#journal.observe(action.id, result);
+      let journalEntry = await pipelineLatency.measure({ stage: 'local.journal_audit', origin: 'local-agent',
+        traceId: action.taskId ?? action.id }, () => !dispatched && result.error?.executionPhase === 'pre_dispatch'
+        ? this.#journal.defer(action.id, result)
+        : this.#journal.observe(action.id, result));
       if (quarantineArmed) retainQuarantine = journalEntry.state === 'DISPATCHED' || journalEntry.state === 'UNCERTAIN';
 
       if (!result.ok && action.risk !== 'read' && result.error?.sideEffectState === 'uncertain'
@@ -258,7 +264,8 @@ export class AgentKernel {
           ...context,
           ...(executionSignal ? { signal: executionSignal } : {})
         });
-        journalEntry = await this.#journal.reconcile(action.id, reconciliation);
+        journalEntry = await pipelineLatency.measure({ stage: 'local.journal_audit', origin: 'local-agent', traceId: action.taskId ?? action.id },
+          () => this.#journal.reconcile(action.id, reconciliation));
         await this.#trace(action, 'RECONCILE', reconciliationTraceOutcome(reconciliation.status), { provider: result.provider, status: reconciliation.status });
         retainQuarantine = journalEntry.state === 'UNCERTAIN';
         result = reconciledResult(action, result, reconciliation);
@@ -267,7 +274,8 @@ export class AgentKernel {
       result = await this.#publishObservation(action, result);
       if (!result.ok) return result;
 
-      const receipt = verifyActionOutcome({ action, result, journal: journalEntry });
+      const receipt = await pipelineLatency.measure({ stage: 'kernel.verify_complete', origin: 'local-agent',
+        traceId: action.taskId ?? action.id }, () => verifyActionOutcome({ action, result, journal: journalEntry }));
       await this.#trace(action, 'VERIFY', receipt.verified ? 'OK' : 'FAILED', { verifier: 'agent-kernel' });
       if (!receipt.verified) {
         return {
@@ -286,7 +294,8 @@ export class AgentKernel {
         };
       }
       result = { ...result, evidence: [...result.evidence, kernelVerificationEvidence(receipt)] };
-      await this.#journal.complete(action.id, receipt.digest, result);
+      await pipelineLatency.measure({ stage: 'local.journal_audit', origin: 'local-agent', traceId: action.taskId ?? action.id },
+        () => this.#journal.complete(action.id, receipt.digest, result));
       retainQuarantine = false;
       if (action.intent && !context.recoveryMode) {
         try {
@@ -445,7 +454,8 @@ export class AgentKernel {
         ...observedResult,
         evidence: [...observedResult.evidence, kernelVerificationEvidence(receipt)]
       };
-      await this.#journal.complete(action.id, receipt.digest, result);
+      await pipelineLatency.measure({ stage: 'local.journal_audit', origin: 'local-agent', traceId: action.taskId ?? action.id },
+        () => this.#journal.complete(action.id, receipt.digest, result));
       retainQuarantine = false;
       return {
         status: 'completed',
