@@ -1387,3 +1387,48 @@ test('live reservation renewal with a foreign receipt never dispatches operation
   assert.equal(pending[0]?.reservationId, reservation.id);
   assert.equal(pending[0]?.sessionId, reservation.sessionId);
 });
+
+test('device listing and removal never cross account boundaries', async (t) => {
+  const removed: string[] = [];
+  const accounts = {
+    async resolveOrCreateAccount(principal: { subject: string }) {
+      return { accountId: principal.subject === 'owner' ? ACCOUNT_A : ACCOUNT_B };
+    },
+    async listDevices(accountId: string) {
+      return accountId === ACCOUNT_A
+        ? [{ accountId, deviceId: DEVICE_ID, addedAt: '2026-10-01T00:00:00.000Z', status: 'active' }]
+        : [];
+    },
+    async removeDevice(accountId: string, deviceId: string) {
+      if (accountId !== ACCOUNT_A) throw new OperatorError('ACCOUNT_DEVICE_NOT_FOUND', 'Not owned.');
+      removed.push(deviceId);
+      return { status: 'removed' };
+    }
+  };
+  const service = new RelayControlService({
+    hub: {} as any,
+    results: {} as any,
+    accounts: accounts as any,
+    devices: { listDevices: async () => [{ deviceId: DEVICE_ID, deviceName: 'Example laptop', status: 'active' }] } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+  async function call(path: string, subject: string, deviceId?: string) {
+    return fetch(`http://127.0.0.1:${port}${path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ principal: { issuer: 'https://example.org', subject }, ...(deviceId ? { deviceId } : {}) })
+    });
+  }
+  const list = await call('/v1/account/devices', 'owner');
+  assert.equal(list.status, 200);
+  assert.deepEqual((await list.json() as any).devices.map((d: any) => d.deviceName), ['Example laptop']);
+  const foreign = await call('/v1/account/devices', 'other');
+  assert.deepEqual((await foreign.json() as any).devices, []);
+  const denied = await call('/v1/account/devices/remove', 'other', DEVICE_ID);
+  assert.equal(denied.status, 409);
+  assert.deepEqual(removed, []);
+  const allowed = await call('/v1/account/devices/remove', 'owner', DEVICE_ID);
+  assert.equal(allowed.status, 200);
+  assert.deepEqual(removed, [DEVICE_ID]);
+});

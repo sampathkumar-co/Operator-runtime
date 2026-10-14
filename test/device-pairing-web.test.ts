@@ -146,3 +146,33 @@ test('mecord runtime advertises direct secure pairing URL', () => {
   assert.match(agent, /pair this device:/);
   assert.match(agent, /url\.searchParams\.set\('code', userCode\)/);
 });
+
+test('management PKCE uses a one-time state and never calls the claim endpoint', async () => {
+  let exchanges = 0;
+  const service = createPairingService({
+    fetchFn: async (url: URL | string) => {
+      assert.match(String(url), /\/api\/oidc\/token$/);
+      exchanges++;
+      return new Response(JSON.stringify({ access_token: 'test-access-only', expires_in: 180 }), { status: 200 });
+    }
+  });
+  const started = service.startManagement();
+  const url = new URL(started.authorizationUrl);
+  assert.equal(url.searchParams.get('code_challenge_method'), 'S256');
+  assert.equal(url.searchParams.has('user_code'), false);
+  const state = url.searchParams.get('state');
+  const session = await service.complete({ code: 'oauth-example', state });
+  assert.deepEqual(session, { status: 'management', accessToken: 'test-access-only', expiresIn: 180 });
+  assert.equal(exchanges, 1);
+  await assert.rejects(service.complete({ code: 'oauth-example', state }), /PAIR_STATE_INVALID/);
+});
+
+test('portal management UI stores bearer authority only in server memory', () => {
+  const source = text('deploy/auth-portal/server.mjs');
+  const dashboard = text('deploy/auth-portal/account-dashboard.mjs');
+  assert.match(source, /HttpOnly; Secure; SameSite=Lax/);
+  assert.match(source, /accountCsrfAuthorized/);
+  assert.match(source, /timingSafeEqual/);
+  assert.match(dashboard, /\/account\/api\/remove/);
+  assert.doesNotMatch(dashboard, /localStorage|sessionStorage|accessToken/);
+});

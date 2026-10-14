@@ -114,7 +114,10 @@ h1{font-size:clamp(30px,4vw,42px);letter-spacing:-.055em;margin:0 0 12px;line-he
   async function signOut(){
     if(busy)return;busy=true;
     try{
-      const local=await fetch('/account/logout',{method:'POST',credentials:'same-origin',headers:{'x-mecord-csrf':csrf}});
+      const response=await fetch('/account/api/session',{credentials:'same-origin',cache:'no-store'});
+      if(!response.ok)throw new Error('Could not verify the account session.');
+      const session=await response.json();
+      const local=await fetch('/account/logout',{method:'POST',credentials:'same-origin',headers:{'x-mecord-csrf':session.csrf||csrf}});
       if(!local.ok)throw new Error('Portal session could not be cleared.');
       const remote=await fetch('/api/logout',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({targetURL:'https://auth.splcart.in/signin'})});
       if(!remote.ok)throw new Error('Your portal session ended, but the sign-in session could not be cleared. Retry logout before switching accounts.');

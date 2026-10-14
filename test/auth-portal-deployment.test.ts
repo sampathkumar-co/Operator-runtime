@@ -89,7 +89,7 @@ test('OAuth login page preserves flow fields and completes Authelia explicit con
   assert.match(source, /data\.redirect_uri/);
   assert.match(source, /location\.assign\(data\.redirect_uri\)/);
   assert.doesNotMatch(source, /\/api\/oidc\/authorization\?consent_id=/);
-  assert.match(source, /location\.assign\('\/recover'\)/);
+  assert.match(source, /location\.assign\(activeOAuth\?'\/recover':'\/account'\)/);
   assert.doesNotMatch(source, /auth_native/);
   assert.match(source, /Account created\. Sign in to continue\./);
 });

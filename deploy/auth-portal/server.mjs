@@ -384,9 +384,18 @@ ${openSignup ? "" : '<label for="signupInvite">Registration code</label><input i
     document.querySelector('.tabs').style.display=consent?'none':'grid';
     setTimeout(()=>{ const el=byId(login?'loginUsername':'signupUsername'); if(el) el.focus(); },0);
   }
+  async function clearDashboardSession(){
+    const session=await fetch('/account/api/session',{credentials:'same-origin',cache:'no-store'});
+    if(!session.ok)throw new Error('Could not validate account session.');
+    const data=await session.json();
+    if(!data.active)return;
+    const closed=await fetch('/account/logout',{method:'POST',credentials:'same-origin',headers:{'x-mecord-csrf':data.csrf}});
+    if(!closed.ok)throw new Error('Could not clear existing device-management session.');
+  }
   async function switchAccount(){
     const button=byId('changeAccount');button.disabled=true;
     try{
+      await clearDashboardSession();
       const r=await fetch('/api/logout',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({targetURL:'https://auth.splcart.in/signin'})});
       if(!r.ok)throw new Error('Could not end the current sign-in session.');
       location.replace('/signin?switched=1');
@@ -550,6 +559,13 @@ button{width:100%;height:48px;border:0;border-radius:10px;background:var(--brand
   document.getElementById('pairSwitch').addEventListener('click',async()=>{
     const button=document.getElementById('pairSwitch');button.disabled=true;
     try{
+      const s=await fetch('/account/api/session',{credentials:'same-origin',cache:'no-store'});
+      if(!s.ok)throw new Error('Could not validate account session.');
+      const data=await s.json();
+      if(data.active){
+        const cleared=await fetch('/account/logout',{method:'POST',credentials:'same-origin',headers:{'x-mecord-csrf':data.csrf}});
+        if(!cleared.ok)throw new Error('Could not clear the previous account session.');
+      }
       const r=await fetch('/api/logout',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({targetURL:'https://auth.splcart.in/signin'})});
       if(!r.ok)throw new Error('Could not sign out.');
       location.assign('/signin?switched=1');
@@ -597,6 +613,10 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && requestURL.pathname === '/account/start') {
       const started = pairing.startManagement();
       return redirect(res, started.authorizationUrl);
+    }
+    if (req.method === 'GET' && requestURL.pathname === '/account/api/session') {
+      const session = currentAccountSession(req);
+      return send(res, 200, { ok: true, active: Boolean(session), ...(session ? { csrf: session.csrf } : {}) });
     }
     if (req.method === 'GET' && requestURL.pathname === '/account/api/devices') {
       const session = currentAccountSession(req);
