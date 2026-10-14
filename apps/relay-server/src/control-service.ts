@@ -31,16 +31,16 @@ export interface RelayControlDiagnostic {
 export class RelayControlService {
   #hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice' | 'reserveDevice' | 'heartbeatDeviceReservation' | 'releaseDeviceReservation' | 'listDeviceReservations'>;
   #results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>;
-  #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>;
+  #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice' | 'listDevices' | 'removeDevice'>;
   #enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>;
-  #devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>;
+  #devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice' | 'listDevices'>;
   #token: string;
   #developerAccounts: Set<string>;
   #onDiagnostic?: (event: RelayControlDiagnostic) => void;
   #reservationReconciliations?: Pick<RelayReservationReconciliationStore, 'record' | 'resolve' | 'pending'>;
   #server: http.Server | null = null;
 
-  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice' | 'reserveDevice' | 'heartbeatDeviceReservation' | 'releaseDeviceReservation' | 'listDeviceReservations'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; reservationReconciliations?: Pick<RelayReservationReconciliationStore, 'record' | 'resolve' | 'pending'>; token: string; developerAccountIds?: string; onDiagnostic?: (event: RelayControlDiagnostic) => void }) {
+  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice' | 'reserveDevice' | 'heartbeatDeviceReservation' | 'releaseDeviceReservation' | 'listDeviceReservations'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice' | 'listDevices' | 'removeDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice' | 'listDevices'>; reservationReconciliations?: Pick<RelayReservationReconciliationStore, 'record' | 'resolve' | 'pending'>; token: string; developerAccountIds?: string; onDiagnostic?: (event: RelayControlDiagnostic) => void }) {
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#hub = options.hub;
     this.#results = options.results;
@@ -63,7 +63,7 @@ export class RelayControlService {
           send(response, 200, { ok: true, service: 'operator-relay-control', version: 1 });
           return;
         }
-        if (request.method !== 'POST' || !['/v1/execute', '/v1/task', '/v1/operation', '/v1/knowledge', '/v1/account/erase', '/v1/account/default-device', '/v1/device-enrollment/claim'].includes(request.url ?? '')) {
+        if (request.method !== 'POST' || !['/v1/execute', '/v1/task', '/v1/operation', '/v1/knowledge', '/v1/account/erase', '/v1/account/default-device', '/v1/account/devices', '/v1/account/devices/remove', '/v1/device-enrollment/claim'].includes(request.url ?? '')) {
           send(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: 'Route not found.' } });
           return;
         }
@@ -76,6 +76,29 @@ export class RelayControlService {
           if (eraseBody.principal === undefined) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Verified principal is required for account erasure.');
           const erased = await this.#accounts.erasePrincipal(validPrincipal(eraseBody.principal));
           send(response, 200, { ok: true, ...erased });
+          return;
+        }
+        if (request.url === '/v1/account/devices' || request.url === '/v1/account/devices/remove') {
+          // Only a verified OAuth principal, never a caller-provided accountId, grants account management.
+          const body = await readJson(request) as { principal?: unknown; deviceId?: unknown };
+          if (body.principal === undefined) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Verified principal is required.');
+          const principal = validPrincipal(body.principal);
+          const accountId = (await this.#accounts.resolveOrCreateAccount(principal)).accountId;
+          if (request.url === '/v1/account/devices') {
+            if (!this.#devices) throw new OperatorError('DEVICE_REGISTRY_UNAVAILABLE', 'Device registry unavailable.');
+            const memberships = await this.#accounts.listDevices(accountId);
+            const registered = new Map((await this.#devices.listDevices()).map(device => [device.deviceId, device]));
+            const devices = memberships.map(membership => ({
+              deviceId: membership.deviceId,
+              deviceName: registered.get(membership.deviceId)?.deviceName ?? 'Unnamed computer',
+              addedAt: membership.addedAt
+            }));
+            send(response, 200, { ok: true, devices });
+            return;
+          }
+          const deviceId = validUuid(String(body.deviceId ?? ''), 'deviceId');
+          await this.#accounts.removeDevice(accountId, deviceId, 'account-owner-request');
+          send(response, 200, { ok: true, status: 'removed', deviceId });
           return;
         }
         if (request.url === '/v1/account/default-device') {

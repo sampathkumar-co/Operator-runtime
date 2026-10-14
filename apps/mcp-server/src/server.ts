@@ -106,6 +106,63 @@ if (publicEdge) {
     });
   }
 
+
+  // Device administration derives the account exclusively from verified OAuth tokens.
+  if (!developerEdge) {
+    async function authorizeDeviceAdmin(request: any, reply: FastifyReply, write: boolean): Promise<{ issuer: string; subject: string } | null> {
+      const webRequest = await toWebRequest(request.raw, request.body);
+      const rejected = validatePublicHeaders(webRequest);
+      if (rejected) { await sendSdkResponse(reply, rejected); return null; }
+      const key = requestClientKey(request.raw);
+      const rate = publicRequestLimiter!.hit(key);
+      if (!rate.allowed) { sendRateLimit(reply, rate); return null; }
+      const lock = publicAuthFailureLimiter!.isLimited(key);
+      if (!lock.allowed) { sendRateLimit(reply, lock); return null; }
+      const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(publicEdge.publicUrl);
+      const requiredScopes = [write ? publicEdge.writeScope : publicEdge.readScope];
+      let authInfo: AuthInfo;
+      try {
+        authInfo = await verifyBearerToken(request.headers.authorization, { verifier: publicEdge.verifier, requiredScopes, resourceMetadataUrl });
+      } catch (error) {
+        publicAuthFailureLimiter!.hit(key);
+        await sendSdkResponse(reply, bearerAuthChallengeResponse(error, { requiredScopes, resourceMetadataUrl }));
+        return null;
+      }
+      publicAuthFailureLimiter!.clear(key);
+      const principal = principalFromAuthInfo(authInfo, publicEdge.publicUrl);
+      const accountRate = publicPrincipalLimiter!.hit(principalRateKey(principal.issuer, principal.subject));
+      if (!accountRate.allowed) { sendRateLimit(reply, accountRate); return null; }
+      return principal;
+    }
+
+    app.get('/pair/api/devices', async (request, reply) => {
+      const principal = await authorizeDeviceAdmin(request, reply, false);
+      if (!principal) return reply;
+      try {
+        const devices = await new LocalAgentClient(agentUrl, agentToken, principal).listAccountDevices();
+        return reply.header('cache-control', 'no-store').code(200).send({ ok: true, devices });
+      } catch {
+        return reply.header('cache-control', 'no-store').code(503).send({ ok: false, error: { code: 'ACCOUNT_DEVICES_UNAVAILABLE' } });
+      }
+    });
+
+    app.post('/pair/api/devices/remove', async (request, reply) => {
+      const principal = await authorizeDeviceAdmin(request, reply, true);
+      if (!principal) return reply;
+      const body = request.body as { deviceId?: unknown } | undefined;
+      const deviceId = body?.deviceId;
+      if (typeof deviceId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(deviceId))
+        return reply.header('cache-control', 'no-store').code(400).send({ ok: false, error: { code: 'DEVICE_ID_INVALID' } });
+      try {
+        await new LocalAgentClient(agentUrl, agentToken, principal).removeAccountDevice(deviceId);
+        return reply.header('cache-control', 'no-store').code(200).send({ ok: true, status: 'removed' });
+      } catch (error) {
+        const code = (error as { code?: unknown })?.code;
+        return reply.header('cache-control', 'no-store').code(409).send({ ok: false, error: { code: code === 'ACCOUNT_DEVICE_NOT_FOUND' ? code : 'ACCOUNT_DEVICE_REMOVE_FAILED' } });
+      }
+    });
+  }
+
   if (!developerEdge) app.post('/pair/api/claim', async (request, reply) => {
     const webRequest = await toWebRequest(request.raw, request.body);
     const rejected = validatePublicHeaders(webRequest);
@@ -164,6 +221,7 @@ if (publicEdge) {
         'DEVICE_ENROLLMENT_EXPIRED',
         'DEVICE_ENROLLMENT_ALREADY_CLAIMED',
         'DEVICE_ALREADY_OWNED',
+        'DEVICE_ACCOUNT_CONFLICT',
         'ACCOUNT_DISABLED',
         'ACCOUNT_ERASING'
       ].includes(code) ? code : 'DEVICE_ENROLLMENT_CLAIM_FAILED';

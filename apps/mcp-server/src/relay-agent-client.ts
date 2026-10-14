@@ -65,6 +65,33 @@ export class RelayAgentClient {
     return { status: 'claimed' };
   }
 
+  async listAccountDevices(): Promise<Array<{ deviceId: string; deviceName: string; addedAt: string }>> {
+    const result = await this.#accountDeviceRequest('/v1/account/devices', {});
+    if (!Array.isArray(result.devices)) throw new OperatorError('ACCOUNT_DEVICE_LIST_INVALID', 'Invalid relay device list.');
+    return result.devices as Array<{ deviceId: string; deviceName: string; addedAt: string }>;
+  }
+
+  async removeAccountDevice(deviceId: string): Promise<void> {
+    const result = await this.#accountDeviceRequest('/v1/account/devices/remove', { deviceId: validUuid(deviceId, 'deviceId') });
+    if (result.status !== 'removed') throw new OperatorError('ACCOUNT_DEVICE_REMOVE_FAILED', 'Device removal was not confirmed.');
+  }
+
+  async #accountDeviceRequest(pathname: string, extra: Record<string, unknown>): Promise<any> {
+    if (!this.#principal) throw new OperatorError('ACCOUNT_DEVICE_PRINCIPAL_REQUIRED', 'Verified principal required.');
+    const response = await fetch(new URL(pathname, this.#url), {
+      method: 'POST', redirect: 'error',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${this.#token}` },
+      body: JSON.stringify({ principal: this.#principal, ...extra }),
+      signal: AbortSignal.timeout(15_000)
+    });
+    const result = await response.json().catch(() => null) as any;
+    if (!response.ok || result?.ok !== true) throw new OperatorError(
+      typeof result?.error?.code === 'string' ? result.error.code : 'ACCOUNT_DEVICE_REQUEST_FAILED',
+      'Account device request was not accepted.'
+    );
+    return result;
+  }
+
   async execute(action: ActionRequest): Promise<ActionResult> {
     const taskId = action.taskId ?? currentMcpTaskId();
     const outboundAction = taskId ? { ...action, taskId } : action;
