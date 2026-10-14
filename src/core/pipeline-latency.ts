@@ -9,7 +9,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 export const PIPELINE_STAGES = [
- 'hosted.ingress_auth','hosted.validation_serialization','relay.queue','relay.queue_wait','relay.dispatch',
+ 'hosted.ingress_auth','hosted.validation_serialization','relay.queue','relay.queue_wait','relay.result_wait','relay.dispatch',
  'relay.network_to_device','local.request_processing','local.authorization_approval',
  'local.journal_audit','local.resource_lease','local.capability_routing',
  'browser.target_discovery','browser.cdp_connection','browser.cdp_roundtrip','browser.operation',
@@ -72,7 +72,7 @@ export class PipelineLatencyRecorder {
  #slots:Array<PipelineSpan|undefined>;#size=0;#next=0;#dropped=0;
  constructor(options:{enabled?:boolean;capacity?:number}={}) {
   this.enabled=options.enabled??process.env.OPERATOR_PIPELINE_TRACE_ENABLED==='1';
-  this.capacity=Math.max(1,Math.min(8192,Math.trunc(options.capacity??8192)));
+  this.capacity=pipelineCapacity(options.capacity??process.env.OPERATOR_PIPELINE_TRACE_CAPACITY);
   this.#slots=new Array(this.capacity);
  }
  get droppedSpans():number{return this.#dropped;}
@@ -137,6 +137,10 @@ export class PipelineLatencyRecorder {
  report(metadata:PipelineReport['metadata']):PipelineReport{
   return summarizePipelineSpans(this.snapshot(),metadata,this.#dropped);
  }
+}
+function pipelineCapacity(input:unknown):number{
+ const parsed=typeof input==='number'?input:Number(input??8192);
+ return Number.isFinite(parsed)?Math.max(1,Math.min(65_536,Math.trunc(parsed))):8192;
 }
 export function summarizePipelineSpans(spans:readonly PipelineSpan[],
  metadata:PipelineReport['metadata'],droppedSpans=0):PipelineReport {

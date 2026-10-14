@@ -73,6 +73,12 @@ test('bounded memory ring, strict privacy field projection and invalid measureme
  assert.equal(recorder.snapshot().length,3);
 });
 
+test('trace capacity remains bounded and accepts a larger opt-in certification buffer',()=>{
+ assert.equal(new PipelineLatencyRecorder({enabled:true,capacity:65_536}).capacity,65_536);
+ assert.equal(new PipelineLatencyRecorder({enabled:true,capacity:1_000_000}).capacity,65_536);
+ assert.equal(new PipelineLatencyRecorder({enabled:true,capacity:Number.NaN}).capacity,8192);
+});
+
 test('disabled tracing does not record spans or alter operation results',async()=>{
  const recorder=new PipelineLatencyRecorder({enabled:false});
  assert.equal(await recorder.measure({stage:'browser.operation',origin:'browser',traceId:'secret'},()=>42),42);

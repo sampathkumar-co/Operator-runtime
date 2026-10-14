@@ -14,6 +14,7 @@ import type { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
 import type { DeviceReservation } from '../../../src/core/device-pool.ts';
 import type { RelayReservationReconciliation, RelayReservationReconciliationStore } from '../../../src/core/relay-reservation-reconciliation.ts';
+import { pipelineLatency } from '../../../src/core/pipeline-latency.ts';
 
 const MAX_BODY_BYTES = 512 * 1024;
 const DEFAULT_WAIT_MS = 10 * 60_000;
@@ -30,7 +31,7 @@ export interface RelayControlDiagnostic {
 
 export class RelayControlService {
   #hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice' | 'reserveDevice' | 'heartbeatDeviceReservation' | 'releaseDeviceReservation' | 'listDeviceReservations'>;
-  #results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>;
+  #results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'> & Partial<Pick<RelayResultStore, 'waitFor'>>;
   #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>;
   #enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>;
   #devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>;
@@ -40,7 +41,7 @@ export class RelayControlService {
   #reservationReconciliations?: Pick<RelayReservationReconciliationStore, 'record' | 'resolve' | 'pending'>;
   #server: http.Server | null = null;
 
-  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice' | 'reserveDevice' | 'heartbeatDeviceReservation' | 'releaseDeviceReservation' | 'listDeviceReservations'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; reservationReconciliations?: Pick<RelayReservationReconciliationStore, 'record' | 'resolve' | 'pending'>; token: string; developerAccountIds?: string; onDiagnostic?: (event: RelayControlDiagnostic) => void }) {
+  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice' | 'reserveDevice' | 'heartbeatDeviceReservation' | 'releaseDeviceReservation' | 'listDeviceReservations'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'> & Partial<Pick<RelayResultStore, 'waitFor'>>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; reservationReconciliations?: Pick<RelayReservationReconciliationStore, 'record' | 'resolve' | 'pending'>; token: string; developerAccountIds?: string; onDiagnostic?: (event: RelayControlDiagnostic) => void }) {
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#hub = options.hub;
     this.#results = options.results;
@@ -199,10 +200,21 @@ export class RelayControlService {
           delivery = dispatched.delivery;
         }
         const deadline = Date.now() + waitMs;
-        while (Date.now() <= deadline) {
+        if (this.#results.waitFor) {
+          const waitAbort = new AbortController();
+          const abortWait = () => waitAbort.abort();
+          request.once('aborted', abortWait);
+          response.once('close', abortWait);
+          let stored: Awaited<ReturnType<RelayResultStore['waitFor']>>;
+          try {
+            stored = await pipelineLatency.measure({ stage: 'relay.result_wait', origin: 'relay-server', traceId: action.taskId ?? action.id },
+              () => this.#results.waitFor!(routedDeviceId, delivery.seq, delivery.id, Math.max(0, deadline - Date.now()), waitAbort.signal));
+          } finally {
+            request.off('aborted', abortWait);
+            response.off('close', abortWait);
+          }
           if (request.aborted || response.destroyed) return;
-          const stored = await this.#results.get(routedDeviceId, delivery.seq);
-          if (stored && stored.deliveryId === delivery.id) {
+          if (stored) {
             await this.#assertReplayAuthority(accountId, routedDeviceId, stored.replayAuthority);
             const result = stored.result as unknown as ActionResult;
             if (!isActionResult(result, action.capability)) {
@@ -211,7 +223,21 @@ export class RelayControlService {
             send(response, 200, result);
             return;
           }
-          await new Promise((resolve) => setTimeout(resolve, 50));
+        } else {
+          while (Date.now() <= deadline) {
+            if (request.aborted || response.destroyed) return;
+            const stored = await this.#results.get(routedDeviceId, delivery.seq);
+            if (stored && stored.deliveryId === delivery.id) {
+              await this.#assertReplayAuthority(accountId, routedDeviceId, stored.replayAuthority);
+              const result = stored.result as unknown as ActionResult;
+              if (!isActionResult(result, action.capability)) {
+                return send(response, 502, relayFailure(action.capability, startedAt, 'RELAY_RESULT_INVALID', 'Device returned a malformed ActionResult.', routedDeviceId, delivery.seq));
+              }
+              send(response, 200, result);
+              return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
         }
         send(response, 504, relayFailure(
           action.capability,

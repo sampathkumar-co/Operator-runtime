@@ -33,6 +33,31 @@ test('relay results persist idempotently and reject conflicting rewrites', async
   assert.deepEqual((await reloaded.get(deviceId, 1))?.result, { ok: true, output: { value: 42 } });
 });
 
+test('relay result wait wakes after the durable commit and preserves exact delivery identity', async (t) => {
+  const state = await temp(t);
+  const deviceId = crypto.randomUUID();
+  const deliveryId = crypto.randomUUID();
+  const store = new RelayResultStore(state);
+  const waiting = store.waitFor(deviceId, 1, deliveryId, 2_000);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await store.put(deviceId, 1, deliveryId, { ok: true });
+  assert.equal((await waiting)?.deliveryId, deliveryId);
+  assert.equal(await store.waitFor(deviceId, 1, crypto.randomUUID(), 10), null);
+  const controller = new AbortController();
+  const aborted = store.waitFor(deviceId, 2, crypto.randomUUID(), 2_000, controller.signal);
+  controller.abort();
+  assert.equal(await aborted, null);
+});
+
+test('relay result wait returns immediately for an already-aborted signal', async (t) => {
+  const state = await temp(t);
+  const controller = new AbortController();
+  controller.abort();
+  assert.equal(await new RelayResultStore(state).waitFor(
+    crypto.randomUUID(), 1, crypto.randomUUID(), 60_000, controller.signal
+  ), null);
+});
+
 test('relay result payloads are bounded and stored hashes are corruption-detecting', async (t) => {
   const state = await temp(t);
   const deviceId = crypto.randomUUID();
