@@ -27,6 +27,16 @@ test('public-edge CI smoke verifies current Mecord Connect branding', () => {
   assert.doesNotMatch(workflow, /grep -q 'operator-mcp-server'|grep -q 'SPLCART Operator'/);
 });
 
+test('post-rollout verifier refuses recovery ingress that is absent or anonymously authorized', () => {
+  const script = text('deploy/public-edge/verify-live-relay-gateway.sh');
+  assert.match(script, /v1\/device-recovery\/inspect/);
+  assert.match(script, /recovery_inspect_status/);
+  assert.match(script, /\[ "\$recovery_inspect_status" != 401 \]/);
+  assert.match(script, /Recovery inspection route mismatch/);
+  assert.match(script, /authenticated acceptance remains required/);
+  assert.doesNotMatch(script, /Bearer |Authorization:|session\.token/);
+});
+
 test('public-edge compose publishes backends only on host loopback and never publishes relay control', () => {
   const compose = text('deploy/public-edge/compose.yml');
   assert.match(compose, /127\.0\.0\.1:\$\{OPERATOR_MCP_LOOPBACK_PORT:-47200\}:47200/);
