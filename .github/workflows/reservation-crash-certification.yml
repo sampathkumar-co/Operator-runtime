@@ -8,6 +8,8 @@ on:
       - 'src/core/digital-operations.ts'
       - 'src/core/durable-state-lock.ts'
       - 'src/core/durable-state.ts'
+      - 'src/core/process-instance.ts'
+      - 'native/windows-path-lease/**'
       - 'test/process-crash-reservation.test.ts'
       - 'test/fixtures/reservation-crash-worker.mjs'
       - '.github/workflows/reservation-crash-certification.yml'
@@ -19,6 +21,8 @@ on:
       - 'src/core/digital-operations.ts'
       - 'src/core/durable-state-lock.ts'
       - 'src/core/durable-state.ts'
+      - 'src/core/process-instance.ts'
+      - 'native/windows-path-lease/**'
       - 'test/process-crash-reservation.test.ts'
       - 'test/fixtures/reservation-crash-worker.mjs'
       - '.github/workflows/reservation-crash-certification.yml'
@@ -42,5 +46,12 @@ jobs:
         with:
           node-version: '22.23.2'
           package-manager-cache: false
+      - name: Build real Windows process-instance witness
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./native/windows-path-lease/build.ps1
+          $helper = (Resolve-Path native/windows-path-lease/target/release/operator-windows-path-lease.exe).Path
+          "OPERATOR_WINDOWS_PATH_LEASE_PATH=$helper" >> $env:GITHUB_ENV
       - name: Verify original crash state transitions using synthetic durable state
         run: node --experimental-strip-types --test test/process-crash-reservation.test.ts
