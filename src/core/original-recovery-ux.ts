@@ -1,4 +1,5 @@
 import type { ActionJournalEntry } from './action-transition-journal.ts';
+import type { ActionRisk } from './types.ts';
 import type { LocalActionExecutionRecord } from '../../apps/local-agent/src/action-execution-store.ts';
 
 /** Read-only UI projection. Never include payload, output, secret, authority hash, or signer material. */
@@ -9,7 +10,7 @@ export type OriginalRecoveryStatus =
 export interface OriginalRecoveryRow {
   actionId: string;
   capability: string;
-  risk: 'read' | 'write' | 'external' | 'destructive';
+  risk: ActionRisk;
   status: OriginalRecoveryStatus;
   explanation: string;
   journal: string;
