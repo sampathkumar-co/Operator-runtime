@@ -1,4 +1,5 @@
-import { actionHash } from '../../../src/core/action-identity.ts';
+import crypto from 'node:crypto';
+import { actionHash, canonicalJson } from '../../../src/core/action-identity.ts';
 import type { ActionJournalEntry } from '../../../src/core/action-transition-journal.ts';
 import type { ActionRequest } from '../../../src/core/types.ts';
 import {
@@ -46,12 +47,15 @@ export function recoveryDisposition(input: RecoveryPolicyInput): RecoveryDisposi
   // An INTERRUPTED journal is already fenced from any future dispatch. The
   // historical receipt can be repaired only for an exact terminal journal
   // lineage; no provider is run by this policy.
+  const terminalDigest = crypto.createHash('sha256').update(canonicalJson({
+    actionId: action.id, actionDigest: actionHash(action), kind: 'pre_dispatch_interrupted'
+  }), 'utf8').digest('hex');
   const terminalFence = journal.generation === 1 && journal.state === 'INTERRUPTED' &&
     journal.transitions.length >= 2 &&
     journal.transitions[0]?.state === 'PREPARED' &&
     journal.transitions.at(-1)?.state === 'INTERRUPTED' &&
     journal.transitions.at(-1)?.provider === 'agent-kernel' &&
-    journal.transitions.at(-1)?.resultDigest !== undefined &&
+    journal.transitions.at(-1)?.resultDigest === terminalDigest &&
     (journal.transitions.length === 2 ||
       (journal.transitions.length === 3 && journal.transitions[1]?.state === 'DEFERRED' &&
         journal.transitions[1]?.provider === 'policy'));
