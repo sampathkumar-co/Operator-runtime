@@ -1,6 +1,7 @@
 import test from 'node:test';
+import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
-import { actionHash } from '../src/core/action-identity.ts';
+import { actionHash, canonicalJson } from '../src/core/action-identity.ts';
 import { recoveryDisposition, type RecoveryPolicyInput } from '../apps/local-agent/src/recovery-decision.ts';
 import type { ActionRequest } from '../src/core/types.ts';
 
@@ -9,6 +10,9 @@ const action: ActionRequest = {
   input: { url: 'https://example.com' }, provenance: { kind: 'chatgpt' }
 };
 const osIdentity = (started: string, pid = 2331) => ({ started, pid });
+const terminalDigest = crypto.createHash('sha256').update(canonicalJson({
+  actionId: action.id, actionDigest: actionHash(action), kind: 'pre_dispatch_interrupted'
+})).digest('hex');
 const linux = 'linux-boot-id:9d958c0b-0123-4567-8910-abcd12345678:pidns:401:';
 
 function fixture(): RecoveryPolicyInput {
@@ -81,8 +85,10 @@ test('vNext: an original exact kernel terminal fence can be reconciled without t
   x.currentProcess = osIdentity('windows-filetime:134364173961843988');
   x.journal.state = 'INTERRUPTED';
   x.journal.transitions.push({ seq: 2, state: 'INTERRUPTED', at: x.journal.updatedAt,
-    provider: 'agent-kernel', resultDigest: 'c'.repeat(64) });
+    provider: 'agent-kernel', resultDigest: terminalDigest });
   assert.equal(recoveryDisposition(x), 'RECONCILE_TERMINAL_FENCE');
+  x.journal.transitions.at(-1)!.resultDigest = 'c'.repeat(64);
+  assert.equal(recoveryDisposition(x), 'REVIEW_OR_PROVIDER_PROOF_REQUIRED');
 });
 test('vNext: fake terminal fence and replayed prior dispatch are refused', () => {
   const x = fixture();
