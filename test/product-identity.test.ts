@@ -14,9 +14,9 @@ test('Mecord Connect public product and npm runtime versions follow the declared
   assert.equal(PRODUCT_VERSION, releaseState.versions.publicProduct);
   assert.equal(releaseState.versions.policy, 'public-schema-stable-runtime-semver-independent');
   assert.match(PRODUCT_VERSION, /^\d+\.\d+\.\d+$/);
-  assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
+  assert.match(pkg.version, /^\d+\.\d+\.\d+(?:-rc\.[1-9]\d*)?$/);
   assert.equal(pkg.name, PRODUCT_NAME);
-  const runtimeParts = pkg.version.split('.').map(Number);
+  const runtimeParts = pkg.version.split('-')[0]!.split('.').map(Number);
   const publishedRuntimeParts = releaseState.versions.runtimePackage.split('.').map(Number);
   const compare = (left: number[], right: number[]) => {
     for (let index = 0; index < 3; index += 1) {
