@@ -41,6 +41,7 @@ import type { StudioWorkflowExecutor } from '../../../src/core/studio-executor.t
 import { semanticCheckpointDigest, type SemanticCheckpointManager, type SignedSemanticCheckpoint } from '../../../src/core/semantic-checkpoint.ts';
 import { projectTaskRuntime } from '../../../src/core/runtime-projection.ts';
 import { buildApprovalCenterModel, buildGuidedOnboardingModel, buildRecoveryCenterModel, type RecoveryCandidateInput } from '../../../src/core/control-center-ux.ts';
+import { buildOriginalRecoveryReviewModel } from '../../../src/core/original-recovery-ux.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import type { UniversalAgentGateway } from '../../../src/core/universal-agent-gateway.ts';
 import {
@@ -767,6 +768,37 @@ export function createLocalAgentServer(options: {
         model: buildRecoveryCenterModel(candidates),
         configured: Boolean(options.tasks)
       });
+      return;
+    }
+
+    // Historical original-device receipts are distinct from task projections.
+    // Expose bounded, redacted REVIEW data only. Agent bearer tokens do not
+    // constitute a human signature, including when called from the website.
+    if (pathname === '/v1/control-center/original-recovery' && req.method === 'GET') {
+      if (!options.actionExecutions || !options.agentKernel) {
+        send(res, 200, { ok: true, configured: false,
+          model: buildOriginalRecoveryReviewModel([], []) });
+        return;
+      }
+      try {
+        const [receipts, journal] = await Promise.all([
+          options.actionExecutions.listOperatorPendingReceipts(256),
+          options.agentKernel.journal.list(1000)
+        ]);
+        send(res, 200, { ok: true, configured: true,
+          model: buildOriginalRecoveryReviewModel(receipts, journal) });
+      } catch {
+        send(res, 503, { ok: false, error: { code: 'ORIGINAL_RECOVERY_INSPECTION_FAILED',
+          message: 'Recovery evidence could not be verified; no decision is permitted.' } });
+      }
+      return;
+    }
+    if (pathname.startsWith('/v1/control-center/original-recovery/') && req.method === 'POST') {
+      // Reserved for independently verified WebAuthn user-presence and
+      // user-verification challenge bound to the exact action + case digest.
+      // It must NEVER delegate an owner signature to the agent bearer token.
+      send(res, 403, { ok: false, error: { code: 'OWNER_STEP_UP_NOT_CONFIGURED',
+        message: 'Website adjudication is unavailable until hardware-backed owner verification is certified.' } });
       return;
     }
 
