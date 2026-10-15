@@ -5,6 +5,7 @@ import http from 'node:http';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 import { createRuntime } from '../apps/local-agent/src/runtime-factory.ts';
 import { OriginalRecoveryWebAuthnVerifier } from '../apps/local-agent/src/original-recovery-webauthn.ts';
+import { independentlySignedTestOwnerEnrollment } from './recovery-enrollment-fixture.ts';
 
 test('web owner step-up only signs exact bound case after verified credential and protected origin', async t => {
   const token='u'.repeat(64);
@@ -17,11 +18,15 @@ test('web owner step-up only signs exact bound case after verified credential an
     deviceId:'trusted-device',deviceFingerprint:'Q'.repeat(43),caseDigest:'4'.repeat(64)
   };
   const origin='http://localhost:8300';
-  const verifier=new OriginalRecoveryWebAuthnVerifier({
-    rpId:'localhost',origin,
-    credential:{credentialId,publicKeyPem:publicKey.export({format:'pem',type:'spki'}).toString(),
-      deviceId:caseInfo.deviceId,deviceFingerprint:caseInfo.deviceFingerprint,signCount:0,deviceBound:true}
-  });
+  const credential={credentialId,publicKeyPem:publicKey.export({format:'pem',type:'spki'}).toString(),
+    deviceId:caseInfo.deviceId,deviceFingerprint:caseInfo.deviceFingerprint,signCount:0,deviceBound:true as const};
+  const enrolled=independentlySignedTestOwnerEnrollment(credential,{rpId:'localhost',origin,now:Date.now()});
+  const consumed=new Set<string>();
+  const counterAuthority={async claimVerifiedAssertion(input:{challengeId:string}){
+    if(consumed.has(input.challengeId))throw new Error('DURABLE_REPLAY');
+    consumed.add(input.challengeId);
+  }};
+  const verifier=new OriginalRecoveryWebAuthnVerifier({rpId:'localhost',origin,...enrolled,counterAuthority});
   let signed=0;
   const adjudicator={
     async inspect(actionId:string){assert.equal(actionId,caseInfo.actionId);return caseInfo},

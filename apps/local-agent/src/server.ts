@@ -843,7 +843,7 @@ export function createLocalAgentServer(options: {
           if (fresh.caseDigest !== input.caseDigest) {
             throw new Error('OWNER_STEP_UP_CASE_CHANGED');
           }
-          reviewer.verifier.verifyAndConsume({
+          await reviewer.verifier.verifyAndConsume({
             actionId, caseDigest: input.caseDigest, challengeId: input.challengeId,
             assertion: input.assertion
           });

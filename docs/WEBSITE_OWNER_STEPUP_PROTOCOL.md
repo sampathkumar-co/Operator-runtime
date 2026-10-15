@@ -77,3 +77,34 @@ until the trusted enrollment and UI integration are certified.
 This protocol avoids retyping 64-character action digests, but it must not
 turn a website session, a remotely driven browser or a generic confirmation
 dialog into a forged original-device owner signature.
+
+
+## Additional vNext hardening: independently signed enrollment + replay authority
+
+The signer-verifier must not trust a public key uploaded through a normal
+website or presented by an agent. Instead, the runtime requires a versioned
+signed enrollment certificate issued by an independently administered **Ed25519**
+enrollment authority; the verifier pins that issuer public key out of band.
+The signed certificate covers the exact RP ID, origin, original device ID,
+device fingerprint, non-syncable credential identity, credential public key,
+signature counter floor, issuance date and expiration. Invalid, expired,
+forged, origin-swapped or device-swapped certificates fail closed.
+
+Successful WebAuthn assertions additionally require a **separately administered,
+durable, atomic, rollback-protected replay/counter authority** that claims the
+precise credential, challenge ID, case digest, device ID and sign counter. If
+that service or its evidence is missing, even a valid signature cannot
+authorize a signed journal interruption. The verifier consumes the challenge
+before verification; a failed external claim cannot be replayed.
+
+This change only defines the verified client-side contract and tests with
+fake issuers/counter authority. No real enrollment issuer, counter-ledger,
+hosted verifier or trusted browser enrollment is provisioned. The tests'
+Ed25519 test issuer and in-memory counter stub are **not** production security
+infrastructure. Never deploy them as production admin keys or counters.
+
+For real use the administrator must independently enroll the original owner
+by a separately verified user-gesture ceremony, keep the trusted issuer key
+outside AI-controlled filesystem or settings, and deploy durable off-device
+anti-rollback reconciliation. This is still a **HOLD** gate; the website
+approval button remains disabled.
