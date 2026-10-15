@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
-import { canonicalJson } from './action-identity.ts';
+import { actionHash, canonicalJson } from './action-identity.ts';
+import type { ActionRequest } from './types.ts';
 import { withDurableStateLock } from './durable-state-lock.ts';
 import type { ControlPlaneStore } from './control-plane-store.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
@@ -180,6 +181,60 @@ export class RelayDeliveryStore {
       const delivery = state.streams.find((stream) => stream.deviceId === deviceId)?.deliveries.find((entry) => entry.seq === seq);
       return delivery ? cloneDelivery(delivery) : null;
     });
+  }
+
+  /**
+   * Strictly observational next-delivery proof for an already authenticated,
+   * same-device recovery inspector. It does not call #maintain, #mutate, ACK,
+   * expire, dispatch or persist anything. This is a snapshot, NEVER an
+   * execution grant. The HTTP boundary must re-check account authority.
+   */
+  async inspectNextPending(deviceIdInput: string, expectedPreviousSeqInput: number): Promise<{
+    seq: number;
+    deliveryId: string;
+    kind: string;
+    authority: RelayDeliveryAuthority;
+    action?: { id: string; risk: string; capability: string; hash: string };
+  }> {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    const previous = validNonNegativeSeq(expectedPreviousSeqInput);
+    const state = await this.#read();
+    const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
+    if (!stream || stream.lastAckedSeq !== previous) {
+      throw new OperatorError('RELAY_RECOVERY_INSPECT_CURSOR_MISMATCH',
+        'Device and hosted relay do not agree on the exact preceding acknowledged sequence.', { retryable: false });
+    }
+    const delivery = stream.deliveries.find((candidate) => candidate.seq === previous + 1);
+    if (!delivery || delivery.status !== 'pending' || !delivery.authority ||
+        delivery.authority.deviceId !== deviceId) {
+      throw new OperatorError('RELAY_RECOVERY_INSPECT_NOT_PENDING',
+        'No original authority-bound pending delivery is retained at the next sequence.', { retryable: false });
+    }
+    let action: { id: string; risk: string; capability: string; hash: string } | undefined;
+    if (delivery.kind === 'action') {
+      const raw = delivery.payload.action;
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new OperatorError('RELAY_RECOVERY_INSPECT_ACTION_INVALID', 'Stored action identity cannot be validated.');
+      }
+      const value = raw as Record<string, unknown>;
+      if (typeof value.id !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/.test(value.id) ||
+          typeof value.capability !== 'string' || !/^[a-z][a-z0-9.-]{1,80}$/.test(value.capability) ||
+          !['read', 'write', 'external', 'destructive'].includes(String(value.risk)) ||
+          !value.input || typeof value.input !== 'object' || Array.isArray(value.input) ||
+          !value.provenance || typeof value.provenance !== 'object' || Array.isArray(value.provenance)) {
+        throw new OperatorError('RELAY_RECOVERY_INSPECT_ACTION_INVALID', 'Stored action identity cannot be validated.');
+      }
+      action = {
+        id: value.id,
+        capability: value.capability,
+        risk: value.risk as string,
+        hash: actionHash(value as unknown as ActionRequest)
+      };
+    }
+    return {
+      seq: delivery.seq, deliveryId: delivery.id, kind: delivery.kind,
+      authority: { ...delivery.authority }, ...(action ? { action } : {})
+    };
   }
 
   async pending(deviceIdInput: string, limitInput = 100): Promise<StoredRelayDelivery[]> {
