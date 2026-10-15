@@ -83,4 +83,19 @@ test('original host inspects exact next pending hosted identity without executio
   const revoked = await invoke({ previousSeq: 0 });
   assert.notEqual(revoked.status, 200);
   assert.equal(JSON.stringify(revoked.body).includes(delivery.id), false);
+
+  // A-B-A device rebinding with a newly valid token must NEVER re-authorize
+  // the stale delivery generation or reveal its original action metadata.
+  const rebound = await accounts.bindDevice(acct.accountId, device.deviceId);
+  assert.notEqual(rebound.authorityGeneration, authority.generation);
+  const freshToken = (await sessions.issue({
+    subjectDeviceId: device.deviceId, audience: 'operator-relay',
+    scopes: ['relay:connect', 'relay:result'], ttlMs: 60_000
+  })).token;
+  const staleGeneration = await invoke({ previousSeq: 0 }, freshToken);
+  assert.notEqual(staleGeneration.status, 200);
+  assert.equal(staleGeneration.body.error.code, 'RELAY_RECOVERY_INSPECT_AUTHORITY_REVOKED');
+  assert.equal(JSON.stringify(staleGeneration.body).includes(delivery.id), false);
+  assert.deepEqual(await fs.readFile(path.join(state, 'relay-deliveries.json')), original,
+    'revocation and rebinding must not change the retained hosted delivery');
 });
