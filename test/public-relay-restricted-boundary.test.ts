@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { canRetryUncertainRelayDelivery, uncertainMutationRecoveryResult, LocalAgentRelayRunner } from '../apps/local-agent/src/relay-agent.ts';
+import { canRetryUncertainRelayDelivery, uncertainMutationRecoveryResult, eligibleAuthorityConflictQuarantine, LocalAgentRelayRunner } from '../apps/local-agent/src/relay-agent.ts';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 import { LocalActionExecutionStore } from '../apps/local-agent/src/action-execution-store.ts';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
@@ -1448,4 +1448,161 @@ test('timed-out receipt lookup still establishes a mutation replay fence before 
   const persisted = await new LocalActionExecutionStore(stateDir).lookup(action as any, delivery.payload.approvalAuthority);
   assert.equal(persisted.status, 'processing', 'the exact action is durably fenced against future replay');
   assert.equal((await new LocalActionExecutionStore(stateDir).begin(action as any, delivery.payload.approvalAuthority)).status, 'processing');
+});
+
+
+test('recovered write from a different execution authority returns bounded UNKNOWN without replay or touching original receipt', { timeout: 15_000 }, async t => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-authority-conflict-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  const device = await identity.loadOrCreate('Authority Conflict Fixture');
+  const oldAuthority = { accountId: crypto.randomUUID(), deviceId: device.deviceId, generation: 1 };
+  const newAuthority = { ...oldAuthority, generation: 2 };
+  const action = {
+    id: crypto.randomUUID(), capability: 'file.write', risk: 'write' as const,
+    input: { path: 'do-not-replay.txt', content: 'old effect unknown' },
+    provenance: { kind: 'chatgpt' as const }
+  };
+  const receipts = new LocalActionExecutionStore(stateDir);
+  await receipts.begin(action, oldAuthority);
+  const receiptPath = path.join(stateDir, 'action-executions.json');
+  const originalBytes = await fs.readFile(receiptPath);
+  const deliveryId = crypto.randomUUID();
+  await fs.writeFile(path.join(stateDir, 'relay-client.json'), JSON.stringify({
+    version: 1, lastAckedServerSeq: 0,
+    processing: { seq: 1, id: deliveryId, startedAt: new Date().toISOString() }
+  }));
+  const localRequests: string[] = [];
+  const localBase = await listen(t, async (req, res) => {
+    localRequests.push(req.url ?? '');
+    await readBody(req);
+    if (req.url === '/v1/action-receipt') {
+      res.writeHead(409, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: { code: 'ACTION_EXECUTION_AUTHORITY_MISMATCH' } }));
+      return;
+    }
+    res.writeHead(500);
+    res.end();
+  });
+  const submitted: any[] = [];
+  const resultBase = await listen(t, async (req, res) => {
+    submitted.push(JSON.parse(await readBody(req)));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const sessionTokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(sessionTokenFile, 'synthetic.token.not-a-real-credential', 'utf8');
+  const frame = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: { action, approvalAuthority: newAuthority, publicBoundary: false }
+  };
+  let onAck!: () => void;
+  const acked = new Promise<void>(resolve => { onAck = resolve; });
+  const runner = new LocalAgentRelayRunner({
+    stateDir, identity, sessionTokenFile,
+    relayUrl: 'ws://127.0.0.1:65455/device',
+    resultUrl: `${resultBase}/v1/device-result`,
+    localAgentBaseUrl: localBase, agentToken: 'q'.repeat(64),
+    relayInternalToken: 'r'.repeat(64), allowLoopbackInsecure: true,
+    socketFactory: url => new ScriptedRelaySocket(url, frame, onAck)
+  });
+  const running = runner.run();
+  let watchdog: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([acked, new Promise<never>((_, reject) => {
+      watchdog = setTimeout(() => reject(new Error('authority conflict recovery ACK timed out')), 10_000);
+    })]);
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
+    runner.stop();
+    await running;
+  }
+  assert.deepEqual(localRequests, ['/v1/action-receipt'], 'no provider execution or secondary local mutation');
+  assert.equal(submitted.length, 1);
+  assert.equal(submitted[0].seq, 1);
+  assert.equal(submitted[0].deliveryId, deliveryId);
+  assert.equal(submitted[0].result.ok, false);
+  assert.equal(submitted[0].result.error.code, 'RELAY_ACTION_AUTHORITY_CONFLICT');
+  assert.equal(submitted[0].result.error.sideEffectState, 'uncertain');
+  assert.equal(submitted[0].result.error.retryable, false);
+  assert.deepEqual(await fs.readFile(receiptPath), originalBytes,
+    'the original identity-bound processing receipt must remain untouched as permanent non-replay fence');
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')),
+    { version: 1, lastAckedServerSeq: 1 });
+});
+
+test('mismatched action identity, missing/finished receipt, read action, or revoked hosted generation never earns a recovery ACK', { timeout: 20_000 }, async t => {
+  const cases = ['missing-receipt', 'different-action', 'completed-receipt', 'read-receipt', 'host-revoked'] as const;
+  for (const scenario of cases) {
+    await t.test(scenario, async child => {
+      const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-conflict-deny-'));
+      child.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+      const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+      const device = await identity.loadOrCreate('Authority Denial Fixture');
+      const oldAuthority = { accountId: crypto.randomUUID(), deviceId: device.deviceId, generation: 1 };
+      const newAuthority = { ...oldAuthority, generation: 2 };
+      const isRead = scenario === 'read-receipt';
+      const original = {
+        id: crypto.randomUUID(),
+        capability: isRead ? 'git.diff' : 'file.write',
+        risk: isRead ? 'read' as const : 'write' as const,
+        input: { marker: 'original' }, provenance: { kind: 'chatgpt' as const }
+      };
+      const incoming = scenario === 'different-action'
+        ? { ...original, input: { marker: 'tampered' } } : original;
+      const receipts = new LocalActionExecutionStore(stateDir);
+      if (scenario !== 'missing-receipt') {
+        await receipts.begin(original, oldAuthority);
+        if (scenario === 'completed-receipt') await receipts.complete(original, {
+          ok: false, capability: original.capability, provider: 'synthetic',
+          evidence: [], durationMs: 0
+        }, oldAuthority);
+      }
+      const originalReceipt = scenario === 'missing-receipt'
+        ? null : await fs.readFile(path.join(stateDir, 'action-executions.json'));
+      const deliveryId = crypto.randomUUID();
+      await fs.writeFile(path.join(stateDir, 'relay-client.json'), JSON.stringify({
+        version: 1, lastAckedServerSeq: 0,
+        processing: { seq: 1, id: deliveryId, startedAt: new Date().toISOString() }
+      }));
+      let localCalls = 0;
+      const localBase = await listen(child, async (req, res) => {
+        localCalls += 1;
+        await readBody(req);
+        res.writeHead(409, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: { code: 'ACTION_EXECUTION_AUTHORITY_MISMATCH' } }));
+      });
+      const results: unknown[] = [];
+      const resultBase = await listen(child, async (req, res) => {
+        results.push(JSON.parse(await readBody(req)));
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      }, scenario === 'host-revoked' ? 403 : 200);
+      const sessionTokenFile = path.join(stateDir, 'relay-session.token');
+      await fs.writeFile(sessionTokenFile, 'synthetic.token.not-a-real-credential', 'utf8');
+      const runner = new LocalAgentRelayRunner({
+        stateDir, identity, sessionTokenFile,
+        relayUrl: 'ws://127.0.0.1:65456/device',
+        resultUrl: `${resultBase}/v1/device-result`,
+        localAgentBaseUrl: localBase, agentToken: 's'.repeat(64),
+        relayInternalToken: 'r'.repeat(64), allowLoopbackInsecure: true,
+        socketFactory: url => new ScriptedRelaySocket(url, {
+          type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+          payload: { action: incoming, approvalAuthority: newAuthority }
+        }, () => { throw new Error('unsafe recovery ACK'); })
+      });
+      try {
+        await assert.rejects(runner.run(), (error: any) =>
+          error?.code === (scenario === 'host-revoked'
+            ? 'RELAY_EXECUTION_AUTHORITY_UNCONFIRMED'
+            : 'RELAY_AUTHORITY_CONFLICT_REVIEW_REQUIRED'));
+      } finally {
+        runner.stop();
+      }
+      assert.equal(localCalls, 1);
+      assert.deepEqual(results, []);
+      if (originalReceipt) assert.deepEqual(await fs.readFile(path.join(stateDir, 'action-executions.json')), originalReceipt);
+      assert.equal((JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8'))).processing?.id, deliveryId);
+    });
+  }
 });
