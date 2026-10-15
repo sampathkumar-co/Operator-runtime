@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { canonicalJson } from '../../../src/core/action-identity.ts';
 import type { OperatorRecoveryCandidate } from './operator-pre-dispatch-adjudication.ts';
 
 const MAX_PENDING = 32;
@@ -18,6 +19,61 @@ export type TrustedOriginalDeviceCredential = {
   signCount: number;
   deviceBound: true;
 };
+
+/** Out-of-band, independently signed owner enrollment; NOT self-issued by the agent. */
+export type SignedOwnerEnrollment = {
+  payload: {
+    version: 1;
+    issuerId: string;
+    rpId: string;
+    origin: string;
+    issuedAt: string;
+    expiresAt: string;
+    credential: TrustedOriginalDeviceCredential;
+  };
+  signature: string;
+};
+
+function verifiedProvisionedEnrollment(
+  certificate: SignedOwnerEnrollment,
+  pinnedIssuerPublicKeyPem: string,
+  rpId: string,
+  origin: string,
+  now: number
+): TrustedOriginalDeviceCredential {
+  const p = certificate?.payload;
+  if (!p || p.version !== 1 || typeof p.issuerId !== 'string' ||
+      p.issuerId.length < 4 || p.issuerId.length > 128 ||
+      p.rpId !== rpId || p.origin !== origin ||
+      !Number.isFinite(Date.parse(p.issuedAt)) ||
+      !Number.isFinite(Date.parse(p.expiresAt)) ||
+      now < Date.parse(p.issuedAt) || now >= Date.parse(p.expiresAt) ||
+      Date.parse(p.expiresAt) - Date.parse(p.issuedAt) > 365 * 86400000 ||
+      !trustedCredential(p.credential)) {
+    throw new Error('WEBAUTHN_ENROLLMENT_PROVENANCE_INVALID');
+  }
+  let key: crypto.KeyObject;
+  try {
+    key = crypto.createPublicKey(pinnedIssuerPublicKeyPem);
+    if (key.asymmetricKeyType !== 'ed25519') throw new Error('bad trust anchor');
+    const signature = decodeCanonical(certificate.signature, 256);
+    if (!crypto.verify(null, Buffer.from(canonicalJson(p)), key, signature)) {
+      throw new Error('signature invalid');
+    }
+  } catch {
+    throw new Error('WEBAUTHN_ENROLLMENT_SIGNATURE_UNTRUSTED');
+  }
+  return structuredClone(p.credential);
+}
+
+/** Independently administered durable atomic ledger; never implement as process memory in production. */
+export interface RecoveryCounterAuthority {
+  /** Commit a verified assertion with an atomic, rollback-protected one-use/replay fence. */
+  claimVerifiedAssertion(input: {
+    credentialId: string; deviceId: string; challengeId: string;
+    caseDigest: string; signCount: number; minimumKnownCounter: number;
+  }): Promise<void>;
+}
 
 type Pending = {
   id: string; challenge: string; actionId: string; caseDigest: string;
@@ -61,14 +117,19 @@ export class OriginalRecoveryWebAuthnVerifier {
   #credential: TrustedOriginalDeviceCredential;
   #pending = new Map<string, Pending>();
   #highestCount: number;
+  #enrollmentExpiresAt: number;
+  #counterAuthority: RecoveryCounterAuthority;
   #clock: () => number;
 
   constructor(input: {
     rpId: string; origin: string;
-    credential: TrustedOriginalDeviceCredential;
+    enrollment: SignedOwnerEnrollment;
+    pinnedIssuerPublicKeyPem: string;
+    counterAuthority: RecoveryCounterAuthority;
     clock?: () => number;
   }) {
-    if (!trustedCredential(input.credential) || input.rpId.length > 253 ||
+    const clock = input.clock ?? (() => Date.now());
+    if (input.rpId.length > 253 ||
       !/^https:\/\/[^/]+$/.test(input.origin) && !/^http:\/\/localhost(?::\d+)?$/.test(input.origin)) {
       throw new Error('WEBAUTHN_TRUSTED_OWNER_PROVISIONING_REQUIRED');
     }
@@ -76,19 +137,28 @@ export class OriginalRecoveryWebAuthnVerifier {
     if (hostname !== input.rpId && !hostname.endsWith('.' + input.rpId)) {
       throw new Error('WEBAUTHN_RP_ORIGIN_MISMATCH');
     }
+    const credential = verifiedProvisionedEnrollment(
+      input.enrollment, input.pinnedIssuerPublicKeyPem, input.rpId, input.origin, clock()
+    );
     this.rpId = input.rpId;
     this.origin = input.origin;
-    this.deviceId = input.credential.deviceId;
-    this.deviceFingerprint = input.credential.deviceFingerprint;
-    this.#credential = structuredClone(input.credential);
-    this.#highestCount = input.credential.signCount;
-    this.#clock = input.clock ?? (() => Date.now());
+    this.deviceId = credential.deviceId;
+    this.deviceFingerprint = credential.deviceFingerprint;
+    this.#credential = credential;
+    this.#highestCount = credential.signCount;
+    if (!input.counterAuthority || typeof input.counterAuthority.claimVerifiedAssertion !== 'function') {
+      throw new Error('WEBAUTHN_DURABLE_REPLAY_AUTHORITY_REQUIRED');
+    }
+    this.#enrollmentExpiresAt = Date.parse(input.enrollment.payload.expiresAt);
+    this.#counterAuthority = input.counterAuthority;
+    this.#clock = clock;
   }
 
   challenge(caseInfo: OperatorRecoveryCandidate): {
     challengeId: string; challenge: string; rpId: string; credentialId: string;
     expiresAt: string; actionId: string; caseDigest: string;
   } {
+    if (this.#clock() >= this.#enrollmentExpiresAt) throw new Error('WEBAUTHN_ENROLLMENT_EXPIRED');
     if (caseInfo.deviceId !== this.deviceId || caseInfo.deviceFingerprint !== this.deviceFingerprint ||
       !HEX_64.test(caseInfo.caseDigest)) throw new Error('WEBAUTHN_ORIGINAL_DEVICE_MISMATCH');
     for (const [key, p] of this.#pending) if (p.deadline < this.#clock()) this.#pending.delete(key);
@@ -114,13 +184,13 @@ export class OriginalRecoveryWebAuthnVerifier {
    * signature verification, including malformed, expired and replayed claims.
    * External enrollment is essential; this class cannot grant user authority.
    */
-  verifyAndConsume(input: {
+  async verifyAndConsume(input: {
     challengeId: string; actionId: string; caseDigest: string;
     assertion: RecoveryWebAuthnAssertion;
-  }): void {
+  }): Promise<void> {
     const pending = this.#pending.get(input.challengeId);
     this.#pending.delete(input.challengeId);
-    if (!pending || this.#clock() >= pending.deadline ||
+    if (!pending || this.#clock() >= pending.deadline || this.#clock() >= this.#enrollmentExpiresAt ||
         input.actionId !== pending.actionId || input.caseDigest !== pending.caseDigest ||
         pending.deviceId !== this.deviceId || pending.deviceFingerprint !== this.deviceFingerprint) {
       throw new Error('WEBAUTHN_CHALLENGE_INVALID_OR_EXPIRED');
@@ -160,6 +230,14 @@ export class OriginalRecoveryWebAuthnVerifier {
     if (!crypto.verify('sha256', signed, this.#credential.publicKeyPem, signature)) {
       throw new Error('WEBAUTHN_SIGNATURE_INVALID');
     }
+    // Separate authority must atomically reject credential counter rollback,
+    // challenge replay and ledger loss. A crash or missing witness MUST fail closed.
+    // Never update process-local counter or call the adjudicator before this.
+    await this.#counterAuthority.claimVerifiedAssertion({
+      credentialId: this.#credential.credentialId, deviceId: this.deviceId,
+      challengeId: pending.id, caseDigest: pending.caseDigest,
+      signCount, minimumKnownCounter: this.#highestCount
+    });
     if (signCount) this.#highestCount = signCount;
   }
 }
