@@ -42,6 +42,8 @@ import { semanticCheckpointDigest, type SemanticCheckpointManager, type SignedSe
 import { projectTaskRuntime } from '../../../src/core/runtime-projection.ts';
 import { buildApprovalCenterModel, buildGuidedOnboardingModel, buildRecoveryCenterModel, type RecoveryCandidateInput } from '../../../src/core/control-center-ux.ts';
 import { buildOriginalRecoveryReviewModel } from '../../../src/core/original-recovery-ux.ts';
+import type { OperatorPreDispatchAdjudicator } from './operator-pre-dispatch-adjudication.ts';
+import type { OriginalRecoveryWebAuthnVerifier } from './original-recovery-webauthn.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import type { UniversalAgentGateway } from '../../../src/core/universal-agent-gateway.ts';
 import {
@@ -108,6 +110,11 @@ export function createLocalAgentServer(options: {
   emergencyStop?: EmergencyStopStore;
   approvals?: ApprovalStore;
   actionExecutions?: LocalActionExecutionStore;
+  /** Only provisioned from a trusted owner-device enrollment path, never an agent API. */
+  originalRecoveryOwner?: {
+    adjudicator: OperatorPreDispatchAdjudicator;
+    verifier: OriginalRecoveryWebAuthnVerifier;
+  };
   beforeActionReceiptCompletion?: (input: { action: ActionRequest; result: ActionResult }) => Promise<void> | void;
   sessionApprovals?: SessionApprovalStore;
   recoveryToken?: string;
@@ -776,7 +783,7 @@ export function createLocalAgentServer(options: {
     // constitute a human signature, including when called from the website.
     if (pathname === '/v1/control-center/original-recovery' && req.method === 'GET') {
       if (!options.actionExecutions || !options.agentKernel) {
-        send(res, 200, { ok: true, configured: false,
+        send(res, 200, { ok: true, configured: false, ownerStepUpAvailable: false,
           model: buildOriginalRecoveryReviewModel([], []) });
         return;
       }
@@ -785,7 +792,7 @@ export function createLocalAgentServer(options: {
           options.actionExecutions.listOperatorPendingReceipts(256),
           options.agentKernel.journal.list(1000)
         ]);
-        send(res, 200, { ok: true, configured: true,
+        send(res, 200, { ok: true, configured: true, ownerStepUpAvailable: Boolean(options.originalRecoveryOwner),
           model: buildOriginalRecoveryReviewModel(receipts, journal) });
       } catch {
         send(res, 503, { ok: false, error: { code: 'ORIGINAL_RECOVERY_INSPECTION_FAILED',
@@ -794,11 +801,72 @@ export function createLocalAgentServer(options: {
       return;
     }
     if (pathname.startsWith('/v1/control-center/original-recovery/') && req.method === 'POST') {
-      // Reserved for independently verified WebAuthn user-presence and
-      // user-verification challenge bound to the exact action + case digest.
-      // It must NEVER delegate an owner signature to the agent bearer token.
-      send(res, 403, { ok: false, error: { code: 'OWNER_STEP_UP_NOT_CONFIGURED',
-        message: 'Website adjudication is unavailable until hardware-backed owner verification is certified.' } });
+      const reviewer = options.originalRecoveryOwner;
+      if (!reviewer) {
+        send(res, 403, { ok: false, error: { code: 'OWNER_STEP_UP_NOT_CONFIGURED',
+          message: 'Website signing requires an independently provisioned, device-bound passkey.' } });
+        return;
+      }
+      // NEVER allow relay/MCP operation or a bearer-only web call to become
+      // owner presence. A browser step-up must bind origin, RP and the exact
+      // case before the privileged existing-device signer can be reached.
+      const expected = new URL(reviewer.verifier.origin);
+      const origin = req.headers.origin;
+      const site = req.headers['sec-fetch-site'];
+      if (relayRequest || origin !== reviewer.verifier.origin ||
+          req.headers.host !== expected.host ||
+          (site !== undefined && site !== 'same-origin') ||
+          req.headers['x-mecord-owner-intent'] !== 'permanent-no-replay') {
+        send(res, 403, { ok: false, error: { code: 'OWNER_STEP_UP_ORIGIN_DENIED',
+          message: 'Recovery decisions must originate from the authenticated original-device website.' } });
+        return;
+      }
+      try {
+        const input = await readJson(req) as Record<string, any>;
+        const actionId = input?.actionId;
+        if (typeof actionId !== 'string' || !/^mcp-[a-zA-Z0-9_-]{16,128}$/.test(actionId)) {
+          throw new Error('OWNER_STEP_UP_ACTION_INVALID');
+        }
+        if (pathname === '/v1/control-center/original-recovery/challenge') {
+          const inspected = await reviewer.adjudicator.inspect(actionId);
+          const challenge = reviewer.verifier.challenge(inspected);
+          send(res, 200, { ok: true, challenge, intent: 'PERMANENT_NO_REPLAY',
+            description: 'Permanently stop this historical action without executing or replaying it.' });
+          return;
+        }
+        if (pathname === '/v1/control-center/original-recovery/confirm') {
+          if (input.ownerAttested !== true || typeof input.caseDigest !== 'string' ||
+              typeof input.challengeId !== 'string' || !input.assertion) {
+            throw new Error('OWNER_STEP_UP_ATTESTATION_REQUIRED');
+          }
+          const fresh = await reviewer.adjudicator.inspect(actionId);
+          if (fresh.caseDigest !== input.caseDigest) {
+            throw new Error('OWNER_STEP_UP_CASE_CHANGED');
+          }
+          reviewer.verifier.verifyAndConsume({
+            actionId, caseDigest: input.caseDigest, challengeId: input.challengeId,
+            assertion: input.assertion
+          });
+          // Only the trusted verifier reaches this signed owner adjudication.
+          // The journal independently rechecks the original protected
+          // receipt/action history and takes the provider dispatch lock.
+          const result = await reviewer.adjudicator.adjudicate({
+            actionId, caseDigest: input.caseDigest,
+            confirmation: 'AUTHORIZE-NO-REPLAY:' + input.caseDigest,
+            ownerAttestation: 'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED'
+          });
+          send(res, 200, { ok: true, result: { ...result, noReplay: true, receiptReconciled: false } });
+          return;
+        }
+        send(res, 404, { ok: false, error: { code: 'UNKNOWN_OWNER_RECOVERY_ROUTE' } });
+      } catch (error) {
+        const code = typeof (error as any)?.code === 'string'
+          ? (error as any).code
+          : (error instanceof Error && /^[A-Z0-9_]+$/.test(error.message)
+            ? error.message : 'OWNER_STEP_UP_REFUSED');
+        send(res, 409, { ok: false, error: { code,
+          message: 'Owner verification or protected original-case evidence failed. No relay ACK or action replay is permitted.' } });
+      }
       return;
     }
 
