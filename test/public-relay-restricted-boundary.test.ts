@@ -1467,6 +1467,10 @@ test('recovered write from a different execution authority returns bounded UNKNO
   await receipts.begin(action, oldAuthority);
   const receiptPath = path.join(stateDir, 'action-executions.json');
   const originalBytes = await fs.readFile(receiptPath);
+  const originalReceipt = await receipts.inspectOperatorReceipt(action.id);
+  assert.equal(eligibleAuthorityConflictQuarantine(action, newAuthority, originalReceipt), true);
+  assert.equal(eligibleAuthorityConflictQuarantine(action, oldAuthority, originalReceipt), false);
+  assert.equal(eligibleAuthorityConflictQuarantine({ ...action, input: { path: 'tampered' } }, newAuthority, originalReceipt), false);
   const deliveryId = crypto.randomUUID();
   await fs.writeFile(path.join(stateDir, 'relay-client.json'), JSON.stringify({
     version: 1, lastAckedServerSeq: 0,
@@ -1491,7 +1495,7 @@ test('recovered write from a different execution authority returns bounded UNKNO
     res.end(JSON.stringify({ ok: true }));
   });
   const sessionTokenFile = path.join(stateDir, 'relay-session.token');
-  await fs.writeFile(sessionTokenFile, 'synthetic.token.not-a-real-credential', 'utf8');
+  await fs.writeFile(sessionTokenFile, 'sessiontoken123456.signature123456', 'utf8');
   const frame = {
     type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
     payload: { action, approvalAuthority: newAuthority, publicBoundary: false }
@@ -1509,13 +1513,17 @@ test('recovered write from a different execution authority returns bounded UNKNO
   const running = runner.run();
   let watchdog: NodeJS.Timeout | undefined;
   try {
-    await Promise.race([acked, new Promise<never>((_, reject) => {
-      watchdog = setTimeout(() => reject(new Error('authority conflict recovery ACK timed out')), 10_000);
-    })]);
+    await Promise.race([
+      acked,
+      running.then(() => { throw new Error('relay ended before the recovery ACK'); }, error => { throw error; }),
+      new Promise<never>((_, reject) => {
+        watchdog = setTimeout(() => reject(new Error('authority conflict recovery ACK timed out')), 10_000);
+      })
+    ]);
   } finally {
     if (watchdog) clearTimeout(watchdog);
     runner.stop();
-    await running;
+    await Promise.race([running, new Promise<void>(resolve => setTimeout(resolve, 1_000))]);
   }
   assert.deepEqual(localRequests, ['/v1/action-receipt'], 'no provider execution or secondary local mutation');
   assert.equal(submitted.length, 1);
@@ -1579,7 +1587,7 @@ test('mismatched action identity, missing/finished receipt, read action, or revo
         res.end(JSON.stringify({ ok: true }));
       }, scenario === 'host-revoked' ? 403 : 200);
       const sessionTokenFile = path.join(stateDir, 'relay-session.token');
-      await fs.writeFile(sessionTokenFile, 'synthetic.token.not-a-real-credential', 'utf8');
+      await fs.writeFile(sessionTokenFile, 'sessiontoken123456.signature123456', 'utf8');
       const runner = new LocalAgentRelayRunner({
         stateDir, identity, sessionTokenFile,
         relayUrl: 'ws://127.0.0.1:65456/device',
