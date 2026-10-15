@@ -1,15 +1,16 @@
 import path from 'node:path';
 import os from 'node:os';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
+import { actionHash } from '../../../src/core/action-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { capabilityRiskRule } from '../../../src/core/capability-policy.ts';
 import { RelayClient, type RelayClientStatus, type RelayConnectionState, type RelayDelivery, type RelayExpiredRecoveryDecision, type RelayRecoveryDecision, type RelaySocketFactory } from '../../../src/core/relay-client.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import type { ActionRequest } from '../../../src/core/types.ts';
-import type { ApprovalAuthorityContext } from './approval-store.ts';
+import { approvalAuthorityFingerprint, type ApprovalAuthorityContext } from './approval-store.ts';
 import { containsRestrictedData } from '../../../src/core/public-restricted-data.ts';
 import { readRelaySessionTokenFile, type RelaySessionCredentialProvider } from './relay-session-credentials.ts';
-import { LocalActionExecutionStore } from './action-execution-store.ts';
+import { LocalActionExecutionStore, type LocalActionExecutionRecord } from './action-execution-store.ts';
 
 const MAX_RESULT_BYTES = 256 * 1024;
 const RESULT_SUBMIT_ATTEMPTS = 3;
@@ -148,6 +149,37 @@ export class LocalAgentRelayRunner {
     }
     if (delivery?.kind === 'action') {
       const recovered = await this.#recoverLocalActionReceipt(delivery.payload);
+      if (recovered.state === 'authority_mismatch') {
+        // A prior local mutation receipt may belong to an older account/device
+        // generation. Never replay it, copy its result across authorities,
+        // overwrite its fingerprint, or silently drop the relay cursor.
+        // First prove the EXACT hosted sequence/delivery is authorized NOW.
+        const action = validateRemoteAction(delivery.payload.action);
+        const authority = validateApprovalAuthority(delivery.payload.approvalAuthority);
+        await this.#assertFreshDeliveryAuthority(delivery);
+        const original = await this.#mutationReceipts.inspectOperatorReceipt(action.id);
+        if (!eligibleAuthorityConflictQuarantine(action, authority, original)) {
+          throw new OperatorError('RELAY_AUTHORITY_CONFLICT_REVIEW_REQUIRED',
+            'The existing receipt cannot safely fence this authority conflict; explicit original-action reconciliation is required.',
+            { retryable: false, details: { actionId: action.id, seq, deliveryId } });
+        }
+        // Only a matching ORIGINAL, permanently retained processing mutation
+        // can be retired from the transport as a terminal UNKNOWN. No provider
+        // call, receipt mutation, journal mutation, approval, or authority
+        // rebinding occurs. This result cannot imply successful execution.
+        const safe = boundedResult({
+          ok: false, capability: action.capability, provider: 'relay.recovery',
+          error: {
+            code: 'RELAY_ACTION_AUTHORITY_CONFLICT',
+            message: 'This action ID is already bound to a different execution authority. No action was replayed. Its earlier side effect remains unknown and requires original-authority reconciliation.',
+            retryable: false, sideEffectState: 'uncertain'
+          },
+          evidence: [], durationMs: 0
+        });
+        await this.#outbox.put(identity.deviceId, seq, deliveryId, safe);
+        await this.#submitResultWithRetry(seq, deliveryId, safe);
+        return 'ack';
+      }
       if (recovered.state === 'completed') {
         const safe = boundedResult(recovered.result);
         await this.#outbox.put(identity.deviceId, seq, deliveryId, safe);
@@ -198,7 +230,7 @@ export class LocalAgentRelayRunner {
     await this.#outbox.removeExact(identity.deviceId, seq, deliveryId);
   }
 
-  async #recoverLocalActionReceipt(payload: JsonObject): Promise<{ state: 'missing' } | { state: 'processing' } | { state: 'completed'; result: JsonObject }> {
+  async #recoverLocalActionReceipt(payload: JsonObject): Promise<{ state: 'missing' } | { state: 'processing' } | { state: 'authority_mismatch' } | { state: 'completed'; result: JsonObject }> {
     const action = validateRemoteAction(payload.action);
     const approvalAuthority = validateApprovalAuthority(payload.approvalAuthority);
     const enterpriseContext = validateRelayEnterpriseContext(payload.enterpriseContext, approvalAuthority);
@@ -230,6 +262,9 @@ export class LocalAgentRelayRunner {
         const delay = Math.min(750, 100 * 2 ** Math.min(attempt++, 3), Math.max(1, deadline - Date.now()));
         await new Promise<void>((resolve) => setTimeout(resolve, delay));
         continue;
+      }
+      if (response.status === 409 && body?.error?.code === 'ACTION_EXECUTION_AUTHORITY_MISMATCH') {
+        return { state: 'authority_mismatch' };
       }
       if (response.status !== 200) {
         const code = typeof body?.error?.code === 'string' ? body.error.code : 'RELAY_LOCAL_RECEIPT_FAILED';
@@ -568,6 +603,26 @@ export { readRelaySessionTokenFile } from './relay-session-credentials.ts';
  * receipt. Identical action IDs stay fenced; users must inspect the original
  * action journal before issuing a new command with the same intended effect.
  */
+/**
+ * Transport may terminally report UNKNOWN under a DIFFERENT freshly proven
+ * authority only when the prior identical action has a non-expiring processing
+ * mutation receipt. Read and completed receipts are not sufficient durable
+ * non-replay fences; mismatched content/risk/authority is never reconciled.
+ */
+export function eligibleAuthorityConflictQuarantine(
+  action: ActionRequest,
+  authority: ApprovalAuthorityContext | undefined,
+  record: Pick<LocalActionExecutionRecord, 'actionHash' | 'authorityHash' | 'risk' | 'status'> | null
+): boolean {
+  return record !== null
+    && record.status === 'processing'
+    && record.risk === action.risk
+    && action.risk !== 'read'
+    && capabilityRiskRule(action.capability) !== 'read'
+    && record.actionHash === actionHash(action)
+    && record.authorityHash !== approvalAuthorityFingerprint(authority);
+}
+
 export function uncertainMutationRecoveryResult(delivery: RelayDelivery): JsonObject | null {
   if (delivery.kind !== 'action') return null;
   try {
