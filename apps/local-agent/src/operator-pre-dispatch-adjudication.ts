@@ -119,7 +119,8 @@ export class OperatorPreDispatchAdjudicator {
         && current.transitions[0]?.state === 'PREPARED'
         && current.transitions[1]?.state === 'DEFERRED' && current.transitions[1]?.provider === 'policy'
         && current.transitions[2]?.state === 'INTERRUPTED';
-      const preparedWriteFence = current.risk === 'write' && current.transitions.length === 2
+      const preparedWriteFence = (current.risk === 'write' || current.risk === 'external' || current.risk === 'destructive')
+        && current.transitions.length === 2
         && current.transitions[0]?.state === 'PREPARED'
         && current.transitions[1]?.state === 'INTERRUPTED';
       if (current.actionDigest !== decision.actionDigest || current.generation !== decision.journalGeneration
@@ -142,16 +143,17 @@ export class OperatorPreDispatchAdjudicator {
       && journal.transitions[0]?.state === 'PREPARED'
       && journal.transitions[1]?.state === 'DEFERRED'
       && journal.transitions[1]?.provider === 'policy' && validHash(journal.transitions[1]?.resultDigest);
-    // An original PREPARED write may be recovered only with an exact exited
-    // Windows owner process plus the original-device signed human attestation.
-    // Unbound legacy write receipts remain unreviewable; never infer dispatch
+    // Any original PREPARED mutation (write/external/destructive) requires
+    // an exact exited Windows process and a signed local human attestation.
+    // Unbound legacy mutation receipts remain unreviewable; never infer dispatch
     // absence from their journal alone.
-    const originalPreparedWrite = receipt?.risk === 'write' && journal.risk === 'write'
+    const originalPreparedMutation = (receipt?.risk === 'write' || receipt?.risk === 'external' || receipt?.risk === 'destructive')
+      && journal.risk === receipt.risk
       && journal.state === 'PREPARED' && journal.transitions.length === 1
       && journal.transitions[0]?.state === 'PREPARED' && receipt.ownerProcess !== undefined;
     if (!receipt || receipt.status !== 'processing' || !receipt.ownerId
         || receipt.actionHash !== journal.actionDigest || !validHash(receipt.authorityHash)
-        || journal.generation !== 1 || (!originalPolicyDeferral && !originalPreparedWrite)) {
+        || journal.generation !== 1 || (!originalPolicyDeferral && !originalPreparedMutation)) {
       throw denied('This action is not an exact original never-dispatched recovery candidate.');
     }
     if (receipt.ownerProcess !== undefined) {

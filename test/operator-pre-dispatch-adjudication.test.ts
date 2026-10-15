@@ -305,3 +305,77 @@ test('already dispatched browser write is never a prepared-write recovery candid
     new OperatorPreDispatchAdjudicator(state, { signer: identity }).inspect(preparedWriteAction.id), denied
   );
 });
+
+test('Windows operator-signed PREPARED external/destructive receipts require dead process and never dispatch', async t => {
+  if (process.platform !== 'win32') { t.skip('Original Windows process authority required'); return; }
+  for (const specimen of [
+    {risk: 'external' as const, capability: 'app.operate', input: {operation: 'select', selector: {automationId: 'tab'}}},
+    {risk: 'destructive' as const, capability: 'terminal.execute', input: {command: 'echo forbidden-provider'}}
+  ]) {
+    await t.test(specimen.risk, async sub => {
+      const state = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-prepared-review-'));
+      sub.after(() => fs.rm(state, {recursive: true, force: true}));
+      const original = {id: 'process-bound-' + specimen.risk, ...specimen, provenance: {kind: 'chatgpt' as const}};
+      const receipts = new LocalActionExecutionStore(state);
+      await receipts.begin(original);
+      const journal = new ActionTransitionJournal(state);
+      await journal.prepare({action: original, ownerKind: 'local-api', ownerId: original.id, resourceKeys: ['review:fixture']});
+      const file = path.join(state, 'action-executions.json');
+      const data = JSON.parse(await fs.readFile(file, 'utf8'));
+      const owner = {pid: 2_000_000_000, started: 'windows-filetime:134361639345200387'};
+      data.records[0].ownerProcess = owner;
+      await fs.writeFile(file, JSON.stringify(data));
+      const identity = await signer(state);
+      const reviewer = new OperatorPreDispatchAdjudicator(state, {signer: identity});
+      const candidate = await reviewer.inspect(original.id);
+      assert.equal(candidate.journalGeneration, 1);
+      assert.match(candidate.receiptOwnerProcessDigest ?? '', /^[a-f0-9]{64}$/);
+      await assert.rejects(reviewer.adjudicate({
+        actionId: original.id, caseDigest: candidate.caseDigest, confirmation: 'yes',
+        ownerAttestation: 'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED'
+      }), denied);
+      await reviewer.adjudicate({
+        actionId: original.id, caseDigest: candidate.caseDigest,
+        confirmation: 'AUTHORIZE-NO-REPLAY:' + candidate.caseDigest,
+        ownerAttestation: 'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED'
+      });
+      assert.deepEqual((await journal.inspect(original.id)).transitions.map(x => x.state), ['PREPARED','INTERRUPTED']);
+      // Recovery is performed by a restarted owner, never the original in-process owner.
+      const completed = await new LocalActionExecutionStore(state).reconcileWithKernel(original, undefined, journal);
+      assert.equal(completed.status, 'completed');
+      if (completed.status === 'completed') {
+        assert.equal(completed.result.error?.code, 'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH');
+        assert.equal(completed.result.error?.sideEffectState, 'none');
+      }
+      await assert.rejects(journal.markDispatched(original.id, 'late-provider'),
+        (error: any) => error?.code === 'ACTION_JOURNAL_TRANSITION_INVALID');
+    });
+  }
+});
+
+test('process-unbound PREPARED external/destructive receipts and dispatched journals cannot be signed', async t => {
+  for (const risk of ['external','destructive'] as const) {
+    await t.test(risk, async sub => {
+      const state = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-prepared-deny-'));
+      sub.after(() => fs.rm(state, {recursive:true,force:true}));
+      const original = {
+        id: 'never-eligible-' + risk, capability: risk === 'external' ? 'app.operate' : 'terminal.execute',
+        risk, input: {marker: 'no-dispatch'}, provenance: {kind: 'chatgpt' as const}
+      };
+      await new LocalActionExecutionStore(state).begin(original);
+      const journal = new ActionTransitionJournal(state);
+      await journal.prepare({action: original, ownerKind: 'local-api', ownerId: original.id, resourceKeys: ['review:deny']});
+      const file = path.join(state, 'action-executions.json');
+      const data = JSON.parse(await fs.readFile(file, 'utf8'));
+      delete data.records[0].ownerProcess;
+      await fs.writeFile(file, JSON.stringify(data));
+      const identity = await signer(state);
+      const reviewer = new OperatorPreDispatchAdjudicator(state, {signer:identity});
+      await assert.rejects(reviewer.inspect(original.id), denied);
+      data.records[0].ownerProcess = {pid:2_000_000_000, started:'windows-filetime:134361639345200387'};
+      await fs.writeFile(file, JSON.stringify(data));
+      await journal.markDispatched(original.id, 'synthetic-provider');
+      await assert.rejects(reviewer.inspect(original.id), denied);
+    });
+  }
+});
