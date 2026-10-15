@@ -117,7 +117,7 @@ test('public-edge deployment templates contain routes but no committed credentia
     assert.ok(caddy.includes(page), `Caddy ingress must expose ${page}`);
   }
   for (const route of [
-    '/v1/device-result', '/v1/device-authority/check', '/v1/device-session/rotate',
+    '/v1/device-result', '/v1/device-authority/check', '/v1/device-recovery/inspect', '/v1/device-session/rotate',
     '/v1/device-session/recover/challenge', '/v1/device-session/recover',
     '/v1/device-enrollment/challenge', '/v1/device-enrollment/complete',
     '/v1/device-enrollment/poll', '/v1/device-self/reset'
