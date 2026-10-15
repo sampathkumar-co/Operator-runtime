@@ -7,12 +7,12 @@ import { assertCanonicalRisk, capabilityRiskRule } from '../../../src/core/capab
 import { readDurableStateText, writeDurableStateText } from '../../../src/core/durable-state.ts';
 import { withDurableStateLock } from '../../../src/core/durable-state-lock.ts';
 import {
-  currentProcessInstance, localPidObservationAdmissible, observeProcessInstance,
-  processInstanceDefinitelyStale, validProcessInstance,
+  currentProcessInstance, observeProcessInstance, validProcessInstance,
   type ProcessInstanceIdentity, type ProcessInstanceObserver
 } from '../../../src/core/process-instance.ts';
 import { approvalAuthorityFingerprint, type ApprovalAuthorityContext } from './approval-store.ts';
 import type { ActionTransitionJournal } from '../../../src/core/action-transition-journal.ts';
+import { recoveryDisposition } from './recovery-decision.ts';
 
 const MAX_STATE_BYTES = 32 * 1024 * 1024;
 const MAX_RECORDS = 256;
@@ -196,34 +196,20 @@ export class LocalActionExecutionStore {
     if (entry.actionId !== action.id || entry.actionDigest !== expectedActionHash || entry.capability !== action.capability || entry.risk !== action.risk) {
       throw reconciliationRequired('Local receipt identity does not match the authoritative kernel journal lineage.');
     }
-    // A new instance UUID cannot establish a previous process has exited.
-    // Legacy UUID-only processing receipts stay uncertain. Only locally
-    // admissible exact process observations can prove an old owner is gone.
+    // Recovery policy is a pure preflight. Even when it returns eligible,
+    // the journal MUST commit the terminal fence under its dispatch lock
+    // before any receipt changes or relay acknowledgement are permitted.
     const currentProcess = this.#ownerProcess ?? await currentProcessInstance();
-    const storedProcess = local.record.ownerProcess;
-    // Linux v3 binds both boot UUID and PID namespace. Windows filetime and
-    // portable ps timestamps have NO independent host provenance: copying a
-    // state directory across hosts could otherwise reclaim a still-live owner.
-    // Those environments must fail closed pending a provider-backed host proof.
-    const locallyBound = (identity: ProcessInstanceIdentity): boolean =>
-      /^linux-boot-id:[0-9a-f-]{36}:pidns:\d+:ticks:\d+$/.test(identity.started);
-    const oldOwnerDefinitelyExited = local.status === 'processing'
-      && storedProcess !== undefined
-      && locallyBound(storedProcess) && locallyBound(currentProcess)
-      && localPidObservationAdmissible(storedProcess, currentProcess)
-      && processInstanceDefinitelyStale(storedProcess, await this.#observeProcess(storedProcess.pid));
-    // Only an original PREPARED state or its single policy DEFERRED successor
-    // can be fenced before dispatch. A later PREPARED/DEFERRED after provider
-    // dispatch must never be interpreted as proof of no side effect.
-    const originalPreDispatch = entry.generation === 1 && entry.transitions[0]?.state === 'PREPARED'
-      && ((entry.state === 'PREPARED' && entry.transitions.length === 1)
-        || (entry.state === 'DEFERRED' && entry.transitions.length === 2
-          && entry.transitions[1]?.state === 'DEFERRED'
-          && entry.transitions[1]?.provider === 'policy'
-          && typeof entry.transitions[1]?.resultDigest === 'string'));
-    if (local.status === 'processing'
-      && local.record.ownerId !== undefined && local.record.ownerId !== this.#ownerId
-      && (entry.state === 'INTERRUPTED' || (oldOwnerDefinitelyExited && originalPreDispatch))) {
+    const previousProcess = local.record.ownerProcess;
+    const originalOwnerObservation = previousProcess
+      ? await this.#observeProcess(previousProcess.pid)
+      : { status: 'unknown' as const };
+    const disposition = recoveryDisposition({
+      action, record: local.record, journal: entry, currentOwnerId: this.#ownerId,
+      currentProcess, originalOwnerObservation, authorityMatches: true
+    });
+    if (disposition === 'AUTOMATIC_PRE_DISPATCH_FENCE' ||
+        disposition === 'RECONCILE_TERMINAL_FENCE') {
       // The prior PREPARED check is merely a candidate. Only an atomic,
       // terminal journal transition on the journal's OWN cross-process lock
       // can prove provider dispatch did not win this race. Crash between
