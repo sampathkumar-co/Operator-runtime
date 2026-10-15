@@ -78,4 +78,16 @@ if [ "$authority_status" != 401 ]; then
   exit 1
 fi
 
+# The observational recovery endpoint must also reach the authenticated relay
+# result service. Anonymous 401 proves route presence without inspecting a
+# delivery, renewing a session, replaying an action, or acknowledging work.
+recovery_inspect_status=$(curl --silent --show-error --max-time 20 \
+  --output /dev/null --write-out '%{http_code}' \
+  -X POST -H 'Content-Type: application/json' -d '{}' \
+  'https://operator.splcart.in/v1/device-recovery/inspect')
+if [ "$recovery_inspect_status" != 401 ]; then
+  echo "Recovery inspection route mismatch: expected unauthenticated HTTP 401, got $recovery_inspect_status" >&2
+  exit 1
+fi
+
 echo "Public relay gateway verification passed; authenticated acceptance remains required."
