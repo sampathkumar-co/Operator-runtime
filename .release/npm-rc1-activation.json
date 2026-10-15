@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "package": "mecord-connect",
+  "version": "2.0.6-rc.1",
+  "targetTag": "next",
+  "publicationMode": "stage",
+  "enabled": true,
+  "ownerInstruction": "Stage signed RC1 via GitHub with laptop offline; no stable promotion",
+  "activationAttempt": 2
+}

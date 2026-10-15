@@ -171,7 +171,152 @@ test('npm runtime CI emits push evidence for every branch SHA', async () => {
   assert.match(workflow, /previousErrorActionPreference/);
   assert.match(workflow, /\$ErrorActionPreference = 'Continue'/);
   assert.match(workflow, /\$global:LASTEXITCODE = 0/);
+  assert.match(workflow, /Get-FileHash -LiteralPath \$tgz -Algorithm SHA256/);
+  assert.match(workflow, /artifact-inventory\.json/);
+  assert.match(workflow, /runtime manifest source .* does not match workflow source/);
+  assert.match(workflow, /actions\/attest-build-provenance@[0-9a-f]{40}/);
+  assert.match(workflow, /actions\/upload-artifact@[0-9a-f]{40}/);
+  assert.match(workflow, /mecord-connect-\$\{\{ steps\.candidate\.outputs\.package_version \}\}-\$\{\{ github\.sha \}\}/);
+  assert.match(workflow, /compression-level: 0/);
+  assert.match(workflow, /retention-days: 14/);
   assert.match(workflow, /--test test\/npm-remote-runtime\.test\.ts test\/npm-policy-continuity\.test\.ts/);
+});
+
+
+test('every push SHA retains independent CI evidence even if a new push or PR starts', async () => {
+  const workflow = await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8');
+  assert.match(workflow, /group: .*github\.workflow.*github\.event_name.*github\.run_id.*github\.event\.pull_request\.number/);
+  assert.match(workflow, /cancel-in-progress: .*github\.event_name == 'pull_request'/);
+  assert.doesNotMatch(workflow, /group: .*github\.head_ref \|\| github\.ref_name/);
+  assert.doesNotMatch(workflow, /cancel-in-progress: true/);
+});
+
+test('PR npm builds cannot obtain attestation credentials; push-only job checks tarball bytes', async () => {
+  // Git may check out YAML using CRLF on Windows runners.
+  const workflow = (await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8')).replace(/\r\n/g, '\n');
+  const windows = workflow.split('  windows-runtime:\n')[1]?.split('  attest-candidate:\n')[0];
+  const attest = workflow.split('  attest-candidate:\n')[1]?.split('  node-compatibility:\n')[0];
+  assert.ok(windows && attest, 'independent Windows build and attestation jobs required');
+  assert.match(windows, /permissions:\n      contents: read/);
+  assert.doesNotMatch(windows, /(?:id-token|attestations): write/);
+  assert.doesNotMatch(windows, /actions\/attest-build-provenance/);
+  assert.match(attest, /if: github\.event_name == 'push'/);
+  assert.match(attest, /needs: \[windows-runtime, compare-generated-witness\]/);
+  assert.match(attest, /attestations: write/);
+  assert.match(attest, /id-token: write/);
+  assert.match(attest, /actions\/download-artifact@[0-9a-f]{40}/);
+  assert.match(attest, /actions\/attest-build-provenance@[0-9a-f]{40}/);
+  assert.match(attest, /hashlib\.sha256\(tarball\.read_bytes\(\)\)/);
+  assert.match(attest, /manifest\['sourceCommit'\] == expected/);
+  assert.match(attest, /runtime_actual == runtime_declared \| \{'runtime-manifest.json'\}/);
+  assert.match(attest, /hashlib\.sha256\(content\)\.hexdigest\(\) == entry\['sha256'\]/);
+  assert.match(attest, /archived\.size == entry\['sizeBytes'\]/);
+  assert.match(attest, /duplicate Windows-canonical archive path/);
+  assert.match(attest, /member\.type in \(tarfile\.REGTYPE, tarfile\.AREGTYPE, tarfile\.DIRTYPE\)/);
+  assert.match(attest, /GNU sparse archive member/);
+  assert.match(attest, /sparse PAX archive metadata/);
+  assert.match(attest, /Windows alias separator in archive/);
+  assert.match(attest, /trailing Windows archive alias/);
+  assert.match(attest, /return '\/'\.join\(parts\)\.casefold\(\)/);
+  assert.match(attest, /manifest\.get\('schemaVersion'\)/);
+  assert.match(attest, /manifest\.get\('platform'\) == 'win32'/);
+  assert.match(attest, /5 <= len\(declared_files\) <= 4096/);
+  assert.match(attest, /missing required native\/runtime files/);
+  assert.match(attest, /1 <= entry\['sizeBytes'\] <= 64 \* 1024 \* 1024/);
+  assert.match(attest, /member_names\.add\(canonical\)/);
+  assert.match(attest, /\(COM\|LPT\)\[1-9¹²³\]/);
+  assert.match(attest, /CONIN\$/);
+  assert.match(attest, /p\.casefold\(\)\.startswith\('runtime\/'\)/);
+  assert.match(attest, /python3 -I - <<'PY'/);
+  const directorySkip = attest.indexOf('if member.isdir():\n                      continue');
+  assert.ok(directorySkip > attest.indexOf("member_names.add(canonical)"),
+    'every tar entry must be path-validated and deduplicated before directories are skipped');
+  assert.match(attest, /packed inventory paths mismatch/);
+  assert.match(attest, /file ancestor collision/);
+  assert.match(attest, /required_package <= set\(file_map\)/);
+  assert.match(attest, /embedded_pkg\.get\('name'\) == 'mecord-connect'/);
+  assert.match(attest, /embedded_pkg\.get\('bin', \{\}\)\.get\('mecord-connect'\)/);
+  assert.match(attest, /embedded dual-use disclosure mismatch/);
+  assert.match(attest, /manifest_bytes\.decode\('utf-8', errors='strict'\)/);
+  assert.match(attest, /pkg_json_bytes\.decode\('utf-8', errors='strict'\)/);
+  assert.match(attest, /unexpected npm lifecycle scripts/);
+
+  assert.match(attest, /implicit npm native build hook/);
+  assert.match(attest, /unapproved npm node-gyp metadata/);
+  assert.match(attest, /'binding\.gyp' not in/);
+  assert.match(attest, /parse_constant=reject_non_json_constant/g);
+  assert.match(attest, /Nonstandard JSON constant/);
+
+  const strictCalls = attest.match(/parse_constant=reject_non_json_constant/g) ?? [];
+  assert.equal(strictCalls.length, 2, 'both embedded JSON parsers must reject nonstandard constants');
+  assert.match(attest, /GH_READ_TOKEN/);
+  assert.match(attest, /get_source_json\('\/git\/commits\/' \+ expected\)/);
+  assert.match(attest, /not source_tree\['truncated'\]/);
+  assert.match(attest, /set\(source_files\) == packaged_static/);
+  assert.match(attest, /source_bytes == packaged_bytes/);
+  assert.match(attest, /unexpected npm package payload path/);
+  assert.match(attest, /approved_scripts = \{/);
+  assert.match(attest, /prepublishOnly/);
+  assert.match(attest, /unexpected npm dependency\/install authority/);
+  assert.match(attest, /source\['runId'\]/);
+  assert.match(attest, /steps\.verify\.outputs\.subject_path/);
+  assert.doesNotMatch(attest, /actions\/checkout|cargo build\b|npm install\b|npm pack\b/);
+});
+
+test('npm PR CI covers all generated-runtime TypeScript source trees', async () => {
+  // Windows checkouts may use CRLF even for the YAML trigger manifest.
+  const workflow = (await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8')).replace(/\r\n/g, '\n');
+  const build = await fs.readFile(path.resolve('packages/mecord-connect/scripts/build-runtime-payload.mjs'), 'utf8');
+  const roots = [...build.matchAll(/compileTrackedTree\('([^']+)'/g)].map(match => match[1]);
+  assert.deepEqual(roots.sort(), [
+    'src',
+    'apps/local-agent/src',
+    'packages/adaptive-intelligence/src',
+    'packages/verified-plan-runtime/src'
+  ].sort(), 'source roots changed: update npm PR CI coverage and review the build contract');
+  const prPaths = workflow.split('  pull_request:\n    paths:\n')[1]?.split('\npermissions:')[0] ?? '';
+  for (const root of roots) {
+    assert.ok(prPaths.includes("      - '" + root + "/**'") ||
+      (root === 'apps/local-agent/src' && prPaths.includes("      - 'apps/local-agent/**'")),
+      'npm PR CI must cover generated-runtime source root: ' + root);
+  }
+});
+
+test('npm workflow runs on Git line-ending attribute changes', async () => {
+  const workflow = await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8');
+  assert.ok(workflow.includes("      - '.gitattributes'"), 'attribute changes must trigger npm candidate CI');
+});
+
+test('npm source files preserve canonical Git blob bytes on Windows checkout', async () => {
+  const attributes = await fs.readFile(path.resolve('.gitattributes'), 'utf8');
+  assert.ok(attributes.split('\n').map(line => line.trim()).includes('packages/mecord-connect/** text=auto eol=lf'));
+});
+
+test('independent Windows generated-runtime witness gates all push provenance', async () => {
+  const workflow = (await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8')).replace(/\r\n/g, '\n');
+  const witness = workflow.split('  windows-generated-witness:\n')[1]?.split('  compare-generated-witness:\n')[0];
+  const comparison = workflow.split('  compare-generated-witness:\n')[1]?.split('  attest-candidate:\n')[0];
+  const attestation = workflow.split('  attest-candidate:\n')[1]?.split('  node-compatibility:\n')[0];
+  const script = await fs.readFile(path.resolve('scripts/verify_npm_generated_witness.py'), 'utf8');
+  assert.ok(witness && comparison && attestation, 'independent witness and attestation jobs required');
+  assert.match(witness, /runs-on: windows-latest/);
+  assert.match(witness, /permissions:\n      contents: read/);
+  assert.doesNotMatch(witness, /(?:id-token|attestations): write/);
+  assert.match(witness, /rustup default 1\.98\.1/);
+  assert.match(witness, /cargo build --locked/);
+  assert.match(witness, /build-runtime-payload\.mjs/);
+  assert.match(comparison, /needs: \[windows-runtime, windows-generated-witness\]/);
+  assert.match(comparison, /verify_npm_generated_witness\.py/);
+  assert.match(comparison, /permissions:\n      contents: read/);
+  assert.doesNotMatch(comparison, /(?:id-token|attestations): write/);
+  assert.match(attestation, /needs: \[windows-runtime, compare-generated-witness\]/);
+  assert.match(script, /GENERATED_RUNTIME_INDEPENDENT_WITNESS_VERIFIED/);
+  assert.match(script, /archive_bytes != witness_bytes/);
+  assert.match(script, /normalize_pe\(archive_bytes\) != normalize_pe\(witness_bytes\)/);
+  assert.match(script, /independent runtime file-set mismatch/);
+  assert.match(script, /independent native PE code mismatch/);
+  assert.match(script, /normalized\[pe \+ 8:pe \+ 12\]/);
+  assert.match(script, /normalized\[pointer \+ 4:pointer \+ 20\]/);
 });
 
 test('runtime launcher allows only supported Windows x64 Node lines', () => {
@@ -349,6 +494,13 @@ test('runtime payload builder copies only tracked clean sources bound to HEAD', 
   assert.match(source, /stripTypeScriptTypes/);
   assert.ok(source.includes(".replace(/\\.ts$/, '.js')"));
   assert.doesNotMatch(source, /copyTree\(path\.join\(repoRoot/);
+});
+
+test('bounded numbered release-candidate versions are accepted without widening stable manifest validation', () => {
+  assert.equal(validateRuntimeManifest(manifest({ version: '2.0.6-rc.1' })).version, '2.0.6-rc.1');
+  for (const version of ['2.0.6-rc.0', '2.0.6-rc.01', '2.0.6-beta.1', '2.0.6-rc.1+build', '2.0.6-rc.1.2']) {
+    assert.throws(() => validateRuntimeManifest(manifest({ version })), /version is invalid/);
+  }
 });
 
 test('runtime manifest requires the complete hardened native boundary', () => {

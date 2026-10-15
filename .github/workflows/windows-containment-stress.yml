@@ -1,0 +1,50 @@
+name: Windows Kernel Process Containment Stress
+
+on:
+  pull_request:
+    paths:
+      - 'src/capabilities/process.ts'
+      - 'test/process.test.ts'
+      - 'native/windows-path-lease/**'
+      - '.github/workflows/windows-containment-stress.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/capabilities/process.ts'
+      - 'test/process.test.ts'
+      - 'native/windows-path-lease/**'
+      - '.github/workflows/windows-containment-stress.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-job-object-stress:
+    name: Windows detached descendant and timeout stress
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Compile trusted Windows Job Object helper
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./native/windows-path-lease/build.ps1
+          $helper = (Resolve-Path native/windows-path-lease/target/release/operator-windows-path-lease.exe).Path
+          "OPERATOR_WINDOWS_PATH_LEASE_PATH=$helper" >> $env:GITHUB_ENV
+      - name: Repeat actual detached-child and detached-grandchild containment proofs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pattern = 'Windows (terminal timeout quiesces|native one-shot Job Object|one-shot execution rejects|kernel Job Object)'
+          for ($i = 1; $i -le 5; $i++) {
+            Write-Host "Windows containment trial $i/5"
+            & node --experimental-strip-types --test "--test-name-pattern=$pattern" test/process.test.ts
+            if ($LASTEXITCODE -ne 0) { throw "Windows Job Object containment failed during trial $i" }
+          }
+          Write-Host 'All five trials passed with the native Job Object helper.'

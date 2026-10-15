@@ -310,7 +310,13 @@ function boundedRetention(value: number | undefined): number {
 }
 
 function isExpired(result: StoredRelayResult, now: number, retentionMs: number): boolean {
-  return Date.parse(result.recordedAt) <= now - retentionMs;
+  // Unacknowledged results are replay-safety evidence. Expiring one would let
+  // a reconnect execute the original mutation again after its local receipt
+  // disappeared. Never TTL-prune an unconsumed result: the per-device result
+  // cap and bounded file size fail closed instead of silently permitting replay.
+  // Once consumed, the sensitive payload is already redacted and its minimal
+  // tombstone can expire relative to consumption, not the original execution.
+  return result.consumedAt !== undefined && Date.parse(result.consumedAt) <= now - retentionMs;
 }
 
 function pruneExpired(state: ResultState, now: number, retentionMs: number): number {

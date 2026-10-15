@@ -5,7 +5,7 @@ import { validateReleaseTruthEvidence } from '../scripts/verify-release-truth.ts
 
 function fixture() {
   return {
-    runtimeManifest: { name: 'mecord-connect', version: '2.0.5' },
+    runtimeManifest: { name: 'mecord-connect', version: '2.0.6-rc.3' },
     bootstrapManifest: { name: 'operator-runtime-cli', version: '1.0.0' },
     releaseState: {
       schemaVersion: 1,
@@ -27,7 +27,7 @@ function fixture() {
 
 test('release truth records the deployed production state independently from the current documentation head', () => {
   const evidence = validateReleaseTruthEvidence(fixture());
-  assert.equal(evidence.source.runtimePackageVersion, '2.0.5');
+  assert.equal(evidence.source.runtimePackageVersion, '2.0.6-rc.3');
   assert.equal(evidence.production.runtimePackageVersion, '2.0.5');
   assert.equal(evidence.production.sourceCommit, RELEASE_TRUTH.production.sourceCommit);
   assert.notEqual(evidence.source.headCommit, evidence.production.sourceCommit);
@@ -35,7 +35,7 @@ test('release truth records the deployed production state independently from the
 
 test('release truth fails closed when a source package version drifts', () => {
   const input = fixture();
-  input.runtimeManifest.version = '2.0.6';
+  input.runtimeManifest.version = '2.0.5';
   assert.throws(() => validateReleaseTruthEvidence(input), /source runtime package version mismatch/);
 });
 

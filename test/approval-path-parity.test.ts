@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { ApprovalStore } from '../apps/local-agent/src/approval-store.ts';
+import { LocalActionExecutionStore } from '../apps/local-agent/src/action-execution-store.ts';
 import { SessionApprovalStore } from '../apps/local-agent/src/session-approval.ts';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 import { TaskOrchestrator } from '../src/core/task-orchestrator.ts';
@@ -87,6 +88,75 @@ test('direct Chrome-style tab selection and durable task both require actual app
   assert.equal(completed.task.state, 'VERIFIED');
   assert.equal(provider.operateCalls, 1);
   assert.equal((await approvals.list()).find(r => r.actionId === blocked.actionId)?.status, 'consumed');
+});
+
+test('denied Chrome-style durable task approval remains non-dispatchable across retries and recovery credential', async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-p0-denied-parity-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const provider = new TabProvider();
+  const runtime = new OperatorRuntime().register(provider);
+  const tasks = new TaskStore(state);
+  const approvals = new ApprovalStore(state);
+  const permissions = { allowedCapabilities: ['app.inspect', 'app.operate'], allowedRoots: [],
+    allowExternalWrites: false, allowDestructive: false, allowSystemChanges: false };
+  const taskOrchestrator = new TaskOrchestrator({ runtime, store: tasks, permissions });
+  const token = 'd'.repeat(64), recoveryToken = 'e'.repeat(64);
+  const agent = createLocalAgentServer({
+    runtime, token, recoveryToken, approvals, permissions, tasks, taskOrchestrator,
+    inlineApprovalWaitMs: 10
+  });
+  t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
+  const { port } = await agent.listen('127.0.0.1', 0);
+  const base = 'http://127.0.0.1:' + port;
+  const headers = { authorization: 'Bearer ' + token, 'content-type': 'application/json' };
+  const selector = { automationId: 'chrome-tab-2', controlType: 'TabItem', processId: 77 };
+  const submitted = await fetch(base + '/v1/tasks', {
+    method: 'POST', headers, body: JSON.stringify({
+      objective: 'Select Chrome tab after an explicit denial', run: true,
+      successConditions: ['selected tab verified'],
+      goal: { kind: 'app-operation', operation: 'select', selector }
+    })
+  });
+  const initial = await submitted.json() as any;
+  assert.equal(submitted.status, 200, JSON.stringify(initial));
+  assert.equal(initial.task.state, 'BLOCKED');
+  assert.equal(provider.operateCalls, 0);
+  const blocked = initial.task.execution.records.find((record: any) => record.state === 'BLOCKED');
+  assert.equal(blocked.capability, 'app.operate');
+  const pending = (await approvals.list()).find(record => record.actionId === blocked.actionId);
+  assert.equal(pending?.status, 'pending');
+  await approvals.deny(blocked.actionId, pending!.approvalRequestId);
+  assert.equal((await approvals.list()).find(record => record.actionId === blocked.actionId)?.status, 'denied');
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const resume = await fetch(base + '/v1/tasks/' + initial.task.id + '/resume', {
+      method: 'POST', headers, body: '{}'
+    });
+    const output = await resume.json() as any;
+    assert.ok([200, 409].includes(resume.status), JSON.stringify(output));
+    if (resume.status === 200) assert.notEqual(output.task.state, 'VERIFIED',
+      'denied task cannot be promoted to verified execution by ordinary retry');
+    assert.equal(provider.operateCalls, 0, 'no provider dispatch after explicit denial');
+  }
+
+  const recovery = await fetch(base + '/v1/tasks/' + initial.task.id + '/resume', {
+    method: 'POST', headers: { ...headers, 'x-operator-recovery-token': recoveryToken },
+    body: JSON.stringify({ approvedActionId: blocked.actionId })
+  });
+  assert.equal(recovery.status, 409);
+  const recovered = await recovery.json() as any;
+  assert.notEqual(recovered.error?.code, undefined);
+  assert.equal(provider.operateCalls, 0, 'recovery credential must not undo the denied approval');
+
+  const newAction = await fetch(base + '/v1/execute', {
+    method: 'POST', headers, body: JSON.stringify({ action: {
+      id: 'fresh-after-denied', capability: 'app.operate', risk: 'external',
+      input: { operation: 'select', selector }, provenance: { kind: 'chatgpt' }
+    } })
+  });
+  assert.equal(newAction.status, 409);
+  assert.equal((await newAction.json() as any).error?.code, 'APPROVAL_REQUIRED');
+  assert.equal(provider.operateCalls, 0);
 });
 
 test('cross-device approval cannot authorize the same blocked application step inside a workflow', async t => {
@@ -195,4 +265,167 @@ test('an explicitly approved session authorizes direct and durable Chrome-style 
   assert.equal(foreign.status, 409);
   assert.equal((await foreign.json() as any).error.code, 'APPROVAL_REQUIRED');
   assert.equal(provider.operateCalls, 2);
+});
+
+test('revoking the live session grant fails closed for new direct and durable Chrome-style operations', async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-p0-revoked-session-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const provider = new TabProvider();
+  const runtime = new OperatorRuntime().register(provider);
+  const tasks = new TaskStore(state);
+  const approvals = new ApprovalStore(state);
+  const sessionApprovals = new SessionApprovalStore();
+  const permissions = { allowedCapabilities: ['app.inspect', 'app.operate'], allowedRoots: [],
+    allowExternalWrites: false, allowDestructive: false, allowSystemChanges: false };
+  const taskOrchestrator = new TaskOrchestrator({ runtime, store: tasks, permissions });
+  const agent = createLocalAgentServer({
+    runtime, token: 'j'.repeat(64), recoveryToken: 'k'.repeat(64), approvals, sessionApprovals,
+    permissions, tasks, taskOrchestrator, inlineApprovalWaitMs: 10
+  });
+  t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
+  const { port } = await agent.listen('127.0.0.1', 0);
+  const base = 'http://127.0.0.1:' + port;
+  const headers = { authorization: 'Bearer ' + 'j'.repeat(64), 'content-type': 'application/json' };
+  const authority = { accountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    deviceId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', generation: 7 };
+  const selector = { automationId: 'chrome-tab-2', controlType: 'TabItem', processId: 77 };
+  const approvedAction: ActionRequest = {
+    id: 'revocation-session-grant', capability: 'app.operate', risk: 'external',
+    input: { operation: 'select', selector }, provenance: { kind: 'chatgpt' }
+  };
+  const pending = await approvals.register(approvedAction, authority);
+  const approved = await approvals.approve(approvedAction.id, pending.approvalRequestId);
+  sessionApprovals.grant(approved, permissions);
+  assert.equal(sessionApprovals.summary().active, true);
+  const directRequest = (id: string) => fetch(base + '/v1/execute', {
+    method: 'POST', headers, body: JSON.stringify({ action: {
+      ...approvedAction, id
+    }, approvalAuthority: authority })
+  });
+  const permitted = await directRequest('direct-before-revoke');
+  assert.equal(permitted.status, 200, JSON.stringify(await permitted.clone().json()));
+  assert.equal(provider.operateCalls, 1, 'granted session must allow one direct provider dispatch');
+
+  const unauthorizedRevoke = await fetch(base + '/v1/session-approval', {
+    method: 'DELETE', headers: { ...headers, 'x-operator-recovery-token': 'wrong-token' }
+  });
+  assert.equal(unauthorizedRevoke.status, 401, 'invalid recovery authority must not revoke');
+  assert.equal(sessionApprovals.summary().active, true);
+  const revoke = await fetch(base + '/v1/session-approval', {
+    method: 'DELETE', headers: { ...headers, 'x-operator-recovery-token': 'k'.repeat(64) }
+  });
+  assert.equal(revoke.status, 200, JSON.stringify(await revoke.clone().json()));
+  assert.equal((await revoke.json() as any).session.active, false);
+  const stateAfterRevoke = await fetch(base + '/v1/session-approval', { headers });
+  assert.equal(stateAfterRevoke.status, 200);
+  assert.equal((await stateAfterRevoke.json() as any).session.active, false);
+  assert.equal(sessionApprovals.summary().active, false);
+  const denied = await directRequest('direct-after-revoke');
+  assert.equal(denied.status, 409);
+  assert.equal((await denied.json() as any).error.code, 'APPROVAL_REQUIRED');
+  assert.equal(provider.operateCalls, 1, 'revocation must stop new direct side effects');
+
+  const submitted = await fetch(base + '/v1/tasks', {
+    method: 'POST', headers, body: JSON.stringify({
+      objective: 'Select Chrome tab after session grant revocation', run: true,
+      approvalAuthority: authority, successConditions: ['tab selection verified'],
+      goal: { kind: 'app-operation', operation: 'select', selector }
+    })
+  });
+  const task = await submitted.json() as any;
+  assert.equal(submitted.status, 200, JSON.stringify(task));
+  assert.equal(task.task.state, 'BLOCKED', 'revocation must block new durable tasks too');
+  assert.equal(provider.operateCalls, 1, 'revoked session must not authorize task provider dispatch');
+  const blocked = task.task.execution.records.find((record: any) => record.state === 'BLOCKED');
+  assert.equal(blocked.capability, 'app.operate');
+  assert.equal((await approvals.list()).some(item => item.actionId === blocked.actionId
+    && item.status === 'pending'), true, 'revoked authority still requires a new explicit decision');
+});
+
+test('relay direct app-operation returns a terminal no-dispatch approval result before upstream timeout', async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-approval-deadline-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const provider = new TabProvider();
+  const runtime = new OperatorRuntime().register(provider);
+  const approvals = new ApprovalStore(state);
+  const sessionApprovals = new SessionApprovalStore();
+  const actionExecutions = new LocalActionExecutionStore(state);
+  const permissions = {
+    allowedCapabilities: ['app.inspect', 'app.operate'], allowedRoots: [],
+    allowExternalWrites: false, allowDestructive: false, allowSystemChanges: false
+  };
+  const token = 'l'.repeat(64), recoveryToken = 'm'.repeat(64), relayInternalToken = 'n'.repeat(64);
+  const agent = createLocalAgentServer({
+    runtime, token, recoveryToken, relayInternalToken, approvals, sessionApprovals,
+    actionExecutions, permissions, inlineApprovalWaitMs: 45_000
+  });
+  t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
+  const { port } = await agent.listen('127.0.0.1', 0);
+  const base = `http://127.0.0.1:${port}`;
+  const headers = {
+    authorization: `Bearer ${token}`, 'content-type': 'application/json',
+    'x-operator-relay-request': '1', 'x-operator-relay-auth': relayInternalToken
+  };
+  const authority = {
+    accountId: '11111111-1111-4111-8111-111111111111',
+    deviceId: '22222222-2222-4222-8222-222222222222', generation: 13
+  };
+  const action: ActionRequest = {
+    id: 'relay-fast-approval-tab',
+    capability: 'app.operate', risk: 'external',
+    input: { operation: 'select', selector: { automationId: 'chrome-tab-2', controlType: 'TabItem', processId: 77 } },
+    provenance: { kind: 'chatgpt' }
+  };
+  // Large parallel platform suites can briefly stall Windows CI scheduling.
+  // The correctness invariant is a bounded terminal APPROVAL_REQUIRED well
+  // before the configured 45s inline wait, with zero provider dispatch.
+  // Keep the deadline bounded; never wait for or simulate human approval.
+  const deadlineMs = 8_000;
+  const started = Date.now();
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const first = await Promise.race([
+    fetch(`${base}/v1/execute`, { method: 'POST', headers, body: JSON.stringify({ action, approvalAuthority: authority }) }),
+    new Promise<never>((_, reject) => {
+      deadlineTimer = setTimeout(() => reject(new Error('relay execution blocked on inline approval')), deadlineMs);
+    })
+  ]).finally(() => { if (deadlineTimer) clearTimeout(deadlineTimer); });
+  assert.ok(Date.now() - started < deadlineMs);
+  const denied = await first.json() as any;
+  assert.equal(first.status, 409, JSON.stringify(denied));
+  assert.equal(denied.error.code, 'APPROVAL_REQUIRED');
+  assert.equal(provider.operateCalls, 0);
+  const receipt = await actionExecutions.lookup(action, authority);
+  assert.equal(receipt.status, 'completed', 'no unfinished external receipt may block reconnect after a timed-out approval');
+  if (receipt.status === 'completed') assert.equal(receipt.result.error?.code, 'APPROVAL_REQUIRED');
+
+  const pending = (await approvals.list()).find(item => item.actionId === action.id);
+  assert.equal(pending?.status, 'pending');
+  const approved = await approvals.approve(action.id, pending!.approvalRequestId);
+  sessionApprovals.grant(approved, permissions);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(provider.operateCalls, 0, 'late approval must not redispatch the completed historical action');
+
+  const oldReplay = await fetch(`${base}/v1/execute`, {
+    method: 'POST', headers, body: JSON.stringify({ action, approvalAuthority: authority })
+  });
+  assert.equal(oldReplay.status, 409);
+  assert.equal((await oldReplay.json() as any).error.code, 'APPROVAL_REQUIRED');
+  assert.equal(provider.operateCalls, 0);
+
+  const freshAction = { ...action, id: 'relay-fresh-explicit-session-tab' };
+  const fresh = await fetch(`${base}/v1/execute`, {
+    method: 'POST', headers, body: JSON.stringify({ action: freshAction, approvalAuthority: authority })
+  });
+  assert.equal(fresh.status, 200, JSON.stringify(await fresh.clone().json()));
+  assert.equal((await fresh.json() as any).ok, true);
+  assert.equal(provider.operateCalls, 1, 'the only external dispatch is a new explicit action under the same approved session');
+
+  const unrelated = { ...action, id: 'relay-different-device-tab' };
+  const foreign = await fetch(`${base}/v1/execute`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ action: unrelated, approvalAuthority: { ...authority, deviceId: '33333333-3333-4333-8333-333333333333' } })
+  });
+  assert.equal(foreign.status, 409);
+  assert.equal((await foreign.json() as any).error.code, 'APPROVAL_REQUIRED');
+  assert.equal(provider.operateCalls, 1);
 });

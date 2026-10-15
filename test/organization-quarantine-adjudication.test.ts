@@ -110,6 +110,27 @@ test('wrong signature, mismatched identities, unresolved state and denied operat
   assert.equal((await f.journal.pending('organization')).length,2);
 });
 
+test('noncanonical base64url alias of a valid Ed25519 claim is rejected without changing recovery state', async t => {
+  const f = await setup(t);
+  const signed = f.signed(f.claim);
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  // For a 64-byte Ed25519 signature, 4 low bits in its 86th base64url
+  // symbol are unused. Modifying only those bits preserves decoded bytes.
+  const lastIndex = alphabet.indexOf(signed.signature.at(-1)!);
+  assert.ok(lastIndex >= 0);
+  const alteredIndex = (lastIndex & ~15) | ((lastIndex + 1) & 15);
+  const alias = signed.signature.slice(0, -1) + alphabet[alteredIndex];
+  assert.notEqual(alias, signed.signature);
+  assert.deepEqual(Buffer.from(alias, 'base64url'), Buffer.from(signed.signature, 'base64url'));
+  await assert.rejects(f.org.adjudicateQuarantinedIdentity({
+    programId: f.program.id, targetKey: 'service', returnedMissionId: f.returnedMissionId,
+    operatorId: 'security-admin', providerClaim: { claim: signed.claim, signature: alias }
+  }), (error: any) => error?.code === 'QUARANTINE_EVIDENCE_INVALID');
+  assert.equal((await f.adjudicator.list()).length, 0);
+  assert.equal((await f.journal.pending('organization')).length, 2,
+    'a signature representation alias must not retire an unresolved quarantine');
+});
+
 test('verified-owned classification cannot silently cancel claimed child or remove cleanup authority',async t=>{
   const f=await setup(t);
   const owned=await f.org.adjudicateQuarantinedIdentity({

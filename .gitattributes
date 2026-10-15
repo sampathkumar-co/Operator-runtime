@@ -1,0 +1,3 @@
+# Exact-source npm package attestation requires identical text bytes on Windows and Git.
+# text=auto preserves binary objects while pinning all package text checkout files to LF.
+packages/mecord-connect/** text=auto eol=lf

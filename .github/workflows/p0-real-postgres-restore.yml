@@ -1,0 +1,75 @@
+name: P0 PostgreSQL Restore and Authority Certification
+
+on:
+  pull_request:
+    paths:
+      - 'integration/postgres/**'
+      - 'src/core/control-plane-store.ts'
+      - 'src/core/control-plane-restore-witness.ts'
+      - 'src/core/postgres-external-restore-anchor.ts'
+      - 'src/core/postgres-quarantine-anchor.ts'
+      - 'src/core/remote-authority-fence.ts'
+      - '.github/workflows/p0-real-postgres-restore.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'integration/postgres/**'
+      - 'src/core/control-plane-store.ts'
+      - 'src/core/control-plane-restore-witness.ts'
+      - 'src/core/postgres-external-restore-anchor.ts'
+      - 'src/core/postgres-quarantine-anchor.ts'
+      - 'src/core/remote-authority-fence.ts'
+      - '.github/workflows/p0-real-postgres-restore.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  witness-and-authority:
+    name: Real PostgreSQL 18 restore witness, anchor and process fencing
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: operator_test
+          POSTGRES_PASSWORD: disposable-test-only
+          POSTGRES_DB: operator_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U operator_test -d operator_test"
+          --health-interval 3s --health-timeout 3s --health-retries 15
+    env:
+      OPERATOR_REAL_PG_TEST: '1'
+      PGHOST: 127.0.0.1
+      PGPORT: '5432'
+      PGDATABASE: operator_test
+      PGUSER: operator_test
+      PGPASSWORD: disposable-test-only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Install pinned test-only PostgreSQL driver
+        run: npm ci --prefix integration/postgres --ignore-scripts --no-audit --no-fund
+      - name: Certify signed restore witness with separate read-only PostgreSQL role
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test integration/postgres/real-restore-witness.test.mjs
+      - name: Certify quarantine high-water CAS on independently connected PostgreSQL pools
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test integration/postgres/real-quarantine-anchor.test.mjs
+      - name: Certify authority revocation, CAS and process crash on real PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test integration/postgres/real-remote-authority.test.mjs
+          node --test integration/postgres/real-remote-authority-process.test.mjs

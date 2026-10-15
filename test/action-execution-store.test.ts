@@ -419,3 +419,41 @@ test('legacy result-first crash window is upgraded only with embedded kernel ver
   assert.equal(recovered.transitions.at(-1)?.verificationDigest, verificationDigest);
   assert.deepEqual(await new ActionTransitionJournal(state).replayCompleted(request.id), output);
 });
+
+test('static risk mismatches never enter durable receipt capacity or dispatch on restart', async (t) => {
+  const state = await temp(t);
+  const first = new LocalActionExecutionStore(state);
+  for (let i = 0; i < 260; i++) {
+    const spoofed = {
+      id: 'spoofed-static-read-' + i,
+      capability: 'file.read',
+      risk: 'write' as const,
+      input: { path: 'C:\\\\repo\\\\file.txt' },
+      provenance: { kind: 'chatgpt' as const }
+    };
+    await assert.rejects(first.begin(spoofed, authority), (e: any) => e?.code === 'ACTION_RISK_MISMATCH');
+    assert.equal((await first.lookup(spoofed, authority)).status, 'missing');
+  }
+  const mislabeledWrite = { ...action('spoofed-write-label'), risk: 'read' as const };
+  await assert.rejects(first.begin(mislabeledWrite, authority), (e: any) => e?.code === 'ACTION_RISK_MISMATCH');
+  const restarted = new LocalActionExecutionStore(state);
+  assert.equal((await restarted.lookup(mislabeledWrite, authority)).status, 'missing');
+  assert.equal((await restarted.begin(action('real-write-after-rejected-spoofs'), authority)).status, 'started',
+    'rejected risk spoofs must not exhaust receipt capacity for a real mutation');
+});
+
+
+test('uncertain write execution receipt never expires into permission to replay old action ID', async t => {
+  const state = await temp(t);
+  let time = Date.parse('2026-10-01T00:00:00Z');
+  const clock = () => new Date(time);
+  const first = new LocalActionExecutionStore(state, { clock });
+  const request = action('write-cross-ttl');
+  assert.equal((await first.begin(request, authority)).status, 'started');
+  time += 90 * 24 * 60 * 60_000;
+  const afterRestart = new LocalActionExecutionStore(state, { clock });
+  assert.equal((await afterRestart.begin(action('trigger-prune'), authority)).status, 'started');
+  const previous = await afterRestart.begin(request, authority);
+  assert.equal(previous.status, 'processing', 'old unknown write cannot be treated as a fresh command');
+  assert.equal((await afterRestart.lookup(request, authority)).status, 'processing');
+});

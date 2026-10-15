@@ -416,3 +416,124 @@ test('Windows kernel Job Object terminates recursively detached grandchildren on
   await assert.rejects(fs.access(escaped),
     'All descendants, including two-generation detached grandchildren, must remain terminated');
 });
+
+
+test('Windows native one-shot Job Object kills detached descendants when the supervisor itself dies', async t => {
+  if (process.platform !== 'win32') return t.skip('Windows Job Object supervisor death regression');
+  const helper = process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH;
+  assert.ok(helper, 'native Job Object helper must be configured for Windows containment CI');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-job-supervisor-death-'));
+  const started = path.join(root, 'detached-child-started.txt');
+  const escaped = path.join(root, 'detached-child-survived.txt');
+  const descendant = "const fs=require('node:fs');fs.writeFileSync(" + JSON.stringify(started)
+    + ",'started');setTimeout(()=>fs.writeFileSync(" + JSON.stringify(escaped)
+    + ",'escaped'),1800);setInterval(()=>{},1000)";
+  const parent = "const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e',"
+    + JSON.stringify(descendant) + "],{detached:true,stdio:'ignore'});c.unref();setInterval(()=>{},1000)";
+  // Test native kernel ownership directly, instead of going through the
+  // process provider's normal timeout and graceful completion handlers.
+  const supervisor = spawn(helper, ['job-run', root, process.execPath, '-e', parent], {
+    cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  supervisor.stdout?.resume();
+  supervisor.stderr?.resume();
+  let spawnError: Error | undefined;
+  supervisor.on('error', error => { spawnError = error; });
+  t.after(async () => {
+    if (supervisor.exitCode === null && supervisor.signalCode === null) supervisor.kill();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  const deadline = Date.now() + (process.env.CI === 'true' ? 20_000 : 10_000);
+  let observed = false;
+  while (Date.now() < deadline) {
+    if (spawnError) throw spawnError;
+    observed = await fs.access(started).then(() => true, () => false);
+    if (observed || supervisor.exitCode !== null) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.ok(observed, 'the detached child must actually start before supervisor termination');
+  assert.equal(supervisor.exitCode, null, 'native supervisor must still own the active Job Object');
+  const exit = new Promise<void>((resolve, reject) => {
+    supervisor.once('exit', () => resolve());
+    supervisor.once('error', reject);
+  });
+  assert.equal(supervisor.kill(), true, 'test must kill the exact native supervisor');
+  let exitDeadline: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      exit,
+      new Promise<never>((_, reject) => {
+        exitDeadline = setTimeout(() => reject(new Error('native supervisor did not exit within 10s')), 10_000);
+      })
+    ]);
+  } finally {
+    if (exitDeadline) clearTimeout(exitDeadline);
+  }
+  // The child is demonstrably alive before its job owner is killed.
+  // The delayed marker catches descendants that escape KILL_ON_JOB_CLOSE.
+  await new Promise(resolve => setTimeout(resolve, 2200));
+  await assert.rejects(fs.access(escaped),
+    'abrupt supervisor death must close the kernel job and kill its detached children');
+});
+
+test('Windows native one-shot Job Object contains a burst of independently detached children after supervisor death', async t => {
+  if (process.platform !== 'win32') return t.skip('Windows kernel burst containment');
+  const helper = process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH;
+  assert.ok(helper, 'trusted native Job Object helper must be configured');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-job-burst-'));
+  const count = 6;
+  const childScript = "const fs=require('node:fs');"
+    + "fs.writeFileSync(process.argv[1],'started');"
+    + "setTimeout(()=>fs.writeFileSync(process.argv[2],'escaped'),2000);"
+    + "setInterval(()=>{},1000)";
+  // The supervisor's child keeps spawning new detached descendants, not one
+  // fixed process tree. Each must join the same kernel Job Object at creation.
+  const parent = "const cp=require('node:child_process');const path=require('node:path');"
+    + "const root=" + JSON.stringify(root) + ";"
+    + "const script=" + JSON.stringify(childScript) + ";"
+    + "let i=0;const timer=setInterval(()=>{const n=i++;"
+    + "const child=cp.spawn(process.execPath,['-e',script,path.join(root,'started-'+n),"
+    + "path.join(root,'escaped-'+n)],{detached:true,stdio:'ignore'});child.unref();"
+    + "if(i>=6)clearInterval(timer);},40);setInterval(()=>{},1000)";
+  const supervisor = spawn(helper, ['job-run', root, process.execPath, '-e', parent], {
+    cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  supervisor.stdout?.resume();
+  supervisor.stderr?.resume();
+  let spawnError: Error | undefined;
+  supervisor.on('error', error => { spawnError = error; });
+  t.after(async () => {
+    if (supervisor.exitCode === null && supervisor.signalCode === null) supervisor.kill();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  const deadline = Date.now() + (process.env.CI === 'true' ? 25_000 : 12_000);
+  let started = 0;
+  while (Date.now() < deadline) {
+    if (spawnError) throw spawnError;
+    const observed = await Promise.all(Array.from({ length: count }, (_, n) =>
+      fs.access(path.join(root, 'started-' + n)).then(() => true, () => false)));
+    started = observed.filter(Boolean).length;
+    if (started === count || supervisor.exitCode !== null) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.equal(started, count, 'all six detached descendants must have run before the crash injection');
+  assert.equal(supervisor.exitCode, null, 'supervisor must still own the kernel Job Object');
+  const exited = new Promise<void>((resolve, reject) => {
+    supervisor.once('exit', () => resolve());
+    supervisor.once('error', reject);
+  });
+  assert.equal(supervisor.kill(), true, 'terminate exactly the test-owned Job Object supervisor');
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([exited, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Job Object supervisor did not terminate')), 10_000);
+    })]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  await new Promise(resolve => setTimeout(resolve, 2600));
+  for (let n = 0; n < count; n += 1) {
+    await assert.rejects(fs.access(path.join(root, 'escaped-' + n)),
+      'detached descendant ' + n + ' escaped the dead supervisor Job Object');
+  }
+});
