@@ -184,7 +184,11 @@ test('npm PR path filters include every tracked source tree built into shipped r
   const roots = [...builder.matchAll(/compileTrackedTree\('([^']+)'/g)].map(match => match[1]);
   assert.ok(roots.length >= 4, 'builder must expose all runtime source roots');
   for (const sourceRoot of roots) {
-    assert.ok(filters.includes("'" + sourceRoot + "/**'"),
+    // A scoped ancestor glob legitimately covers its tracked descendants
+    // (e.g. apps/local-agent/** covers apps/local-agent/src).
+    const parts = sourceRoot.split('/');
+    const coveringGlobs = parts.map((_, i) => "'" + parts.slice(0, i + 1).join('/') + "/**'");
+    assert.ok(coveringGlobs.some(pattern => filters.includes(pattern)),
       'npm PR CI does not cover tracked packaged source tree ' + sourceRoot);
   }
 });
