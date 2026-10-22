@@ -105,6 +105,10 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
     ].join('\n');
     const selected = await this.#select(prompt, ready.length, context.signal,
       Math.min(8_000, Math.max(1, Math.floor(context.budget.activeDeadlineMsRemaining))));
+    // Late model outputs after Pause/Cancel must not mutate shared planner state.
+    if (context.signal?.aborted) {
+      throw new OperatorError('TASK_PLANNER_ABORTED', 'Canceled subgoal selection was discarded.');
+    }
     // Delegate still enforces READY status and chooses the exact predeclared
     // observe/action/verify capabilities and the durable independent verifier.
     state.activeSubgoalId = ready[selected]!.id;
@@ -123,17 +127,24 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
   async #select(prompt: string, count: number, parent: AbortSignal | undefined, timeoutMs: number): Promise<number> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
     try {
       const signal = parent ? AbortSignal.any([parent, controller.signal]) : controller.signal;
+      const cancelled = new Promise<never>((_, reject) => {
+        onAbort = () => reject(new OperatorError('TASK_PLANNER_ABORTED', 'Local model selection was canceled before dispatch.'));
+        if (parent?.aborted) onAbort();
+        else parent?.addEventListener('abort', onAbort, { once: true });
+      });
       const deadline = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           controller.abort();
           reject(new OperatorError('TASK_MODEL_SUBGOAL_TIMEOUT', 'Local subgoal selection exceeded its deadline.'));
         }, timeoutMs);
       });
-      return await Promise.race([this.#readChoice(prompt, count, signal), deadline]);
+      return await Promise.race([this.#readChoice(prompt, count, signal), deadline, cancelled]);
     } finally {
       if (timer) clearTimeout(timer);
+      if (parent && onAbort) parent.removeEventListener('abort', onAbort);
       controller.abort();
     }
   }
