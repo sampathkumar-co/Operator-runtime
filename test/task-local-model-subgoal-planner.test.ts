@@ -60,7 +60,7 @@ function context(options: { observation?: 'fresh' | 'stale' | 'unknown'; verifie
       execution: {
         plannerState: { durablePlan: plan }, records: [{
           state: 'SUCCEEDED', observation, capability: 'project.inspect',
-          actionId: 'prior-action', stepKey: 'setup-observation'
+          actionId: 'prior-action', stepKey: 'autonomous:0:verify'
         }]
       }
     } as unknown as TaskPlannerContext['task'],
