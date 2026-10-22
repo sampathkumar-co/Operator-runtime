@@ -173,3 +173,31 @@ test('authenticated proposal HTTP endpoint never executes; rejects missing model
   const unauthenticated = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(approved) });
   assert.equal(unauthenticated.status, 401);
 });
+
+test('HTTP proposal hard timeout is reported as 504 without task execution', async t => {
+  const runtime = new OperatorRuntime();
+  const token = 'm'.repeat(64);
+  const adapter = new LoopbackOllamaTaskGoalInterpreter({
+    model: 'mock-local:latest', timeoutMs: 25,
+    fetchFn: (async () => await new Promise<Response>(() => {})) as typeof fetch
+  });
+  const server = createLocalAgentServer({
+    runtime, token,
+    permissions: {
+      allowedCapabilities: ['browser.inspect', 'browser.navigate'], allowedRoots: [],
+      allowExternalWrites: false, allowSystemChanges: false, allowDestructive: false
+    },
+    taskGoalInterpreter: adapter
+  });
+  t.after(() => server.close());
+  const addr = await server.listen('127.0.0.1', 0);
+  const response = await fetch('http://127.0.0.1:' + addr.port + '/v1/tasks/propose', {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
+    body: JSON.stringify(approved)
+  });
+  assert.equal(response.status, 504);
+  const body = await response.json() as any;
+  assert.equal(body.ok, false);
+  assert.equal(body.error.code, 'TASK_MODEL_TIMEOUT');
+});
