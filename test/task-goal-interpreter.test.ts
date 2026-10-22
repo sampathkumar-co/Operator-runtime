@@ -37,6 +37,53 @@ test('model project command cannot infer new trusted root', async t => {
     (error: any) => error?.code === 'TASK_PROPOSAL_INVALID');
 });
 
+test('model may propose two to four scoped sequential steps but cannot invent execution authority', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-propose-sequence-')));
+  const outside = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-propose-sequence-outside-')));
+  t.after(() => Promise.allSettled([
+    fs.rm(root, { recursive: true, force: true }), fs.rm(outside, { recursive: true, force: true })
+  ]));
+  const request = { objective: 'Inspect approved site then test project', approvedRoots: [root], approvedBrowserOrigins: ['https://example.test'] };
+  const steps = [
+    { kind: 'browser-navigation', url: 'https://example.test/docs' },
+    { kind: 'trusted-project-command', root, commandKind: 'test' }
+  ];
+  const response = { goal: { kind: 'semantic-workflow', steps }, successConditions: ['Both steps are verified by the runtime'] };
+  assert.deepEqual(validateTaskGoalProposal(response, request), response);
+  assert.throws(() => validateTaskGoalProposal({ ...response, goal: { kind: 'semantic-workflow', steps: [...steps, ...steps, ...steps] } }, request),
+    (error: any) => error?.code === 'TASK_PROPOSAL_INVALID');
+  assert.throws(() => validateTaskGoalProposal({ ...response, goal: { kind: 'semantic-workflow', steps: [steps[0], steps[0]] } }, request),
+    (error: any) => error?.code === 'TASK_PROPOSAL_INVALID');
+  assert.throws(() => validateTaskGoalProposal({ ...response, goal: { kind: 'semantic-workflow',
+    steps: [steps[0], { kind: 'trusted-project-command', root: outside, commandKind: 'test' }] } }, request),
+    (error: any) => error?.code === 'TASK_PROPOSAL_SCOPE_DENIED');
+  assert.throws(() => validateTaskGoalProposal({ ...response, goal: { kind: 'semantic-workflow',
+    steps: [steps[0], { kind: 'controlled-file-change', root, path: 'bad.txt', content: 'bad' }] } }, request),
+    (error: any) => error?.code === 'TASK_PROPOSAL_INVALID');
+  assert.throws(() => validateTaskGoalProposal({ ...response, goal: { kind: 'semantic-workflow',
+    steps: [steps[0], { kind: 'browser-navigation', url: 'https://other.test/wrong' }] } }, request),
+    (error: any) => error?.code === 'TASK_PROPOSAL_SCOPE_DENIED');
+});
+
+test('model may suggest a closed all-checks quality gate, never best-effort partial success', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-quality-proposal-')));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const request = { objective: 'lint, test and build this project', approvedRoots: [root], approvedBrowserOrigins: [] };
+  const checks = ['lint', 'test', 'build'];
+  const valid = { goal: { kind: 'project-quality-gate', root, checks, requireAll: true }, successConditions: ['All three registered checks succeed'] };
+  assert.deepEqual(validateTaskGoalProposal(valid, request), valid);
+  for (const bad of [
+    { ...valid.goal, requireAll: false },
+    { ...valid.goal, checks: ['test', 'test'] },
+    { ...valid.goal, checks: ['test', 'shell'] },
+    { ...valid.goal, checks: ['lint'] },
+    { ...valid.goal, force: true }
+  ]) {
+    assert.throws(() => validateTaskGoalProposal({ ...valid, goal: bad }, request),
+      (error: any) => error?.code === 'TASK_PROPOSAL_INVALID');
+  }
+});
+
 test('local-only model adapter has fixed loopback endpoint and cannot self-execute', async () => {
   let requests = 0;
   const adapter = new LoopbackOllamaTaskGoalInterpreter({
