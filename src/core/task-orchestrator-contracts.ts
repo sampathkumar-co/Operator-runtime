@@ -73,6 +73,10 @@ export interface TaskPlannerContext {
   recentEvents: TaskPlannerEvent[];
   intelligence: TaskIntelligenceContext;
   decisionBudget: TaskDecisionBudget;
+  /** Stops model-backed decisions on cancellation. It never conveys authority. */
+  signal?: AbortSignal;
+  /** Atomic durable model-call and conservative token allowance reservation. */
+  reserveModelBudget?: (maxTokens: number) => Promise<void>;
 }
 
 export interface TaskIntelligenceContext {
@@ -114,6 +118,9 @@ export interface TaskPlanningInfluence {
 }
 
 export interface TaskPlanningInfluenceRequest {
+  /** Pause/Cancel aborts model advice while still pre-dispatch. Never grants authority. */
+  signal?: AbortSignal;
+  reserveModelBudget?: (maxTokens: number) => Promise<void>;
   proposalDigest: string;
   task: TaskCapsule;
   goal: SemanticTaskGoal;
@@ -150,8 +157,8 @@ export type PlannerDecision =
 export interface TaskPlanner {
   readonly id: string;
   supports(goal: SemanticTaskGoal): boolean;
-  next(context: TaskPlannerContext): PlannerDecision;
-  repair?(context: TaskPlannerContext, invalidDecision: unknown, issue: string): PlannerDecision;
+  next(context: TaskPlannerContext): PlannerDecision | Promise<PlannerDecision>;
+  repair?(context: TaskPlannerContext, invalidDecision: unknown, issue: string): PlannerDecision | Promise<PlannerDecision>;
   accept(context: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void;
   fallback?(context: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean;
 }

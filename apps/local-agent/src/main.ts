@@ -23,6 +23,9 @@ import { OperatorError } from '../../../src/core/errors.ts';
 import { RelayEnrollmentClient } from './relay-enrollment.ts';
 import { DEVELOPER_RELAY_CAPABILITIES } from '../../../src/core/developer-relay-surface.ts';
 import { TaskOrchestrator } from '../../../src/core/task-orchestrator.ts';
+import { LoopbackOllamaTaskGoalInterpreter } from '../../../src/core/task-goal-interpreter.ts';
+import { LoopbackOllamaPlanningInfluence } from '../../../src/core/local-model-planning-influence.ts';
+import { LocalModelAutonomousWorkflowPlanner } from '../../../src/core/local-model-subgoal-planner.ts';
 import { TeamCoordinator } from '../../../src/core/team-coordinator.ts';
 import { ProcedureMemoryStore } from '../../../src/core/procedure-memory.ts';
 import { WorldModelStore } from '../../../src/core/world-model.ts';
@@ -474,6 +477,17 @@ async function resetLocalDevice() {
   return await coordinator.reset();
 }
 
+// Disabled by default: only local Ollama, with a fixed advisory-only command vocabulary.
+// Advisory AI may veto the next action but can never authorize or dispatch one.
+const localPlanningInfluence = process.env.OPERATOR_TASK_ADVISOR_OLLAMA_MODEL?.trim()
+  ? new LoopbackOllamaPlanningInfluence({ model: process.env.OPERATOR_TASK_ADVISOR_OLLAMA_MODEL.trim() })
+  : undefined;
+
+// Disabled unless explicitly opted in; model only selects between preauthorized READY subgoals.
+const autonomousPlanner = process.env.OPERATOR_TASK_SCHEDULER_OLLAMA_MODEL?.trim()
+  ? new LocalModelAutonomousWorkflowPlanner({ model: process.env.OPERATOR_TASK_SCHEDULER_OLLAMA_MODEL.trim() })
+  : undefined;
+
 const taskOrchestrator = new TaskOrchestrator({
   runtime,
   store: tasks,
@@ -481,6 +495,8 @@ const taskOrchestrator = new TaskOrchestrator({
   intentRegistry,
   actionJournal,
   intelligence: taskIntelligence,
+  planningInfluence: localPlanningInfluence,
+  autonomousPlanner,
   observationShadow: adaptiveObservationShadow,
   planNodeShadow: adaptivePlanNodeShadow,
   outcomeShadow: adaptiveOutcomeShadow,
@@ -521,6 +537,11 @@ const taskOrchestrator = new TaskOrchestrator({
   }
 });
 
+// Explicit opt-in only. The configured model runs on this machine, not on a remote data-sharing endpoint.
+const taskGoalInterpreter = process.env.OPERATOR_TASK_OLLAMA_MODEL?.trim()
+  ? new LoopbackOllamaTaskGoalInterpreter({ model: process.env.OPERATOR_TASK_OLLAMA_MODEL.trim() })
+  : undefined;
+
 const agent = createLocalAgentServer({
   runtime,
   agentKernel,
@@ -537,6 +558,7 @@ const agent = createLocalAgentServer({
   audit,
   tasks,
   taskOrchestrator,
+  taskGoalInterpreter,
   teams,
   procedures,
   world,

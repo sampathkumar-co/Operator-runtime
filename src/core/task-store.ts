@@ -373,6 +373,15 @@ function validateExecution(input: unknown): TaskExecution {
   const plannerIterations = raw.plannerIterations === undefined
     ? stepCount
     : boundedInteger(raw.plannerIterations, 0, 1_000_000, 'execution plannerIterations');
+  const modelCallCount = raw.modelCallCount === undefined
+    ? undefined
+    : boundedInteger(raw.modelCallCount, 0, maxSteps * 2, 'execution modelCallCount');
+  const modelReservedTokens = raw.modelReservedTokens === undefined
+    ? undefined
+    : boundedInteger(raw.modelReservedTokens, 0, maxSteps * 100_000, 'execution modelReservedTokens');
+  if ((modelCallCount === undefined) !== (modelReservedTokens === undefined)) {
+    throw corrupt('execution model budget counters must be atomically present or absent.');
+  }
   const progressExtensions = raw.progressExtensions === undefined
     ? 0
     : boundedInteger(raw.progressExtensions, 0, maxSteps, 'execution progressExtensions');
@@ -399,7 +408,9 @@ function validateExecution(input: unknown): TaskExecution {
   const rejectedDecisions = raw.rejectedDecisions === undefined ? [] : validateRejectedDecisions(raw.rejectedDecisions);
   return {
     schemaVersion: 1, plannerId, goalKind, plannerState, maxSteps, maxAttemptsPerStep, timeoutMs, stepCount,
-    plannerIterations, progressExtensions, progressProofDigests, preDispatchReobserves, dispatchedActions,
+    plannerIterations,
+    ...(modelCallCount === undefined ? {} : { modelCallCount, modelReservedTokens }),
+    progressExtensions, progressProofDigests, preDispatchReobserves, dispatchedActions,
     ...(startedAt ? { startedAt, deadlineAt } : {}), records,
     ...(plannerEvents.length > 0 ? { plannerEvents } : {}),
     ...(rejectedDecisions.length > 0 ? { rejectedDecisions } : {})

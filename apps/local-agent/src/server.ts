@@ -1,5 +1,6 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { TaskProposalReviewRegistry } from '../../../src/core/task-proposal-review.ts';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { applyBoundedHttpServerPolicy, requireLiteralLoopbackBindHost } from '../../../src/core/network-authority.ts';
@@ -12,6 +13,7 @@ import type { DurableSagaKernel } from '../../../src/core/durable-saga.ts';
 import type { AuditLog } from '../../../src/core/audit.ts';
 import type { TaskStore } from '../../../src/core/task-store.ts';
 import type { TaskOrchestrator, SemanticTaskGoal, SubmitTaskOptions } from '../../../src/core/task-orchestrator.ts';
+import { validateTaskGoalProposal, type TaskGoalInterpreter } from '../../../src/core/task-goal-interpreter.ts';
 import type { TeamCoordinator, TeamRole, TeamWorkInput } from '../../../src/core/team-coordinator.ts';
 import type { ProcedureMemoryStore } from '../../../src/core/procedure-memory.ts';
 import { validateWorldObservation, type WorldModelStore } from '../../../src/core/world-model.ts';
@@ -113,6 +115,7 @@ export function createLocalAgentServer(options: {
   audit?: AuditLog;
   tasks?: TaskStore;
   taskOrchestrator?: TaskOrchestrator;
+  taskGoalInterpreter?: TaskGoalInterpreter;
   teams?: TeamCoordinator;
   procedures?: ProcedureMemoryStore;
   world?: WorldModelStore;
@@ -148,6 +151,7 @@ export function createLocalAgentServer(options: {
     resolve: (decision: InlineApprovalDecision | null) => void;
     timer: NodeJS.Timeout;
   };
+  const proposalReviews = new TaskProposalReviewRegistry();
   const approvalWaiters = new Map<string, Set<InlineApprovalWaiter>>();
   const activeTeamActions = new Map<string, { missionId: string; workItemId: string; workerId: string; controller: AbortController }>();
   let emergencyExecutionGeneration = new AbortController();
@@ -461,6 +465,9 @@ export function createLocalAgentServer(options: {
       return;
     }
     const requestPermissions = requestPermissionDecision.permissions;
+    const reviewPrincipal = relayRequest
+      ? 'relay:' + JSON.stringify(requestEnterpriseContext)
+      : 'local-user';
 
     if (pathname === '/v1/gateway/execute' && req.method === 'POST') {
       if (!options.gateway) {
@@ -1861,6 +1868,98 @@ export function createLocalAgentServer(options: {
       const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
       const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
       send(res, 200, { ok: true, tasks: options.tasks ? await options.tasks.list(limit) : [], configured: Boolean(options.tasks) });
+      return;
+    }
+
+    // Propose only: the local model cannot submit, authorize, or execute a task.
+    // Clients must inspect and explicitly submit the typed contract to POST /v1/tasks.
+    if (pathname === '/v1/tasks/propose' && req.method === 'POST') {
+      if (!options.taskGoalInterpreter) {
+        send(res, 503, { ok: false, error: { code: 'TASK_MODEL_NOT_CONFIGURED', message: 'Explicit opt-in local task model is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        if (body.run !== undefined || body.goal !== undefined || body.approvalAuthority !== undefined) {
+          throw new OperatorError('TASK_PROPOSAL_ONLY', 'This endpoint cannot accept execution or approval fields.');
+        }
+        if (typeof body.objective !== 'string' || !body.objective.trim() || body.objective.length > 4096) {
+          throw new OperatorError('TASK_PROPOSAL_INVALID', 'Provide a bounded natural-language objective.');
+        }
+        if (!Array.isArray(body.approvedRoots) || !Array.isArray(body.approvedBrowserOrigins) ||
+          body.approvedRoots.length > 12 || body.approvedBrowserOrigins.length > 12 ||
+          body.approvedRoots.some(root => typeof root !== 'string' || !root.trim() || !withinAuthorizedRoots(root, requestPermissions.allowedRoots)) ||
+          body.approvedBrowserOrigins.some(origin => typeof origin !== 'string' || !origin.trim())) {
+          throw new OperatorError('TASK_PROPOSAL_SCOPE_DENIED', 'Approved scopes must be explicit and contained in current device permissions.');
+        }
+        const request = {
+          objective: body.objective,
+          approvedRoots: body.approvedRoots as string[],
+          approvedBrowserOrigins: body.approvedBrowserOrigins as string[]
+        };
+        const proposal = validateTaskGoalProposal(await options.taskGoalInterpreter.propose(request), request);
+        const scope = taskAuthorizedScope(proposal.goal, requestPermissions.allowedRoots);
+        if (!scope) {
+          throw new OperatorError('TASK_PROPOSAL_SCOPE_DENIED', 'Proposal exceeds current task permissions.');
+        }
+        if (relayRequest && !requestEnterpriseContext?.principalId) {
+          throw new OperatorError('TASK_PROPOSAL_SCOPE_DENIED', 'Proposal review requires an authenticated enterprise principal.');
+        }
+        const receipt = proposalReviews.issue({
+          principal: reviewPrincipal, objective: request.objective, proposal, scope
+        });
+        send(res, 200, { ok: true, proposal, ...receipt, requiresConfirmation: true, executionStarted: false });
+      } catch (error) {
+        const code = error instanceof OperatorError ? error.code : 'TASK_MODEL_UNAVAILABLE';
+        const status = code === 'TASK_PROPOSAL_SCOPE_DENIED' ? 403
+          : code === 'TASK_MODEL_TIMEOUT' ? 504
+          : code === 'TASK_MODEL_CANCELLED' ? 409
+          : code === 'TASK_MODEL_UNAVAILABLE' ? 503 : 400;
+        send(res, status, { ok: false, error: { code, message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    // A model proposal is never runnable by itself. A separate explicit
+    // confirmation creates the exact reviewed task, never dispatches it.
+    if (pathname === '/v1/tasks/proposals/confirm' && req.method === 'POST') {
+      if (!options.taskOrchestrator) {
+        send(res, 503, { ok: false, error: { code: 'TASK_EXECUTOR_NOT_CONFIGURED', message: 'Task execution is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        if (!body || typeof body !== 'object' || Array.isArray(body) ||
+            Object.keys(body).length !== 2 ||
+            typeof body.proposalId !== 'string' || typeof body.proposalDigest !== 'string') {
+          throw new OperatorError('TASK_PROPOSAL_REVIEW_INVALID', 'Confirm using only proposalId and proposalDigest.');
+        }
+        if (relayRequest && !requestEnterpriseContext?.principalId) {
+          throw new OperatorError('TASK_PROPOSAL_REVIEW_INVALID', 'Authenticated enterprise principal required.');
+        }
+        const reviewed = proposalReviews.consume({
+          proposalId: body.proposalId,
+          proposalDigest: body.proposalDigest,
+          principal: reviewPrincipal,
+          currentScopeFor: review => taskAuthorizedScope(review.goal, requestPermissions.allowedRoots)
+        });
+        const task = await options.taskOrchestrator.submit({
+          requestId: reviewed.requestId,
+          objective: reviewed.objective,
+          goal: reviewed.proposal.goal as SemanticTaskGoal,
+          successConditions: reviewed.proposal.successConditions,
+          authorizedScope: reviewed.scope
+        });
+        send(res, 202, {
+          ok: true, task, executionStarted: false,
+          reviewedProposalId: reviewed.requestId
+        });
+      } catch (error) {
+        const code = error instanceof OperatorError ? error.code : 'TASK_PROPOSAL_CONFIRM_FAILED';
+        const status = code === 'TASK_PROPOSAL_SCOPE_DENIED' ? 403
+          : code === 'TASK_PROPOSAL_REVIEW_CAPACITY' ? 429 : 400;
+        send(res, status, { ok: false, error: { code, message: error instanceof Error ? error.message : String(error) } });
+      }
       return;
     }
 
