@@ -61,7 +61,7 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
     const ageMs = this.#now() - observedAt;
     // Do not treat uncertain, ambiguous, expired or forged/unpersisted observations
     // as evidence for AI scheduling. Before observation, use deterministic ordering.
-    if (last?.state !== 'SUCCEEDED' || !/^autonomous:\\d+:verify$/.test(last.stepKey) ||
+    if (last?.state !== 'SUCCEEDED' || !/^autonomous:\d+:verify$/.test(last.stepKey) ||
       observation?.schemaVersion !== 2 || observation.epistemicStatus !== 'KNOWN' || observation.ambiguous ||
       !Number.isFinite(ageMs) || ageMs < 0 || ageMs > 120_000) {
       return this.#builtin.next(context);
