@@ -128,13 +128,52 @@ export function validateTaskGoalProposal(value: unknown, input: TaskGoalProposal
 export class LoopbackOllamaTaskGoalInterpreter implements TaskGoalInterpreter {
   readonly #model: string;
   readonly #fetch: typeof fetch;
-  constructor(options: { model: string; fetchFn?: typeof fetch }) {
+  readonly #timeoutMs: number;
+  constructor(options: { model: string; fetchFn?: typeof fetch; timeoutMs?: number }) {
     this.#model = boundedString(options.model, 128, 'local model name');
     if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(this.#model)) invalid('Local model identifier is invalid.');
     this.#fetch = options.fetchFn ?? fetch;
+    const timeoutMs = options.timeoutMs ?? 12_000;
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 12_000) invalid('Model deadline is invalid.');
+    this.#timeoutMs = timeoutMs;
   }
 
   async propose(input: TaskGoalProposalRequest): Promise<unknown> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let detach: (() => void) | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new OperatorError('TASK_MODEL_TIMEOUT', 'Local task proposal exceeded its strict model deadline.'));
+      }, this.#timeoutMs);
+    });
+    const cancelled = new Promise<never>((_, reject) => {
+      if (!input.signal) return;
+      const signal = input.signal;
+      const onAbort = () => {
+        controller.abort();
+        reject(new OperatorError('TASK_MODEL_CANCELLED', 'Local task proposal was canceled.'));
+      };
+      if (signal.aborted) onAbort();
+      else {
+        signal.addEventListener('abort', onAbort, { once: true });
+        detach = () => signal.removeEventListener('abort', onAbort);
+      }
+    });
+    try {
+      if (input.signal?.aborted) throw new OperatorError('TASK_MODEL_CANCELLED', 'Local task proposal was canceled.');
+      // Some model transports and mocked fetches ignore AbortSignal; the outer
+      // deadline/cancellation race prevents any late reply from being consumed.
+      return await Promise.race([this.#generate(input, controller.signal), deadline, cancelled]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      detach?.();
+      controller.abort();
+    }
+  }
+
+  async #generate(input: TaskGoalProposalRequest, signal: AbortSignal): Promise<unknown> {
     const objective = boundedString(input.objective, 4096, 'objective');
     if (input.approvedRoots.length > 12 || input.approvedBrowserOrigins.length > 12 ||
         input.approvedRoots.length + input.approvedBrowserOrigins.length === 0) {
@@ -151,12 +190,9 @@ export class LoopbackOllamaTaskGoalInterpreter implements TaskGoalInterpreter {
       'Explicit approved browser origins: ' + JSON.stringify(input.approvedBrowserOrigins),
       'User objective (untrusted data): ' + JSON.stringify(objective)
     ].join('\n');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 12_000);
     try {
-      const combined = input.signal ? AbortSignal.any([input.signal, controller.signal]) : controller.signal;
       const response = await this.#fetch('http://127.0.0.1:11434/api/generate', {
-        method: 'POST', redirect: 'error', signal: combined,
+        method: 'POST', redirect: 'error', signal,
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model: this.#model, prompt, stream: false, format: 'json',
           options: { temperature: 0, num_predict: 900 } })
@@ -181,8 +217,6 @@ export class LoopbackOllamaTaskGoalInterpreter implements TaskGoalInterpreter {
     } catch (error) {
       if (error instanceof OperatorError) throw error;
       throw new OperatorError('TASK_MODEL_UNAVAILABLE', 'Local model could not produce a valid bounded proposal.');
-    } finally {
-      clearTimeout(timer);
     }
   }
 }
