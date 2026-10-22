@@ -1,4 +1,12 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { FilesystemProvider } from '../src/capabilities/filesystem.ts';
+import { OperatorRuntime } from '../src/core/runtime.ts';
+import { TaskOrchestrator } from '../src/core/task-orchestrator.ts';
+import { TaskStore } from '../src/core/task-store.ts';
 import test from 'node:test';
 import { LocalModelAutonomousWorkflowPlanner } from '../src/core/local-model-subgoal-planner.ts';
 import { createDurableTaskPlan } from '../src/core/task-plan.ts';
@@ -154,4 +162,75 @@ test('uncooperative local model times out without choosing a subgoal', async () 
   ctx.budget.activeDeadlineMsRemaining = 20;
   await assert.rejects(() => planner.next(ctx), (error: any) => error?.code === 'TASK_MODEL_SUBGOAL_TIMEOUT');
   assert.equal(ctx.task.execution!.plannerState.activeSubgoalId, undefined);
+});
+
+test('integration: model reorders two READY filesystem subgoals after genuine verification', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-model-ready-root-')));
+  const state = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-model-ready-state-')));
+  t.after(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(state, { recursive: true, force: true });
+  });
+  const provider = new FilesystemProvider({
+    allowedRoots: [root],
+    windowsPathLeaseExecutable: process.platform === 'win32'
+      ? path.resolve('native/windows-path-lease/target/release/operator-windows-path-lease.exe')
+      : undefined
+  });
+  const runtime = new OperatorRuntime().register(provider);
+  const permissions = {
+    allowedRoots: [root], allowedCapabilities: ['file.list', 'file.create', 'file.info'],
+    allowExternalWrites: false, allowSystemChanges: false, allowDestructive: false
+  };
+  const steps = [
+    { key: 'setup', dependsOn: [] },
+    { key: 'second', dependsOn: ['setup'] },
+    { key: 'third', dependsOn: ['setup'] }
+  ].map(({ key, dependsOn }) => {
+    const target = path.join(root, key + '.txt');
+    const data = 'data for ' + key;
+    const sha256 = crypto.createHash('sha256').update(data).digest('hex');
+    return {
+      key, title: key, dependsOn,
+      observe: { capability: 'file.list', input: { path: root } },
+      action: { capability: 'file.create', input: { path: target, content: data } },
+      verify: { capability: 'file.info', input: { path: target },
+        assertions: [{ path: 'sha256', operator: 'equals' as const, value: sha256 }] }
+    };
+  });
+  let modelCalls = 0;
+  const planner = new LocalModelAutonomousWorkflowPlanner({
+    model: 'test-local:latest',
+    fetchFn: (async () => {
+      modelCalls++;
+      return new Response(JSON.stringify({ response: '{"index":1}' }), { status: 200 });
+    }) as typeof fetch
+  });
+  const orchestrator = new TaskOrchestrator({
+    runtime, store: new TaskStore(state), permissions, autonomousPlanner: planner
+  });
+  const submitted = await orchestrator.submit({
+    objective: 'Verify three scoped file outputs; reorder independent subgoals after fresh observations.',
+    authorizedScope: [root],
+    successConditions: ['every output has the expected SHA-256'],
+    maxSteps: 20,
+    goal: { kind: 'autonomous-workflow', roots: [root], steps }
+  });
+  const finished = await orchestrator.run(submitted.id);
+  assert.equal(finished.state, 'VERIFIED', JSON.stringify(finished.failures));
+  assert.equal(modelCalls, 1);
+  const order = finished.execution!.records.map(record => record.stepKey);
+  assert.deepEqual(order.slice(0,4), [
+    'autonomous:0:observe', 'autonomous:0:action',
+    'autonomous:0:verify', 'autonomous:2:observe'
+  ]);
+  assert.deepEqual(order.slice(6), [
+    'autonomous:1:observe', 'autonomous:1:action', 'autonomous:1:verify'
+  ]);
+  for (const name of ['setup', 'second', 'third']) {
+    assert.equal(await fs.readFile(path.join(root, name + '.txt'), 'utf8'), 'data for ' + name);
+  }
+  const plan = finished.execution!.plannerState.durablePlan as any;
+  assert.equal(plan.subgoals.every((item: any) => item.status === 'VERIFIED'), true);
+  assert.ok(finished.execution!.records.every(record => record.observation?.schemaVersion === 2));
 });
