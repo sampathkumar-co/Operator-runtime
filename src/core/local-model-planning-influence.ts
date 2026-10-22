@@ -71,18 +71,20 @@ export class LoopbackOllamaPlanningInfluence implements TaskPlanningInfluencePro
     // Never let advisory AI bypass the existing uncertain-side-effect reconciliation barrier.
     const event = lastBoundedEvent(request.recentEvents);
     if (!event) return undefined;
-    // The advisory must not reapply an obsolete event after a later verified
-    // provider outcome. This does not clear or adjudicate an uncertain journal:
-    // the canonical orchestrator's independent recovery barrier still applies.
+    // A later successful *different* action cannot prove an earlier uncertain
+    // mutation was reconciled. There is no action ID in TaskPlannerEvent, so
+    // never dismiss RECONCILE solely by comparing wall-clock timestamps.
+    if (event.decision === 'RECONCILE') {
+      return influence(request.proposalDigest, 'RECONCILE', 'CONTROL_ALLOWED',
+        'Authoritative runtime event requires reconciliation before another action.');
+    }
+    // Ordinary stale observation/replanning hints can be superseded by a newer
+    // successful action. This is deliberately NOT applied to reconciliation.
     const previous = request.task.execution?.records.at(-1);
     const lastEventAt = request.recentEvents.at(-1)?.at;
     if (previous?.state === 'SUCCEEDED' && previous.finishedAt && lastEventAt &&
       Number.isFinite(Date.parse(previous.finishedAt)) && Number.isFinite(Date.parse(lastEventAt)) &&
       Date.parse(previous.finishedAt) > Date.parse(lastEventAt)) return undefined;
-    if (event.decision === 'RECONCILE') {
-      return influence(request.proposalDigest, 'RECONCILE', 'CONTROL_ALLOWED',
-        'Authoritative runtime event requires reconciliation before another action.');
-    }
     if (!['REOBSERVE', 'REPLAN', 'WAIT', 'FAIL'].includes(event.decision)) return undefined;
 
     const prompt = [
