@@ -75,6 +75,13 @@ export class LoopbackOllamaPlanningInfluence implements TaskPlanningInfluencePro
       return influence(request.proposalDigest, 'RECONCILE', 'CONTROL_ALLOWED',
         'Authoritative runtime event requires reconciliation before another action.');
     }
+    // A newer successful provider outcome supersedes an old retry/replan signal.
+    // Avoid recurring model calls and vetoes against already-resolved failures.
+    const previous = request.task.execution?.records.at(-1);
+    const lastEventAt = request.recentEvents.at(-1)?.at;
+    if (previous?.state === 'SUCCEEDED' && previous.finishedAt && lastEventAt &&
+      Number.isFinite(Date.parse(previous.finishedAt)) && Number.isFinite(Date.parse(lastEventAt)) &&
+      Date.parse(previous.finishedAt) > Date.parse(lastEventAt)) return undefined;
     if (!['REOBSERVE', 'REPLAN', 'WAIT', 'FAIL'].includes(event.decision)) return undefined;
 
     const prompt = [
