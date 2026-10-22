@@ -193,3 +193,38 @@ test('pause also interrupts an asynchronous malformed-decision repair before dis
   assert.equal(dispatches, 0);
   await assert.rejects(() => fs.stat(path.join(f.root, 'verified.txt')), { code: 'ENOENT' });
 });
+
+
+test('pause interrupts a pending model advisory before any canonical provider dispatch', async t => {
+  const f = await fixture(t);
+  let entered!: () => void;
+  const advising = new Promise<void>(resolve => { entered = resolve; });
+  let dispatches = 0;
+  const orchestrator = new TaskOrchestrator({
+    runtime: f.runtime, store: new TaskStore(f.state), permissions: f.permissions,
+    planningInfluence: {
+      async review(context) {
+        assert.ok(context.signal, 'Pause/Cancel must propagate to in-flight model advice');
+        entered();
+        return await new Promise<undefined>(() => {});
+      }
+    },
+    executeAction: async (action, profile, context) => {
+      ++dispatches;
+      return await f.runtime.execute(action, profile, context);
+    }
+  });
+  const submitted = await orchestrator.submit({
+    objective: 'Pause pending advisory before any side effects.',
+    authorizedScope: [f.root], successConditions: ['No file is created until approved'],
+    goal: f.goal
+  });
+  const running = orchestrator.run(submitted.id);
+  await advising;
+  await orchestrator.pause(submitted.id);
+  const paused = await running;
+  assert.equal(paused.state, 'PAUSED');
+  assert.equal(dispatches, 0);
+  assert.equal(paused.execution?.records.length, 0);
+  await assert.rejects(() => fs.stat(path.join(f.root, 'verified.txt')), { code: 'ENOENT' });
+});

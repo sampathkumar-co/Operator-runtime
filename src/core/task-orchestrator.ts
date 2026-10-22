@@ -506,8 +506,12 @@ export class TaskOrchestrator {
       }));
       if (this.#planningInfluence) {
         let influence: TaskPlanningInfluence | undefined;
+        const influenceController = new AbortController();
+        this.#planningControllers.set(task.id, influenceController);
+        const influenceSignal = AbortSignal.any([signal, influenceController.signal]);
         try {
-          influence = await this.#planningInfluence.review({
+          influence = await boundedPlannerCall(() => this.#planningInfluence!.review({
+            signal: influenceSignal,
             proposalDigest,
             task: structuredClone(task),
             goal: structuredClone(goal),
@@ -517,9 +521,17 @@ export class TaskOrchestrator {
             recentEvents: structuredClone(recentEvents),
             intelligence: structuredClone(intelligence),
             decisionBudget: structuredClone(decisionBudget)
-          });
+          }), Math.max(1, activeDeadline - this.#monotonicNow()), influenceSignal);
         } catch (error) {
+          if (influenceSignal.aborted) {
+            const requested = this.#controlRequests.get(task.id);
+            if (requested) return await this.#setControlState(task.id, requested);
+            const controlled = await this.#store.get(task.id);
+            if (controlled.state === 'PAUSED' || controlled.state === 'CANCELLED') return controlled;
+          }
           return await this.#fail(task, 'TASK_ADAPTIVE_CONTROL_FAILED', error instanceof Error ? error.message : String(error), assertLease);
+        } finally {
+          this.#planningControllers.delete(task.id);
         }
         if (influence) {
           task.evidence.push(evidence('adaptive_planning_influence', 'info', 'Adaptive planning recommendation was evaluated without granting execution authority.', {

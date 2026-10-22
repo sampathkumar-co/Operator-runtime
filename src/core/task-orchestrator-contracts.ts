@@ -116,6 +116,8 @@ export interface TaskPlanningInfluence {
 }
 
 export interface TaskPlanningInfluenceRequest {
+  /** Pause/Cancel aborts model advice while still pre-dispatch. Never grants authority. */
+  signal?: AbortSignal;
   proposalDigest: string;
   task: TaskCapsule;
   goal: SemanticTaskGoal;
