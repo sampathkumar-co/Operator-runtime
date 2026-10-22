@@ -23,6 +23,7 @@ import { OperatorError } from '../../../src/core/errors.ts';
 import { RelayEnrollmentClient } from './relay-enrollment.ts';
 import { DEVELOPER_RELAY_CAPABILITIES } from '../../../src/core/developer-relay-surface.ts';
 import { TaskOrchestrator } from '../../../src/core/task-orchestrator.ts';
+import { LoopbackOllamaTaskGoalInterpreter } from '../../../src/core/task-goal-interpreter.ts';
 import { TeamCoordinator } from '../../../src/core/team-coordinator.ts';
 import { ProcedureMemoryStore } from '../../../src/core/procedure-memory.ts';
 import { WorldModelStore } from '../../../src/core/world-model.ts';
@@ -521,6 +522,11 @@ const taskOrchestrator = new TaskOrchestrator({
   }
 });
 
+// Explicit opt-in only. The configured model runs on this machine, not on a remote data-sharing endpoint.
+const taskGoalInterpreter = process.env.OPERATOR_TASK_OLLAMA_MODEL?.trim()
+  ? new LoopbackOllamaTaskGoalInterpreter({ model: process.env.OPERATOR_TASK_OLLAMA_MODEL.trim() })
+  : undefined;
+
 const agent = createLocalAgentServer({
   runtime,
   agentKernel,
@@ -537,6 +543,7 @@ const agent = createLocalAgentServer({
   audit,
   tasks,
   taskOrchestrator,
+  taskGoalInterpreter,
   teams,
   procedures,
   world,

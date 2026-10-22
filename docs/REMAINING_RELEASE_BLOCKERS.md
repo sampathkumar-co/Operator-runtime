@@ -15,3 +15,11 @@
 | Release | Review, independent security acceptance, deployment gates | Reviewed PRs and release authority; no automatic merge or npm publish |
 
 This branch only addresses the asynchronous planner boundary and pre-dispatch pause/timeout behavior. PR #359 stays separate and draft. No 100%-complete claim.
+
+## Incremental update — local-model proposals and dependency remediation (2026-10-22)
+
+In the stacked `feature/production-autonomy-model-entry-20261022` branch, a new **proposal-only** local-model task intake supports narrowly validated, explicitly scoped browser navigation and registered project quality commands. It still requires separate confirmation and task submission, so fully autonomous model planning is **not** completed. Opt-in `OPERATOR_TASK_OLLAMA_MODEL` is unset by default, and no actual local model inference was executed in this increment.
+
+The production and MCP TypeScript checks now pass with installed development dependencies. The full MCP dependency audit reports zero vulnerabilities after explicitly pinning a patched MCP server and Inspector and updating the lockfile. The Windows laptop's Node 22.14.0 is below the package's >=22.19.0 engine requirement; compatible deployment-node validation remains necessary.
+
+The previous P0 relay-recovery blocker, official benchmark requirement and public release hold remain unchanged.
