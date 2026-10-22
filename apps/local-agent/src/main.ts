@@ -25,6 +25,7 @@ import { DEVELOPER_RELAY_CAPABILITIES } from '../../../src/core/developer-relay-
 import { TaskOrchestrator } from '../../../src/core/task-orchestrator.ts';
 import { LoopbackOllamaTaskGoalInterpreter } from '../../../src/core/task-goal-interpreter.ts';
 import { LoopbackOllamaPlanningInfluence } from '../../../src/core/local-model-planning-influence.ts';
+import { LocalModelAutonomousWorkflowPlanner } from '../../../src/core/local-model-subgoal-planner.ts';
 import { TeamCoordinator } from '../../../src/core/team-coordinator.ts';
 import { ProcedureMemoryStore } from '../../../src/core/procedure-memory.ts';
 import { WorldModelStore } from '../../../src/core/world-model.ts';
@@ -482,6 +483,11 @@ const localPlanningInfluence = process.env.OPERATOR_TASK_ADVISOR_OLLAMA_MODEL?.t
   ? new LoopbackOllamaPlanningInfluence({ model: process.env.OPERATOR_TASK_ADVISOR_OLLAMA_MODEL.trim() })
   : undefined;
 
+// Disabled unless explicitly opted in; model only selects between preauthorized READY subgoals.
+const autonomousPlanner = process.env.OPERATOR_TASK_SCHEDULER_OLLAMA_MODEL?.trim()
+  ? new LocalModelAutonomousWorkflowPlanner({ model: process.env.OPERATOR_TASK_SCHEDULER_OLLAMA_MODEL.trim() })
+  : undefined;
+
 const taskOrchestrator = new TaskOrchestrator({
   runtime,
   store: tasks,
@@ -490,6 +496,7 @@ const taskOrchestrator = new TaskOrchestrator({
   actionJournal,
   intelligence: taskIntelligence,
   planningInfluence: localPlanningInfluence,
+  autonomousPlanner,
   observationShadow: adaptiveObservationShadow,
   planNodeShadow: adaptivePlanNodeShadow,
   outcomeShadow: adaptiveOutcomeShadow,
