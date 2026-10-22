@@ -97,6 +97,10 @@ export interface TaskExecution {
   /** Backwards-compatible environment-action count. Pre-dispatch failures do not consume it. */
   stepCount: number;
   plannerIterations?: number;
+  /** Durable pre-request count; every local model attempt consumes one allowance. */
+  modelCallCount?: number;
+  /** Conservative pre-request token reservation, not measured model output usage. */
+  modelReservedTokens?: number;
   /** Verified objective-relevant progress may extend only the planner loop, never environment actions. */
   progressExtensions?: number;
   /** Durable deduplication keys for progress proofs that already earned an extension. */

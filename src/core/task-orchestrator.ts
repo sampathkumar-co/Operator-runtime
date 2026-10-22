@@ -402,6 +402,31 @@ export class TaskOrchestrator {
           return await this.#fail(task, 'TASK_INTELLIGENCE_RETRIEVAL_FAILED', error instanceof Error ? error.message : String(error), assertLease);
         }
       }
+      // Reserve and durably journal model allowances *before* a network request.
+      // The local-only model never has authority to mutate these counters.
+      const reserveModelBudget = async (maxTokens: number, activeSignal: AbortSignal): Promise<void> => {
+        if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 100_000) {
+          throw new OperatorError('TASK_MODEL_BUDGET_INVALID', 'Model request token reservation is invalid.');
+        }
+        if (activeSignal.aborted) throw new OperatorError('TASK_PLANNER_ABORTED', 'Canceled model request cannot reserve budget.');
+        const usedCalls = current.modelCallCount ?? 0;
+        const usedTokens = current.modelReservedTokens ?? 0;
+        if (!Number.isSafeInteger(usedCalls) || usedCalls < 0 ||
+            !Number.isSafeInteger(usedTokens) || usedTokens < 0) {
+          throw new OperatorError('TASK_MODEL_BUDGET_INVALID', 'Durable model accounting is invalid.');
+        }
+        const available = taskDecisionBudget(current, this.#wallNow());
+        if (available.modelCalls.remaining < 1 || available.tokens.remaining < maxTokens) {
+          throw new OperatorError('TASK_MODEL_BUDGET_EXHAUSTED', 'Task exceeded its durable local model allowance.');
+        }
+        current.modelCallCount = usedCalls + 1;
+        current.modelReservedTokens = usedTokens + maxTokens;
+        const control = await this.#persistRunState(task, assertLease);
+        if (control || activeSignal.aborted) {
+          throw new OperatorError('TASK_PLANNER_ABORTED', 'Task was controlled before model request dispatch.');
+        }
+      };
+
       const planningController = new AbortController();
       this.#planningControllers.set(task.id, planningController);
       const planningSignal = AbortSignal.any([signal, planningController.signal]);
@@ -412,7 +437,8 @@ export class TaskOrchestrator {
         intelligence,
         budget,
         decisionBudget,
-        signal: planningSignal
+        signal: planningSignal,
+        reserveModelBudget: async maxTokens => await reserveModelBudget(maxTokens, planningSignal)
       };
       let decision: PlannerDecision;
       let rawDecision: unknown;
@@ -526,7 +552,8 @@ export class TaskOrchestrator {
             budget: structuredClone(budget),
             recentEvents: structuredClone(recentEvents),
             intelligence: structuredClone(intelligence),
-            decisionBudget: structuredClone(decisionBudget)
+            decisionBudget: structuredClone(decisionBudget),
+            reserveModelBudget: async maxTokens => await reserveModelBudget(maxTokens, influenceSignal)
           }), Math.max(1, activeDeadline - this.#monotonicNow()), influenceSignal);
         } catch (error) {
           if (influenceSignal.aborted) {

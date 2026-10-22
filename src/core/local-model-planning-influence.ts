@@ -98,6 +98,8 @@ export class LoopbackOllamaPlanningInfluence implements TaskPlanningInfluencePro
       'Previous planning iterations: ' + Math.max(0, Math.floor(request.budget.plannerIterations))
     ].join('\n');
 
+    // Model advice is charged even when the inference fails or times out.
+    await request.reserveModelBudget?.(Buffer.byteLength(prompt, 'utf8') + 80);
     const timeoutMs = Math.min(8_000, Math.max(1, request.budget.activeDeadlineMsRemaining));
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;

@@ -75,6 +75,8 @@ export interface TaskPlannerContext {
   decisionBudget: TaskDecisionBudget;
   /** Stops model-backed decisions on cancellation. It never conveys authority. */
   signal?: AbortSignal;
+  /** Atomic durable model-call and conservative token allowance reservation. */
+  reserveModelBudget?: (maxTokens: number) => Promise<void>;
 }
 
 export interface TaskIntelligenceContext {
@@ -118,6 +120,7 @@ export interface TaskPlanningInfluence {
 export interface TaskPlanningInfluenceRequest {
   /** Pause/Cancel aborts model advice while still pre-dispatch. Never grants authority. */
   signal?: AbortSignal;
+  reserveModelBudget?: (maxTokens: number) => Promise<void>;
   proposalDigest: string;
   task: TaskCapsule;
   goal: SemanticTaskGoal;

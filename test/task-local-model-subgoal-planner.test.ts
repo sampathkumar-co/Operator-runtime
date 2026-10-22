@@ -10,6 +10,7 @@ import { TaskStore } from '../src/core/task-store.ts';
 import test from 'node:test';
 import { LocalModelAutonomousWorkflowPlanner } from '../src/core/local-model-subgoal-planner.ts';
 import { createDurableTaskPlan } from '../src/core/task-plan.ts';
+import { taskDecisionBudget } from '../src/core/task-decision-budget.ts';
 import type { SemanticTaskGoal, TaskPlannerContext } from '../src/core/task-orchestrator-contracts.ts';
 
 const TIME = Date.parse('2026-10-22T08:00:30.000Z');
@@ -76,6 +77,19 @@ function response(index: number): typeof fetch {
   return (async () => new Response(JSON.stringify({ response: JSON.stringify({ index }) }), { status: 200 })) as typeof fetch;
 }
 
+test('durable model budget reflects requests and prevents silent zero-usage reporting', () => {
+  const used = taskDecisionBudget({
+    schemaVersion: 1, plannerId: 'operator.autonomous-workflow.v1',
+    goalKind: 'autonomous-workflow', plannerState: {}, maxSteps: 2,
+    maxAttemptsPerStep: 1, timeoutMs: 30000, stepCount: 0, records: [],
+    modelCallCount: 4, modelReservedTokens: 250
+  }, Date.now());
+  assert.equal(used.modelCalls.used, 4);
+  assert.equal(used.modelCalls.remaining, 0);
+  assert.equal(used.tokens.used, 250);
+  assert.equal(used.tokens.remaining, 199750);
+});
+
 test('model chooses one READY subgoal after fresh verified observation; delegate still owns tools', async () => {
   let calls = 0;
   const planner = new LocalModelAutonomousWorkflowPlanner({
@@ -95,7 +109,13 @@ test('model chooses one READY subgoal after fresh verified observation; delegate
     }) as typeof fetch
   });
   const ctx = context();
+  let reservations = 0;
+  ctx.reserveModelBudget = async maxTokens => {
+    reservations++;
+    assert.ok(maxTokens > 64 && maxTokens < 10_000);
+  };
   const decision = await planner.next(ctx);
+  assert.equal(reservations, 1);
   assert.equal(decision.type, 'step');
   if (decision.type === 'step') {
     assert.equal(decision.key, 'autonomous:2:observe');
@@ -219,6 +239,11 @@ test('integration: model reorders two READY filesystem subgoals after genuine ve
   const finished = await orchestrator.run(submitted.id);
   assert.equal(finished.state, 'VERIFIED', JSON.stringify(finished.failures));
   assert.equal(modelCalls, 1);
+  assert.equal(finished.execution!.modelCallCount, 1);
+  assert.ok((finished.execution!.modelReservedTokens ?? 0) > 64);
+  const reloaded = await new TaskStore(state).get(submitted.id);
+  assert.equal(reloaded.execution?.modelCallCount, 1);
+  assert.equal(reloaded.execution?.modelReservedTokens, finished.execution!.modelReservedTokens);
   const order = finished.execution!.records.map(record => record.stepKey);
   assert.deepEqual(order.slice(0,4), [
     'autonomous:0:observe', 'autonomous:0:action',
