@@ -16,6 +16,8 @@ test('untrusted model proposal must be within user-selected browser origin', () 
     (error: any) => error?.code === 'TASK_PROPOSAL_SCOPE_DENIED');
   assert.throws(() => validateTaskGoalProposal({ ...browser, goal: { kind: 'browser-navigation', url: 'http://username:password@example.test/' } }, approved),
     (error: any) => error?.code === 'TASK_PROPOSAL_INVALID');
+  assert.throws(() => validateTaskGoalProposal({ ...browser, goal: { kind: 'browser-navigation', url: 'https://example.test/', targetId: 'fabricated-tab' } }, approved),
+    (error: any) => error?.code === 'TASK_PROPOSAL_INVALID');
   assert.throws(() => validateTaskGoalProposal({ ...browser, goal: { kind: 'browser-navigation', url: 'https://example.test/', run: true } }, approved),
     (error: any) => error?.code === 'TASK_PROPOSAL_INVALID');
   assert.throws(() => validateTaskGoalProposal({ ...browser, goal: { kind: 'controlled-file-change', root: 'C:/', path: 'x', content: 'bad' } }, approved),
