@@ -234,3 +234,28 @@ test('integration: model reorders two READY filesystem subgoals after genuine ve
   assert.equal(plan.subgoals.every((item: any) => item.status === 'VERIFIED'), true);
   assert.ok(finished.execution!.records.every(record => record.observation?.schemaVersion === 2));
 });
+
+test('Pause/Cancel discards delayed model choice even if mocked transport ignores AbortSignal', async () => {
+  let entered!: () => void;
+  let release!: () => void;
+  const sent = new Promise<void>(resolve => { entered = resolve; });
+  const gated = new Promise<void>(resolve => { release = resolve; });
+  const controller = new AbortController();
+  const planner = new LocalModelAutonomousWorkflowPlanner({
+    model: 'local-planner:latest', now: () => TIME,
+    fetchFn: (async () => {
+      entered();
+      await gated; // deliberately ignores the AbortSignal like an uncooperative model
+      return new Response(JSON.stringify({ response: '{"index":1}' }), { status: 200 });
+    }) as typeof fetch
+  });
+  const ctx = context();
+  ctx.signal = controller.signal;
+  const planning = planner.next(ctx);
+  await sent;
+  controller.abort();
+  await assert.rejects(() => planning, (error: any) => error?.code === 'TASK_PLANNER_ABORTED');
+  release();
+  await Promise.resolve();
+  assert.equal(ctx.task.execution!.plannerState.activeSubgoalId, undefined);
+});
