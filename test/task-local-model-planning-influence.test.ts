@@ -75,6 +75,26 @@ test('uncertain runtime event requires reconciliation without a model call', asy
   assert.equal(calls, 0);
 });
 
+test('stale reconciliation event never blocks a newer successful verified action', async () => {
+  let calls = 0;
+  const advisor = new LoopbackOllamaPlanningInfluence({
+    model: 'local-test:latest',
+    fetchFn: fakeFetch({ command: 'FAIL_SAFE' }, () => { calls++; })
+  });
+  const old = request('RECONCILE');
+  old.recentEvents[0]!.at = '2026-10-22T09:00:00.000Z';
+  old.task.execution = { records: [{ state: 'SUCCEEDED', finishedAt: '2026-10-22T09:01:00.000Z' }] } as any;
+  assert.equal(await advisor.review(old), undefined);
+  assert.equal(calls, 0);
+  const current = request('RECONCILE');
+  current.recentEvents[0]!.at = '2026-10-22T09:00:00.000Z';
+  current.task.execution = { records: [{ state: 'SUCCEEDED', finishedAt: '2026-10-22T08:59:00.000Z' }] } as any;
+  const blocked = await advisor.review(current);
+  assert.equal(blocked?.command, 'RECONCILE');
+  assert.equal(blocked?.runtimeVetoRequired, true);
+  assert.equal(calls, 0);
+});
+
 test('real model advisory request uses fixed loopback and contains no sensitive task or observation text', async () => {
   let calls = 0;
   const advisor = new LoopbackOllamaPlanningInfluence({
