@@ -1899,7 +1899,10 @@ export function createLocalAgentServer(options: {
         send(res, 200, { ok: true, proposal, requiresConfirmation: true, executionStarted: false });
       } catch (error) {
         const code = error instanceof OperatorError ? error.code : 'TASK_MODEL_UNAVAILABLE';
-        const status = code === 'TASK_PROPOSAL_SCOPE_DENIED' ? 403 : code === 'TASK_MODEL_UNAVAILABLE' ? 503 : 400;
+        const status = code === 'TASK_PROPOSAL_SCOPE_DENIED' ? 403
+          : code === 'TASK_MODEL_TIMEOUT' ? 504
+          : code === 'TASK_MODEL_CANCELLED' ? 409
+          : code === 'TASK_MODEL_UNAVAILABLE' ? 503 : 400;
         send(res, status, { ok: false, error: { code, message: error instanceof Error ? error.message : String(error) } });
       }
       return;
