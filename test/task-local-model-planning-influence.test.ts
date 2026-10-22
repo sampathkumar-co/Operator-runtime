@@ -111,7 +111,14 @@ test('real model advisory request uses fixed loopback and contains no sensitive 
       }
     })
   });
-  const result = await advisor.review(request('REOBSERVE'));
+  const modelRequest = request('REOBSERVE');
+  let reservations = 0;
+  modelRequest.reserveModelBudget = async maxTokens => {
+    reservations++;
+    assert.ok(maxTokens >= 80 && maxTokens <= 10_000);
+  };
+  const result = await advisor.review(modelRequest);
+  assert.equal(reservations, 1);
   assert.equal(result?.command, 'OBSERVE');
   assert.equal(result?.effect, 'CONTROL_ALLOWED');
   assert.equal(result?.grantsAuthority, false);
