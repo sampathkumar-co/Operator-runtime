@@ -51,7 +51,8 @@ export function validateTaskGoalProposal(value: unknown, input: TaskGoalProposal
   const goal = record(response.goal, 'Proposal goal');
   const kind = goal.kind;
   if (kind === 'browser-navigation') {
-    exactKeys(goal, ['kind', 'url', 'targetId'], 'Browser proposal');
+    // Unobserved model output cannot invent a live browser tab identity.
+    exactKeys(goal, ['kind', 'url'], 'Browser proposal');
     const raw = boundedString(goal.url, 4096, 'browser URL');
     let url: URL;
     try { url = new URL(raw); } catch { return invalid('Browser proposal URL must be absolute.'); }
@@ -60,7 +61,6 @@ export function validateTaskGoalProposal(value: unknown, input: TaskGoalProposal
     }
     const approved = new Set(input.approvedBrowserOrigins.map(origin));
     if (!approved.has(url.origin)) throw new OperatorError('TASK_PROPOSAL_SCOPE_DENIED', 'Model-proposed browser origin was not explicitly approved.');
-    if (goal.targetId !== undefined) boundedString(goal.targetId, 256, 'browser target');
   } else if (kind === 'trusted-project-command') {
     exactKeys(goal, ['kind', 'root', 'commandKind'], 'Project proposal');
     const root = path.resolve(boundedString(goal.root, 4096, 'project root'));
