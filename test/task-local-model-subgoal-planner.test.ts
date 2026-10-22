@@ -241,6 +241,9 @@ test('integration: model reorders two READY filesystem subgoals after genuine ve
   assert.equal(modelCalls, 1);
   assert.equal(finished.execution!.modelCallCount, 1);
   assert.ok((finished.execution!.modelReservedTokens ?? 0) > 64);
+  const reloaded = await new TaskStore(state).get(submitted.id);
+  assert.equal(reloaded.execution?.modelCallCount, 1);
+  assert.equal(reloaded.execution?.modelReservedTokens, finished.execution!.modelReservedTokens);
   const order = finished.execution!.records.map(record => record.stepKey);
   assert.deepEqual(order.slice(0,4), [
     'autonomous:0:observe', 'autonomous:0:action',
