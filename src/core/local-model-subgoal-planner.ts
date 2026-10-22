@@ -9,6 +9,10 @@ const ALLOWED_FAMILIES = new Set([
   'browser', 'file', 'git', 'project', 'app', 'docker', 'postgres',
   'process', 'terminal', 'computer', 'system', 'visual'
 ]);
+const ALLOWED_DOMAINS = new Set([
+  'project', 'filesystem', 'git', 'docker', 'database', 'ide',
+  'browser', 'uia', 'process', 'system', 'application', 'visual', 'unknown'
+]);
 
 function invalid(message: string): never {
   throw new OperatorError('TASK_MODEL_SUBGOAL_INVALID', message);
@@ -95,8 +99,8 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
       'Return ONLY a JSON object such as {"index":0}. No tool calls, edits, permissions, or new steps.',
       'Favor read-only observation and reversible operations when otherwise equivalent.',
       'Candidates: ' + JSON.stringify(candidates),
-      'Last verified observation domain: ' + JSON.stringify(observation.domain),
-      'Last verified observation channel: ' + JSON.stringify(observation.channel),
+      'Last verified observation domain: ' + JSON.stringify(ALLOWED_DOMAINS.has(observation.domain) ? observation.domain : 'unknown'),
+      'Last verified observation channel: ' + JSON.stringify(observation.channel === 'visual' ? 'visual' : 'semantic'),
       'Remaining execution actions: ' + Math.max(0, Math.floor(context.budget.remainingSteps))
     ].join('\n');
     const selected = await this.#select(prompt, ready.length, context.signal,
