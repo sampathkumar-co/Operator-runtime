@@ -29,10 +29,10 @@ export function taskDecisionBudget(execution: TaskExecution, nowMs: number): Tas
     ? Math.max(0, nowMs - startedAt)
     : execution.timeoutMs;
   return {
-    // Built-in Task planners are deterministic. Model-backed adapters must
-    // charge these dimensions before returning a PlannerDecision.
-    modelCalls: dimension(0, Math.max(1, execution.maxSteps * 2)),
-    tokens: dimension(0, Math.max(1, execution.maxSteps * 100_000)),
+    // Model requests reserve both allowances before calling the local transport.
+    // Tokens are a conservative upper bound, not actual billed tokens.
+    modelCalls: dimension(execution.modelCallCount ?? 0, Math.max(1, execution.maxSteps * 2)),
+    tokens: dimension(execution.modelReservedTokens ?? 0, Math.max(1, execution.maxSteps * 100_000)),
     estimatedCostMicros: dimension(0, Math.max(1, execution.maxSteps * 1_000_000)),
     plannerIterations: dimension(execution.plannerIterations ?? 0, plannerLimit),
     environmentActions: dimension(execution.dispatchedActions ?? execution.stepCount, execution.maxSteps),
