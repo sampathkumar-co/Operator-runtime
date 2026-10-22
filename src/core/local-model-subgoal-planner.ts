@@ -61,8 +61,8 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
     const ageMs = this.#now() - observedAt;
     // Do not treat uncertain, ambiguous, expired or forged/unpersisted observations
     // as evidence for AI scheduling. Before observation, use deterministic ordering.
-    if (last?.state !== 'SUCCEEDED' || observation?.schemaVersion !== 2 ||
-      observation.epistemicStatus !== 'KNOWN' || observation.ambiguous ||
+    if (last?.state !== 'SUCCEEDED' || !/^autonomous:\\d+:verify$/.test(last.stepKey) ||
+      observation?.schemaVersion !== 2 || observation.epistemicStatus !== 'KNOWN' || observation.ambiguous ||
       !Number.isFinite(ageMs) || ageMs < 0 || ageMs > 120_000) {
       return this.#builtin.next(context);
     }
@@ -80,6 +80,10 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
       : normalizeDurableTaskPlan(state.durablePlan);
 
     if (plan.taskId !== context.task.id) return invalid('Stored subgoal plan is not bound to the current task.');
+    const verifiedSourceIndex = Number(last.stepKey.split(':')[1]);
+    if (!plan.subgoals.some(item => item.sourceIndex === verifiedSourceIndex && item.status === 'VERIFIED')) {
+      return this.#builtin.next(context);
+    }
     // normalizeDurableTaskPlan refreshes READY only when dependencies are already verified.
     const ready = plan.subgoals.filter(item => item.status === 'READY');
     if (ready.length < 2) return this.#builtin.next(context);
