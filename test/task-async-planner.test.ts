@@ -206,7 +206,7 @@ test('pause interrupts a pending model advisory before any canonical provider di
       async review(context) {
         assert.ok(context.signal, 'Pause/Cancel must propagate to in-flight model advice');
         entered();
-        return await new Promise(() => {});
+        return await new Promise<undefined>(() => {});
       }
     },
     executeAction: async (action, profile, context) => {
