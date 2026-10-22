@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { LoopbackOllamaTaskGoalInterpreter, validateTaskGoalProposal } from '../src/core/task-goal-interpreter.ts';
 import { OperatorRuntime } from '../src/core/runtime.ts';
+import { TaskOrchestrator } from '../src/core/task-orchestrator.ts';
+import { TaskStore } from '../src/core/task-store.ts';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 
 const approved = { objective: 'Open the approved page', approvedRoots: [], approvedBrowserOrigins: ['https://example.test'] };
@@ -200,4 +202,64 @@ test('HTTP proposal hard timeout is reported as 504 without task execution', asy
   const body = await response.json() as any;
   assert.equal(body.ok, false);
   assert.equal(body.error.code, 'TASK_MODEL_TIMEOUT');
+});
+
+test('reviewed proposal confirmation creates exactly the proposed task without execution or replay', async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-reviewed-proposal-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const runtime = new OperatorRuntime();
+  const tasks = new TaskStore(state);
+  const permissions = {
+    allowedRoots: [], allowedCapabilities: ['browser.navigate', 'browser.inspect'],
+    allowDestructive: false, allowExternalWrites: false, allowSystemChanges: false
+  };
+  const taskOrchestrator = new TaskOrchestrator({ runtime, store: tasks, permissions });
+  const token = 'r'.repeat(64);
+  const server = createLocalAgentServer({
+    token, permissions, runtime, tasks, taskOrchestrator,
+    taskGoalInterpreter: { propose: async () => structuredClone(browser) }
+  });
+  t.after(() => server.close());
+  const bound = await server.listen('127.0.0.1', 0);
+  const origin = 'http://127.0.0.1:' + bound.port;
+  const headers = { authorization: 'Bearer ' + token, 'content-type': 'application/json' };
+  async function post(url: string, body: unknown) {
+    const response = await fetch(origin + url, { method: 'POST', headers, body: JSON.stringify(body) });
+    return { status: response.status, data: await response.json() as any };
+  }
+  const proposed = await post('/v1/tasks/propose', approved);
+  assert.equal(proposed.status, 200);
+  assert.equal(proposed.data.requiresConfirmation, true);
+  assert.equal(proposed.data.executionStarted, false);
+  assert.equal((await tasks.list()).length, 0);
+  const confirmation = {
+    proposalId: proposed.data.proposalId, proposalDigest: proposed.data.proposalDigest
+  };
+  const altered = await post('/v1/tasks/proposals/confirm', {
+    ...confirmation, goal: { kind: 'browser-navigation', url: 'https://evil.example' }, run: true
+  });
+  assert.equal(altered.status, 400);
+  assert.equal((await tasks.list()).length, 0);
+  const denied = await post('/v1/tasks/proposals/confirm', {
+    ...confirmation, proposalDigest: 'f'.repeat(64)
+  });
+  assert.equal(denied.status, 400);
+  const confirmed = await post('/v1/tasks/proposals/confirm', confirmation);
+  assert.equal(confirmed.status, 202);
+  assert.equal(confirmed.data.executionStarted, false);
+  assert.equal(confirmed.data.task.state, 'PENDING');
+  assert.equal(confirmed.data.task.id, proposed.data.proposalId);
+  assert.equal(confirmed.data.task.userObjective, approved.objective);
+  assert.deepEqual(confirmed.data.task.successConditions, browser.successConditions);
+  assert.deepEqual(confirmed.data.task.execution.plannerState.goal, browser.goal);
+  assert.equal(confirmed.data.task.execution.records.length, 0);
+  const duplicate = await post('/v1/tasks/proposals/confirm', confirmation);
+  assert.equal(duplicate.status, 400);
+  assert.equal((await tasks.list()).length, 1);
+  assert.equal((await tasks.get(proposed.data.proposalId)).state, 'PENDING');
+  const anonymous = await fetch(origin + '/v1/tasks/proposals/confirm', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(confirmation)
+  });
+  assert.equal(anonymous.status, 401);
 });

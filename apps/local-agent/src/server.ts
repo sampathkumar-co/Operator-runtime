@@ -1,5 +1,6 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { TaskProposalReviewRegistry } from '../../../src/core/task-proposal-review.ts';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { applyBoundedHttpServerPolicy, requireLiteralLoopbackBindHost } from '../../../src/core/network-authority.ts';
@@ -150,6 +151,7 @@ export function createLocalAgentServer(options: {
     resolve: (decision: InlineApprovalDecision | null) => void;
     timer: NodeJS.Timeout;
   };
+  const proposalReviews = new TaskProposalReviewRegistry();
   const approvalWaiters = new Map<string, Set<InlineApprovalWaiter>>();
   const activeTeamActions = new Map<string, { missionId: string; workItemId: string; workerId: string; controller: AbortController }>();
   let emergencyExecutionGeneration = new AbortController();
@@ -463,6 +465,9 @@ export function createLocalAgentServer(options: {
       return;
     }
     const requestPermissions = requestPermissionDecision.permissions;
+    const reviewPrincipal = relayRequest
+      ? 'relay:' + JSON.stringify(requestEnterpriseContext)
+      : 'local-user';
 
     if (pathname === '/v1/gateway/execute' && req.method === 'POST') {
       if (!options.gateway) {
@@ -1893,16 +1898,66 @@ export function createLocalAgentServer(options: {
           approvedBrowserOrigins: body.approvedBrowserOrigins as string[]
         };
         const proposal = validateTaskGoalProposal(await options.taskGoalInterpreter.propose(request), request);
-        if (!taskAuthorizedScope(proposal.goal, requestPermissions.allowedRoots)) {
+        const scope = taskAuthorizedScope(proposal.goal, requestPermissions.allowedRoots);
+        if (!scope) {
           throw new OperatorError('TASK_PROPOSAL_SCOPE_DENIED', 'Proposal exceeds current task permissions.');
         }
-        send(res, 200, { ok: true, proposal, requiresConfirmation: true, executionStarted: false });
+        if (relayRequest && !requestEnterpriseContext?.principalId) {
+          throw new OperatorError('TASK_PROPOSAL_SCOPE_DENIED', 'Proposal review requires an authenticated enterprise principal.');
+        }
+        const receipt = proposalReviews.issue({
+          principal: reviewPrincipal, objective: request.objective, proposal, scope
+        });
+        send(res, 200, { ok: true, proposal, ...receipt, requiresConfirmation: true, executionStarted: false });
       } catch (error) {
         const code = error instanceof OperatorError ? error.code : 'TASK_MODEL_UNAVAILABLE';
         const status = code === 'TASK_PROPOSAL_SCOPE_DENIED' ? 403
           : code === 'TASK_MODEL_TIMEOUT' ? 504
           : code === 'TASK_MODEL_CANCELLED' ? 409
           : code === 'TASK_MODEL_UNAVAILABLE' ? 503 : 400;
+        send(res, status, { ok: false, error: { code, message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    // A model proposal is never runnable by itself. A separate explicit
+    // confirmation creates the exact reviewed task, never dispatches it.
+    if (pathname === '/v1/tasks/proposals/confirm' && req.method === 'POST') {
+      if (!options.taskOrchestrator) {
+        send(res, 503, { ok: false, error: { code: 'TASK_EXECUTOR_NOT_CONFIGURED', message: 'Task execution is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        if (!body || typeof body !== 'object' || Array.isArray(body) ||
+            Object.keys(body).length !== 2 ||
+            typeof body.proposalId !== 'string' || typeof body.proposalDigest !== 'string') {
+          throw new OperatorError('TASK_PROPOSAL_REVIEW_INVALID', 'Confirm using only proposalId and proposalDigest.');
+        }
+        if (relayRequest && !requestEnterpriseContext?.principalId) {
+          throw new OperatorError('TASK_PROPOSAL_REVIEW_INVALID', 'Authenticated enterprise principal required.');
+        }
+        const reviewed = proposalReviews.consume({
+          proposalId: body.proposalId,
+          proposalDigest: body.proposalDigest,
+          principal: reviewPrincipal,
+          currentScopeFor: review => taskAuthorizedScope(review.goal, requestPermissions.allowedRoots)
+        });
+        const task = await options.taskOrchestrator.submit({
+          requestId: reviewed.requestId,
+          objective: reviewed.objective,
+          goal: reviewed.proposal.goal as SemanticTaskGoal,
+          successConditions: reviewed.proposal.successConditions,
+          authorizedScope: reviewed.scope
+        });
+        send(res, 202, {
+          ok: true, task, executionStarted: false,
+          reviewedProposalId: reviewed.requestId
+        });
+      } catch (error) {
+        const code = error instanceof OperatorError ? error.code : 'TASK_PROPOSAL_CONFIRM_FAILED';
+        const status = code === 'TASK_PROPOSAL_SCOPE_DENIED' ? 403
+          : code === 'TASK_PROPOSAL_REVIEW_CAPACITY' ? 429 : 400;
         send(res, status, { ok: false, error: { code, message: error instanceof Error ? error.message : String(error) } });
       }
       return;
