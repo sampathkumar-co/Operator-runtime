@@ -174,6 +174,21 @@ test('npm runtime CI emits push evidence for every branch SHA', async () => {
   assert.match(workflow, /--test test\/npm-remote-runtime\.test\.ts test\/npm-policy-continuity\.test\.ts/);
 });
 
+test('npm PR path filters include every tracked source tree built into shipped runtime', async () => {
+  const workflow = await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8');
+  const builder = await fs.readFile(path.resolve('packages/mecord-connect/scripts/build-runtime-payload.mjs'), 'utf8');
+  const start = workflow.indexOf('  pull_request:');
+  const end = workflow.indexOf('\npermissions:', start);
+  assert.ok(start >= 0 && end > start, 'PR path filters must be explicit');
+  const filters = workflow.slice(start, end);
+  const roots = [...builder.matchAll(/compileTrackedTree\('([^']+)'/g)].map(match => match[1]);
+  assert.ok(roots.length >= 4, 'builder must expose all runtime source roots');
+  for (const sourceRoot of roots) {
+    assert.ok(filters.includes("'" + sourceRoot + "/**'"),
+      'npm PR CI does not cover tracked packaged source tree ' + sourceRoot);
+  }
+});
+
 test('runtime launcher allows only supported Windows x64 Node lines', () => {
   assert.doesNotThrow(() => assertSupportedRuntime('win32', 'x64', '22.14.0'));
   assert.doesNotThrow(() => assertSupportedRuntime('win32', 'x64', '22.23.2'));
