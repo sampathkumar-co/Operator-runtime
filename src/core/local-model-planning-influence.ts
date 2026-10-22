@@ -105,7 +105,8 @@ export class LoopbackOllamaPlanningInfluence implements TaskPlanningInfluencePro
           reject(new OperatorError('TASK_MODEL_INFLUENCE_TIMEOUT', 'Local advisory model exceeded its deadline.'));
         }, timeoutMs);
       });
-      const command = await Promise.race([this.#modelCommand(prompt, controller.signal), deadline]);
+      const modelSignal = request.signal ? AbortSignal.any([request.signal, controller.signal]) : controller.signal;
+      const command = await Promise.race([this.#modelCommand(prompt, modelSignal), deadline]);
       if (command === 'ALLOW') return undefined;
 
       const allowed = (command === 'REOBSERVE' && event.decision === 'REOBSERVE')
