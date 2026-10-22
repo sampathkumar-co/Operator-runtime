@@ -107,6 +107,8 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
       'Last verified observation channel: ' + JSON.stringify(observation.channel === 'visual' ? 'visual' : 'semantic'),
       'Remaining execution actions: ' + Math.max(0, Math.floor(context.budget.remainingSteps))
     ].join('\n');
+    // Charge the task's durable model allowance before touching the local model.
+    await context.reserveModelBudget?.(Buffer.byteLength(prompt, 'utf8') + 64);
     const selected = await this.#select(prompt, ready.length, context.signal,
       Math.min(8_000, Math.max(1, Math.floor(context.budget.activeDeadlineMsRemaining))));
     // Late model outputs after Pause/Cancel must not mutate shared planner state.
