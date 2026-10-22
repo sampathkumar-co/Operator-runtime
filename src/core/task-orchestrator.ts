@@ -142,6 +142,8 @@ export class TaskOrchestrator {
     store: TaskStore;
     permissions: PermissionProfile;
     planners?: TaskPlanner[];
+    /** Optional bounded planner for typed autonomous workflows; same durable planner identity. */
+    autonomousPlanner?: TaskPlanner;
     executeAction?: (action: ActionRequest, permissions: PermissionProfile, context?: CapabilityExecutionContext) => Promise<ActionResult>;
     resourceLeases?: ResourceLeaseStore;
     intentRegistry?: IntentRegistry;
@@ -159,7 +161,11 @@ export class TaskOrchestrator {
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
-    const planners = options.planners ?? [new ProjectQualityGatePlanner(), new SemanticTaskPlanner(), new SemanticWorkflowPlanner(), new AutonomousWorkflowPlanner()];
+    const autonomousPlanner = options.autonomousPlanner ?? new AutonomousWorkflowPlanner();
+    if (!autonomousPlanner.supports({ kind: 'autonomous-workflow', roots: [], steps: [] })) {
+      throw new OperatorError('TASK_PLANNER_UNAVAILABLE', 'Configured autonomous planner does not support autonomous workflows.');
+    }
+    const planners = options.planners ?? [new ProjectQualityGatePlanner(), new SemanticTaskPlanner(), new SemanticWorkflowPlanner(), autonomousPlanner];
     this.#planners = new Map(planners.map((planner) => [planner.id, planner]));
     this.#permissions = structuredClone(options.permissions);
     this.#executeAction = options.executeAction ?? ((action, permissions, context) => this.#runtime.execute(action, permissions, context));
