@@ -48,6 +48,18 @@ test('local model advisory is dormant without an actionable verified planner eve
   assert.equal(calls, 0);
 });
 
+test('a newer successful provider action resolves stale model-control events', async () => {
+  let calls = 0;
+  const advisor = new LoopbackOllamaPlanningInfluence({
+    model: 'local-test:latest', fetchFn: fakeFetch({ command: 'REOBSERVE' }, () => { calls++; })
+  });
+  const stale = request('REOBSERVE');
+  stale.recentEvents[0]!.at = '2020-01-01T00:00:00.000Z';
+  stale.task.execution = { records: [{ state: 'SUCCEEDED', finishedAt: '2020-01-01T00:00:01.000Z' }] } as any;
+  assert.equal(await advisor.review(stale), undefined);
+  assert.equal(calls, 0);
+});
+
 test('uncertain runtime event requires reconciliation without a model call', async () => {
   let calls = 0;
   const advisor = new LoopbackOllamaPlanningInfluence({
