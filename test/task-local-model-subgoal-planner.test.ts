@@ -10,6 +10,7 @@ import { TaskStore } from '../src/core/task-store.ts';
 import test from 'node:test';
 import { LocalModelAutonomousWorkflowPlanner } from '../src/core/local-model-subgoal-planner.ts';
 import { createDurableTaskPlan } from '../src/core/task-plan.ts';
+import { taskDecisionBudget } from '../src/core/task-decision-budget.ts';
 import type { SemanticTaskGoal, TaskPlannerContext } from '../src/core/task-orchestrator-contracts.ts';
 
 const TIME = Date.parse('2026-10-22T08:00:30.000Z');
@@ -75,6 +76,19 @@ function context(options: { observation?: 'fresh' | 'stale' | 'unknown'; verifie
 function response(index: number): typeof fetch {
   return (async () => new Response(JSON.stringify({ response: JSON.stringify({ index }) }), { status: 200 })) as typeof fetch;
 }
+
+test('durable model budget reflects requests and prevents silent zero-usage reporting', () => {
+  const used = taskDecisionBudget({
+    schemaVersion: 1, plannerId: 'operator.autonomous-workflow.v1',
+    goalKind: 'autonomous-workflow', plannerState: {}, maxSteps: 2,
+    maxAttemptsPerStep: 1, timeoutMs: 30000, stepCount: 0, records: [],
+    modelCallCount: 4, modelReservedTokens: 250
+  }, Date.now());
+  assert.equal(used.modelCalls.used, 4);
+  assert.equal(used.modelCalls.remaining, 0);
+  assert.equal(used.tokens.used, 250);
+  assert.equal(used.tokens.remaining, 199750);
+});
 
 test('model chooses one READY subgoal after fresh verified observation; delegate still owns tools', async () => {
   let calls = 0;
