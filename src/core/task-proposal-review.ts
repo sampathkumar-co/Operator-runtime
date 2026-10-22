@@ -74,7 +74,8 @@ export class TaskProposalReviewRegistry {
   }
 
   consume(input: {
-    proposalId: string; proposalDigest: string; principal: string; currentScope: string[];
+    proposalId: string; proposalDigest: string; principal: string;
+    currentScopeFor: (proposal: TaskGoalProposal) => string[] | null;
   }): { objective: string; proposal: TaskGoalProposal; scope: string[]; requestId: string } {
     const now = this.#now();
     this.#prune(now);
@@ -84,7 +85,13 @@ export class TaskProposalReviewRegistry {
         !crypto.timingSafeEqual(Buffer.from(review.digest, 'hex'), Buffer.from(input.proposalDigest, 'hex'))) {
       rejected('TASK_PROPOSAL_REVIEW_INVALID', 'AI proposal review is missing, expired, mismatched, or already consumed.');
     }
-    const scope = canonicalScope(input.currentScope);
+    // Check current authorization against the stored exact goal. Client
+    // confirmation parameters cannot inject a replacement goal or scope.
+    const currentScope = input.currentScopeFor(structuredClone(review.proposal));
+    if (!currentScope) {
+      rejected('TASK_PROPOSAL_SCOPE_DENIED', 'Permissions were revoked after proposal review.');
+    }
+    const scope = canonicalScope(currentScope);
     if (JSON.stringify(scope) !== JSON.stringify(review.scope)) {
       rejected('TASK_PROPOSAL_SCOPE_DENIED', 'Reviewed plan permissions changed and must be reviewed again.');
     }
