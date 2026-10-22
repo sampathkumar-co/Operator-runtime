@@ -106,6 +106,34 @@ test('local-only model adapter has fixed loopback endpoint and cannot self-execu
     (error: any) => error?.code === 'TASK_PROPOSAL_INVALID');
 });
 
+test('model proposal deadline is enforced when fetch ignores AbortSignal', async () => {
+  const adapter = new LoopbackOllamaTaskGoalInterpreter({
+    model: 'test-local:latest', timeoutMs: 25,
+    fetchFn: (async () => await new Promise<Response>(() => {})) as typeof fetch
+  });
+  await assert.rejects(() => adapter.propose(approved),
+    (error: any) => error?.code === 'TASK_MODEL_TIMEOUT');
+  assert.throws(() => new LoopbackOllamaTaskGoalInterpreter({ model: 'test-local:latest', timeoutMs: 12_001 }),
+    (error: any) => error?.code === 'TASK_PROPOSAL_INVALID');
+});
+
+test('user cancellation rejects uncooperative model and refuses a late proposal', async () => {
+  const controller = new AbortController();
+  let requested!: () => void;
+  let complete!: (response: Response) => void;
+  const entered = new Promise<void>(resolve => { requested = resolve; });
+  const neverFinishesUntilReleased = new Promise<Response>(resolve => { complete = resolve; });
+  const adapter = new LoopbackOllamaTaskGoalInterpreter({
+    model: 'test-local:latest', timeoutMs: 1000,
+    fetchFn: (async () => { requested(); return await neverFinishesUntilReleased; }) as typeof fetch
+  });
+  const request = adapter.propose({ ...approved, signal: controller.signal });
+  await entered;
+  controller.abort();
+  await assert.rejects(() => request, (error: any) => error?.code === 'TASK_MODEL_CANCELLED');
+  complete(new Response(JSON.stringify({ response: JSON.stringify(browser) }), { status: 200 }));
+});
+
 test('authenticated proposal HTTP endpoint never executes; rejects missing model, runaway and foreign scopes', async t => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-proposal-api-')));
   const other = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-proposal-other-')));
