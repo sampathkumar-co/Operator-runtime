@@ -62,7 +62,10 @@ test('companion read APIs expose authoritative task/device/settings state withou
   const controlCenterHtml = await controlCenterResponse.text();
   assert.match(controlCenterHtml, /Mecord Control Center/);
   assert.match(controlCenterHtml, /\/v1\/goals/);
-  assert.match(controlCenterHtml, /Approve & resume/);
+  assert.match(controlCenterHtml, /Review local approval/);
+  assert.match(controlCenterHtml, /One-time local login code/);
+  assert.doesNotMatch(controlCenterHtml, /id="agentToken"/);
+  assert.doesNotMatch(controlCenterHtml, /id="recoveryToken"/);
   assert.equal(controlCenterHtml.includes(token), false);
   assert.equal(controlCenterHtml.includes('PRIVATE KEY'), false);
 
