@@ -29,6 +29,7 @@ import type { SessionApprovalStore } from './session-approval.ts';
 import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
 import { renderControlCenter } from './control-center.ts';
+import { ControlCenterSessions, browserUiRouteAllowed, controlCenterBrowserRequestAllowed } from './control-center-session.ts';
 import { resourceKeysForAction } from '../../../src/core/resource-identity.ts';
 import { capabilityRiskRule } from '../../../src/core/capability-policy.ts';
 import type { EnterpriseAuthorizationContext, EnterprisePolicyStore } from '../../../src/core/enterprise-policy.ts';
@@ -155,6 +156,7 @@ export function createLocalAgentServer(options: {
   const approvalWaiters = new Map<string, Set<InlineApprovalWaiter>>();
   const activeTeamActions = new Map<string, { missionId: string; workItemId: string; workerId: string; controller: AbortController }>();
   let emergencyExecutionGeneration = new AbortController();
+  const browserSessions = new ControlCenterSessions();
 
   const abortTeamActions = (predicate: (entry: { missionId: string; workItemId: string; workerId: string }) => boolean) => {
     const aborted: Array<{ missionId: string; workItemId: string; workerId: string }> = [];
@@ -436,7 +438,56 @@ export function createLocalAgentServer(options: {
       return;
     }
 
-    if (!timingSafeTokenMatch(req.headers.authorization, options.token)) {
+    const port = (server.address() as AddressInfo | null)?.port ?? 0;
+    if (pathname === '/v1/control-center/browser-login/code' && req.method === 'POST') {
+      // This route is ONLY for the trusted local CLI, never a browser session.
+      if (!timingSafeTokenMatch(req.headers.authorization, options.token)) {
+        send(res, 401, { ok: false, error: { code: 'UNAUTHORIZED', message: 'Agent bearer authority required.' } });
+        return;
+      }
+      send(res, 200, { ok: true, ...browserSessions.issueCode() });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/browser-login' && req.method === 'POST') {
+      if (!controlCenterBrowserRequestAllowed(req.headers, port, true)
+        || !String(req.headers['content-type'] ?? '').startsWith('application/json')) {
+        send(res, 403, { ok: false, error: { code: 'BROWSER_ORIGIN_DENIED' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as { code?: unknown };
+        const secret = browserSessions.redeemCode(body.code);
+        if (!secret) {
+          send(res, 401, { ok: false, error: { code: 'INVALID_OR_EXPIRED_LOGIN_CODE' } });
+          return;
+        }
+        res.setHeader('Set-Cookie', browserSessions.cookie(secret));
+        send(res, 200, { ok: true, session: 'local-browser', expiresAfterSeconds: 14400 });
+      } catch {
+        send(res, 400, { ok: false, error: { code: 'BROWSER_LOGIN_INVALID' } });
+      }
+      return;
+    }
+
+    const browserSession = req.headers.authorization ? null
+      : (controlCenterBrowserRequestAllowed(req.headers, port, req.method !== 'GET')
+        ? browserSessions.validCookie(req.headers.cookie) : null);
+
+    if (pathname === '/v1/control-center/browser-logout' && req.method === 'POST') {
+      if (!browserSession) {
+        send(res, 401, { ok: false, error: { code: 'BROWSER_SESSION_REQUIRED' } });
+        return;
+      }
+      browserSessions.revoke(browserSession);
+      res.setHeader('Set-Cookie', browserSessions.expiredCookie());
+      send(res, 200, { ok: true });
+      return;
+    }
+
+    if (!timingSafeTokenMatch(req.headers.authorization, options.token)
+      && !(browserSession && browserUiRouteAllowed(req.method ?? '', pathname)
+        && (req.method === 'GET' || String(req.headers['content-type'] ?? '').startsWith('application/json')))) {
       send(res, 401, { ok: false, error: { code: 'UNAUTHORIZED', message: 'Valid agent bearer token required.' } });
       return;
     }

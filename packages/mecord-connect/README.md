@@ -20,6 +20,17 @@ npx mecord-connect@latest remote --root C:\path\to\project
 
 Use `--no-browser` to disable automatic launch of Mecord Connect's managed-browser capability. Generic terminal execution remains disabled by default; project commands continue to use the existing policy/approval boundary.
 
+The web **Control Center** is served on an ephemeral, loopback-only port at `/control-center`.
+In the **running** `mecord-connect remote` terminal, type `control-center` to see the current
+URL and receive a **90-second, one-time login code**. Enter this code in the local browser;
+Mecord issues an HttpOnly, SameSite=Strict, process-local browser session, limited to
+Control Center routes. The internal agent token and recovery token never enter the browser.
+The login code is not an API key and is never placed in a URL or persistent browser storage.
+Browser sessions have a four-hour hard expiry and a 30-minute idle expiry, and disappear
+when the runtime stops. Local browser actions remain subject to runtime policy.
+**Approvals and recovery authority remain local** and must be granted from the native
+Windows card or the trusted console. Do not paste or disclose recovery credentials.
+
 When ChatGPT requests an action that requires local approval, Mecord opens a **local Windows approval card** showing the action, risk and target with **Deny**, **Approve Once**, and **Allow Session**. `Allow Session` is memory-only, bound to the same account/device authority generation plus the current authorized roots/capability scope, expires after 8 hours or 60 minutes idle, and disappears when the runtime exits. It suppresses repeated external/system/destructive prompts inside that scope but never bypasses root scoping, capability allowlists, emergency stop, path safety, restricted-data filtering, or provider-specific allowlists. ChatGPT never receives the recovery authority and cannot approve its own request. The terminal remains a fallback with `approve`, `session`, `deny`, `session-status`, and `revoke-session`.
 
 Before starting a session you can verify the package payload and all three Windows-native security helpers:
