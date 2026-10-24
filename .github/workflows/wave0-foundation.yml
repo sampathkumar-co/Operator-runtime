@@ -27,7 +27,7 @@ jobs:
           node-version: '22.23.2'
           package-manager-cache: false
       - name: Validate Wave 0 manifests and evaluator fail-closed contracts
-        run: node --test test/wave0-source-manifest.test.ts test/wave0-evaluation-report.test.ts
+        run: node --experimental-strip-types --test test/wave0-source-manifest.test.ts test/wave0-evaluation-report.test.ts
       - name: Capture exact source/package and NOT_RUN evaluation report
         shell: bash
         run: |
