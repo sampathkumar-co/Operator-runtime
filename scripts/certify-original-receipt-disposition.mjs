@@ -31,6 +31,34 @@ async function stableRead(root, name) {
   return { obj, digest: sha(bytes), size: bytes.length };
 }
 function assertHex(v) { return typeof v === 'string' && /^[a-f0-9]{64}$/.test(v); }
+// Apply the same terminal transition structural invariants as the runtime
+// journal parser. The final INTERRUPTED transition is not itself signed;
+// accepting malformed sequence or timestamps would certify unusable evidence.
+function validIso(v) {
+  if (typeof v !== 'string') return false;
+  const n = Date.parse(v);
+  return Number.isFinite(n) && new Date(n).toISOString() === v;
+}
+function validInterruptedStructure(j) {
+  if (!j || !Array.isArray(j.transitions) ||
+      ![2, 3].includes(j.transitions.length) ||
+      !validIso(j.createdAt) || !validIso(j.updatedAt)) return false;
+  let previous = -Infinity;
+  for (let i = 0; i < j.transitions.length; i++) {
+    const t = j.transitions[i];
+    if (!t || t.seq !== i + 1 || !validIso(t.at)) return false;
+    const now = Date.parse(t.at);
+    if (now < previous) return false;
+    previous = now;
+    if (t.verificationDigest !== undefined || t.reconciliationStatus !== undefined) return false;
+    if (i === 0 && (t.provider !== undefined || t.resultDigest !== undefined)) return false;
+    if (i === 1 && j.transitions.length === 3 &&
+        (t.state !== 'DEFERRED' || t.provider !== 'policy' || !assertHex(t.resultDigest))) return false;
+  }
+  return Date.parse(j.createdAt) <= Date.parse(j.transitions[0].at) &&
+         Date.parse(j.updatedAt) === Date.parse(j.transitions.at(-1).at) &&
+         j.transitions.at(-1).state === 'INTERRUPTED';
+}
 function recordProofs(rootRecords) {
   const identity = rootRecords['device-identity.json'].obj;
   const pem = identity.publicKeyPem;
@@ -132,6 +160,7 @@ export async function certifyOriginalReceipts(dir = path.join(os.homedir(), '.op
       decision.journalGeneration === j.generation && j.risk === record.risk &&
       // The signed digest was generated from the PRE-INTERRUPTION history.
       // Signing the final state alone cannot authenticate earlier transitions.
+      validInterruptedStructure(j) &&
       Array.isArray(j.transitions) && j.transitions.length >= 2 &&
       j.transitions.length <= 3 &&
       sha(canonicalJson(j.transitions.slice(0, -1))) === decision.transitionsDigest &&

@@ -31,13 +31,13 @@ test('original host inspects exact next pending hosted identity without executio
   const queue = new RelayDeliveryStore(state);
   const action = {
     id: 'mcp-inspection-fixture',
-    risk: 'write' as const,
-    capability: 'file.write',
+    risk: 'system' as const,
+    capability: 'docker.manage',
     input: { path: '/not-a-real-user-secret', content: 'PRIVATE_PAYLOAD_DO_NOT_ECHO' },
     provenance: { kind: 'chatgpt' as const }
   };
   const delivery = await queue.enqueue(device.deviceId, 'action',
-    { action, approvalAuthority: authority }, authority, undefined, ['file.write']);
+    { action, approvalAuthority: authority }, authority, undefined, ['docker.manage']);
   const original = await fs.readFile(path.join(state, 'relay-deliveries.json'));
   const service = new RelayResultService({ stateDir: state, identity, devices, sessions, accounts, deliveries: queue });
   t.after(() => service.close());

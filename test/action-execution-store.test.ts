@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { LocalActionExecutionStore } from '../apps/local-agent/src/action-execution-store.ts';
+import { actionHash } from '../src/core/action-identity.ts';
 import { ActionTransitionJournal, type ActionCompletionFaultPoint } from '../src/core/action-transition-journal.ts';
 import { kernelVerificationEvidence, verifyActionOutcome } from '../src/core/action-verification.ts';
 
@@ -456,4 +457,84 @@ test('uncertain write execution receipt never expires into permission to replay 
   const previous = await afterRestart.begin(request, authority);
   assert.equal(previous.status, 'processing', 'old unknown write cannot be treated as a fresh command');
   assert.equal((await afterRestart.lookup(request, authority)).status, 'processing');
+});
+
+test('completed dynamic read recovers exact durable read result, never via mutation result lineage', async (t) => {
+  const state = await temp(t);
+  const store = new LocalActionExecutionStore(state);
+  const request = {
+    id: 'dynamic-read-return-result',
+    capability: 'project.command.run',
+    risk: 'read' as const,
+    input: { command: 'git status' },
+    provenance: { kind: 'chatgpt' as const }
+  };
+  const readResult = { ok: true, capability: request.capability, provider: 'local.command',
+    output: { stdout: 'clean' }, evidence: [], durationMs: 4 };
+  assert.equal((await store.begin(request, authority)).status, 'started');
+  await store.complete(request, readResult, authority);
+  const correct = { inspect: async () => ({
+    actionId: request.id, actionDigest: actionHash(request), capability: request.capability,
+    risk: 'read', state: 'COMPLETED'
+  }) } as unknown as ActionTransitionJournal;
+  const found = await store.reconcileWithKernel(request, authority, correct);
+  assert.equal(found.status, 'completed');
+  if (found.status === 'completed') assert.deepEqual(found.result, readResult);
+  const tampered = { inspect: async () => ({
+    actionId: request.id, actionDigest: actionHash(request), capability: request.capability,
+    risk: 'write', state: 'COMPLETED'
+  }) } as unknown as ActionTransitionJournal;
+  await assert.rejects(store.reconcileWithKernel(request, authority, tampered),
+    /exact kernel read completion/);
+  const missing = { inspect: async () => { throw new Error('lost journal'); } } as unknown as ActionTransitionJournal;
+  await assert.rejects(store.reconcileWithKernel(request, authority, missing),
+    /no independently validated kernel journal/);
+});
+
+test('one-time relay approval resumes only the original policy-deferred action once', async t => {
+  const state = await temp(t);
+  const store = new LocalActionExecutionStore(state);
+  const journal = new ActionTransitionJournal(state);
+  const req = action('relay-once-approved');
+  const blocked = {
+    ok: false, capability: req.capability, provider: 'policy',
+    evidence: [], error: {
+      code: 'APPROVAL_REQUIRED', message: 'Approve once on the original action ID.',
+      retryable: false, sideEffectState: 'none' as const
+    }, durationMs: 0
+  };
+  assert.equal((await store.begin(req, authority)).status, 'started');
+  await journal.prepare({ action: req, ownerKind: 'local-api', ownerId: req.id, resourceKeys: ['path:c:\\repo\\receipt.txt'] });
+  await journal.defer(req.id, blocked);
+  await store.complete(req, blocked, authority);
+  const resumed = await store.resumeApprovedPreDispatch(req, authority, journal);
+  assert.equal(resumed.status, 'started');
+  const concurrent = await store.resumeApprovedPreDispatch(req, authority, journal);
+  assert.equal(concurrent.status, 'processing');
+  const mismatch = { ...req, input: { path: 'C:\\repo\\other.txt', content: 'different' } };
+  await assert.rejects(store.resumeApprovedPreDispatch(mismatch, authority, journal),
+    /exact first-generation policy deferral/);
+  await journal.markDispatched(req.id, 'filesystem.native');
+  await assert.rejects(store.resumeApprovedPreDispatch(req, authority, journal),
+    /exact first-generation policy deferral/);
+});
+
+test('one-time relay approval never revives a completed non-policy receipt', async t => {
+  const state = await temp(t);
+  const store = new LocalActionExecutionStore(state);
+  const journal = new ActionTransitionJournal(state);
+  const req = action('non-policy-result');
+  assert.equal((await store.begin(req, authority)).status, 'started');
+  await journal.prepare({ action: req, ownerKind: 'local-api', ownerId: req.id, resourceKeys: ['path:c:\\repo\\receipt.txt'] });
+  await journal.defer(req.id, {
+    ok: false, capability: req.capability, provider: 'policy', evidence: [],
+    error: { code: 'APPROVAL_REQUIRED', message: 'Policy asked for approval', sideEffectState: 'none' }, durationMs: 0
+  });
+  await store.complete(req, {
+    ok: false, capability: req.capability, provider: 'policy', evidence: [],
+    error: { code: 'APPROVAL_DENIED', message: 'User declined', sideEffectState: 'none' }, durationMs: 0
+  }, authority);
+  const denied = await store.resumeApprovedPreDispatch(req, authority, journal);
+  assert.equal(denied.status, 'completed');
+  if (denied.status === 'completed') assert.equal(denied.result.error?.code, 'APPROVAL_DENIED');
 });

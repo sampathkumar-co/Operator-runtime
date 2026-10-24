@@ -100,3 +100,14 @@ test('authenticated next-record status is read-only, redacted and cannot grant A
   assert.equal(JSON.stringify(revoked.body).includes('synthetic-stale-generation'),false);
   assert.equal(JSON.stringify(revoked.body).includes('NEVER_EXPOSE_TEST_INPUT'),false);
 });
+
+test('both public edge configurations expose the authenticated recovery-status route', async () => {
+  for (const config of ['Caddyfile.example', 'Caddyfile.shared-vps-internal.example']) {
+    const file = path.resolve('deploy', 'public-edge', config);
+    const text = await fs.readFile(file, 'utf8');
+    const deviceMatcher = text.split('\n').find(line => line.includes('@device_api path'));
+    assert.ok(deviceMatcher?.includes('/v1/device-recovery/inspect') &&
+      deviceMatcher.includes('/v1/device-recovery/status'),
+      config + ' must explicitly route both recovery APIs to the device service');
+  }
+});

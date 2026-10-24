@@ -60,7 +60,7 @@ test('original receipt disposition verifies exact signed journal history, termin
        ownerId:crypto.randomUUID(),risk:'read',status:'processing'}]},
     'action-transitions.json':{version:1,entries:[
       {version:1,actionId,actionDigest:actionHash,generation:1,state:'INTERRUPTED',
-       risk:'write',transitions:[...before,terminal]}]},
+       risk:'write',createdAt:before[0].at,updatedAt:terminal.at,transitions:[...before,terminal]}]},
     'operator-pre-dispatch-adjudications.json':{version:1,decisions:[decision]},
     'relay-client.json':{version:1,lastAckedServerSeq:3568}
   };
@@ -95,6 +95,12 @@ test('original receipt disposition verifies exact signed journal history, termin
   });
   await expectHeld('Changed terminal journal proof',f=>{
     f['action-transitions.json'].entries[0].transitions[1].resultDigest=digest('other-result');
+  });
+  await expectHeld('Malformed terminal sequence must fail closed',f=>{
+    f['action-transitions.json'].entries[0].transitions[1].seq=900;
+  });
+  await expectHeld('Malformed terminal timestamp must fail closed',f=>{
+    f['action-transitions.json'].entries[0].transitions[1].at='not-a-date';
   });
   await expectHeld('Changed original Windows process authority',f=>{
     f['action-executions.json'].records[0].ownerProcess.pid=1001;

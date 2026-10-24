@@ -2473,6 +2473,19 @@ export function createLocalAgentServer(options: {
           if (receipt.status === 'started' && action.risk === 'read' && capabilityRiskRule(action.capability) === 'read') {
             unfinishedRead = { action, authority: approvalAuthority };
           }
+          // Relay approval is nonblocking. On a later explicit retry of the
+          // SAME action ID, continue only when its exact one-time approval has
+          // been granted and the journal still proves policy-only deferral.
+          // Do not resurrect an uncertain action or permit a new ID to claim
+          // someone else's one-time grant.
+          if (receipt.status === 'completed' &&
+              receipt.result.provider === 'policy' &&
+              receipt.result.error?.code === 'APPROVAL_REQUIRED' &&
+              options.approvals && options.agentKernel &&
+              await options.approvals.isApproved(action, approvalAuthority)) {
+            receipt = await options.actionExecutions.resumeApprovedPreDispatch(
+              action, approvalAuthority, options.agentKernel.journal);
+          }
           if (options.agentKernel && receipt.status !== 'started') {
             const reconciled = await options.actionExecutions.reconcileWithKernel(action, approvalAuthority, options.agentKernel.journal);
             if (reconciled.status === 'missing') {

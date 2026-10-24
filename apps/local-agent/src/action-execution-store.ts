@@ -169,6 +169,54 @@ export class LocalActionExecutionStore {
     });
   }
 
+  /**
+   * A one-time approved relay action may resume ONLY its own previous policy
+   * rejection. The kernel journal must prove the original provider was never
+   * dispatched. Caller independently verifies the exact approval grant.
+   * This atomic receipt CAS prevents concurrent retries from dispatching twice.
+   */
+  async resumeApprovedPreDispatch(
+    action: ActionRequest, authority: ApprovalAuthorityContext | undefined,
+    journal: ActionTransitionJournal
+  ): Promise<
+    | { status: 'started'; record: LocalActionExecutionRecord }
+    | { status: 'processing'; record: LocalActionExecutionRecord }
+    | { status: 'completed'; record: LocalActionExecutionRecord; result: ActionResult }
+  > {
+    const entry = await journal.inspect(action.id);
+    if (entry.actionDigest !== actionHash(action) || entry.capability !== action.capability ||
+        entry.risk !== action.risk || entry.generation !== 1 ||
+        entry.state !== 'DEFERRED' || entry.transitions.length !== 2 ||
+        entry.transitions[0]?.state !== 'PREPARED' ||
+        entry.transitions[1]?.state !== 'DEFERRED' ||
+        entry.transitions[1]?.provider !== 'policy' ||
+        typeof entry.transitions[1]?.resultDigest !== 'string') {
+      throw reconciliationRequired('Approved continuation requires exact first-generation policy deferral with no provider dispatch.');
+    }
+    const identity = executionIdentity(action, authority);
+    const ownerProcess = this.#ownerProcess ?? await currentProcessInstance();
+    return await this.#mutate((state) => {
+      const record = state.records.find(x => x.actionId === action.id);
+      if (!record) throw reconciliationRequired('Original approval receipt is missing.');
+      assertIdentity(record, identity);
+      if (record.status === 'processing') return { status: 'processing', record: clone(record) };
+      if (record.result?.provider !== 'policy' ||
+          record.result.error?.code !== 'APPROVAL_REQUIRED' ||
+          record.result.error?.sideEffectState !== 'none') {
+        return { status: 'completed', record: clone(record), result: cloneResult(record.result!) };
+      }
+      record.status = 'processing';
+      record.ownerId = this.#ownerId;
+      record.ownerProcess = ownerProcess;
+      record.startedAt = this.#clock().toISOString();
+      record.completedAt = undefined;
+      record.resultSha256 = undefined;
+      record.result = undefined;
+      record.kernelCompletion = undefined;
+      return { status: 'started', record: clone(record) };
+    });
+  }
+
   async reconcileWithKernel(
     action: ActionRequest,
     authority: ApprovalAuthorityContext | undefined,
@@ -180,6 +228,29 @@ export class LocalActionExecutionStore {
   > {
     const local = await this.lookup(action, authority);
     if (local.status === 'missing' || (action.risk === 'read' && capabilityRiskRule(action.capability) === 'read')) return local;
+    // Trusted dynamic capabilities can resolve to an actual read at runtime.
+    // Unlike mutation completions, read journals deliberately have no saved
+    // resultDigest. The immutable, validated local receipt is authoritative,
+    // but only when the kernel ALSO proves this exact action was a read.
+    // Never use this path for a dynamically classified mutation or a
+    // processing receipt, which could conceal an unverified side effect.
+    if (action.risk === 'read' && capabilityRiskRule(action.capability) === 'dynamic'
+      && local.status === 'completed') {
+      let readEntry;
+      try {
+        readEntry = await journal.inspect(action.id);
+      } catch {
+        throw reconciliationRequired('Completed dynamic read has no independently validated kernel journal.');
+      }
+      if (readEntry.actionId !== action.id ||
+          readEntry.actionDigest !== actionHash(action) ||
+          readEntry.capability !== action.capability ||
+          readEntry.risk !== 'read' ||
+          readEntry.state !== 'COMPLETED') {
+        throw reconciliationRequired('Completed dynamic read receipt conflicts with exact kernel read completion.');
+      }
+      return local;
+    }
 
     let entry;
     try {

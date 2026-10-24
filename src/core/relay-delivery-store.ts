@@ -219,7 +219,7 @@ export class RelayDeliveryStore {
       const value = raw as Record<string, unknown>;
       if (typeof value.id !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/.test(value.id) ||
           typeof value.capability !== 'string' || !/^[a-z][a-z0-9.-]{1,80}$/.test(value.capability) ||
-          !['read', 'write', 'external', 'destructive'].includes(String(value.risk)) ||
+          !['read', 'write', 'external', 'system', 'destructive'].includes(String(value.risk)) ||
           !value.input || typeof value.input !== 'object' || Array.isArray(value.input) ||
           !value.provenance || typeof value.provenance !== 'object' || Array.isArray(value.provenance)) {
         throw new OperatorError('RELAY_RECOVERY_INSPECT_ACTION_INVALID', 'Stored action identity cannot be validated.');
