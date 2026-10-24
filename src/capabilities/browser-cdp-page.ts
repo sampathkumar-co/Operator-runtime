@@ -284,9 +284,26 @@ function isUsefulRole(role: string): boolean {
 }
 
 export function normalizeTargetSpec(input: unknown): { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string } {
-  const raw = input && typeof input === 'object' ? input as JsonMap : {};
-  const clean = (key: string, max = 500) => typeof raw[key] === 'string' && String(raw[key]).trim() ? String(raw[key]).trim().slice(0, max) : undefined;
-  return { ref: clean('ref', 128), css: clean('css'), text: clean('text'), role: clean('role'), name: clean('name'), renderedColor: clean('renderedColor', 64) };
+  if (input === undefined) return {};
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new OperatorError('INVALID_BROWSER_TARGET', 'Browser target must be a selector object.');
+  }
+  const raw = input as JsonMap;
+  const maxLength = { ref: 128, css: 500, text: 500, role: 500, name: 500, renderedColor: 64 } as const;
+  for (const key of Object.keys(raw)) {
+    if (!(key in maxLength)) {
+      throw new OperatorError('INVALID_BROWSER_TARGET', 'Browser target contains an unsupported selector field.');
+    }
+  }
+  const clean = (key: keyof typeof maxLength) => {
+    const value = raw[key];
+    if (value === undefined) return undefined;
+    if (typeof value !== 'string' || !value.trim() || value.trim().length > maxLength[key] || value.includes('\0')) {
+      throw new OperatorError('INVALID_BROWSER_TARGET', `Browser target ${key} must be a non-empty string at most ${maxLength[key]} characters; no truncation permitted.`);
+    }
+    return value.trim();
+  };
+  return { ref: clean('ref'), css: clean('css'), text: clean('text'), role: clean('role'), name: clean('name'), renderedColor: clean('renderedColor') };
 }
 
 export async function collectDiagnostics(session: CdpConnection): Promise<{
