@@ -1,5 +1,6 @@
 import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, ExecutionPhase, PermissionProfile, ProviderReconciliationResult, SideEffectState } from './types.ts';
 import { AuthorityKernel } from './authority-kernel.ts';
+import { discoverBuiltInCapabilities, type CapabilityDiscoverySnapshot } from './capability-discovery.ts';
 import { CapabilityRouter } from './router.ts';
 import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
@@ -33,6 +34,10 @@ export class OperatorRuntime {
 
   async assertMutationReconciliationCoverage(): Promise<void> {
     await assertRegisteredMutationReconciliation(this.router.providers());
+  }
+
+  async inspectCapabilityDeclarations(): Promise<CapabilityDiscoverySnapshot> {
+    return await discoverBuiltInCapabilities(this.router.providers());
   }
 
   async supportedCapabilities(capabilities: readonly string[]): Promise<string[]> {
