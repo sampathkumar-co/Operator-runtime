@@ -93,6 +93,7 @@ export class RelayResultService {
         const isResultRequest = request.url === '/v1/device-result';
         const isExecutionFenceCheck = request.url === '/v1/device-authority/check';
         const isRecoveryInspect = request.url === '/v1/device-recovery/inspect';
+        const isRecoveryStatus = request.url === '/v1/device-recovery/status';
         const isRotateRequest = request.url === '/v1/device-session/rotate';
         const isRecoveryChallenge = request.url === '/v1/device-session/recover/challenge';
         const isRecoveryRequest = request.url === '/v1/device-session/recover';
@@ -100,7 +101,7 @@ export class RelayResultService {
         const isEnrollmentComplete = request.url === '/v1/device-enrollment/complete';
         const isEnrollmentPoll = request.url === '/v1/device-enrollment/poll';
         const isResetRequest = request.url === '/v1/device-self/reset';
-        const accepted = isResultRequest || isExecutionFenceCheck || isRecoveryInspect || isRotateRequest || isRecoveryChallenge || isRecoveryRequest || isEnrollmentChallenge || isEnrollmentComplete || isEnrollmentPoll || isResetRequest;
+        const accepted = isResultRequest || isExecutionFenceCheck || isRecoveryInspect || isRecoveryStatus || isRotateRequest || isRecoveryChallenge || isRecoveryRequest || isEnrollmentChallenge || isEnrollmentComplete || isEnrollmentPoll || isResetRequest;
         if (request.method !== 'POST' || !accepted) {
           send(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: 'Route not found.' } });
           return;
@@ -238,7 +239,7 @@ export class RelayResultService {
           return;
         }
         const body = await readJson(request) as { seq?: unknown; deliveryId?: unknown; result?: unknown; authority?: unknown; previousSeq?: unknown };
-        if (isRecoveryInspect) {
+        if (isRecoveryInspect || isRecoveryStatus) {
           // Device-scoped, metadata-only inspection of ONE immutable hosted
           // next-delivery snapshot. Not execution/ACK authority; never reveal
           // input, result, secrets, or any other device's stream.
@@ -249,6 +250,33 @@ export class RelayResultService {
           const before = await this.#accounts.activeMembershipForDevice(session.subjectDeviceId);
           if (!before) throw new OperatorError('RELAY_RECOVERY_INSPECT_AUTHORITY_REVOKED',
             'Current device account authority is not active.');
+          if (isRecoveryStatus) {
+            const record = await this.#deliveries.inspectRecoveryRecordState(
+              session.subjectDeviceId, body.previousSeq as number
+            );
+            if (record.retainedState === 'pending' && (!record.authority ||
+              record.authority.accountId !== before.accountId ||
+              record.authority.deviceId !== session.subjectDeviceId ||
+              record.authority.generation !== before.authorityGeneration)) {
+              throw new OperatorError('RELAY_RECOVERY_INSPECT_AUTHORITY_REVOKED',
+                'Stored pending delivery generation differs from current device authority.');
+            }
+            const after = await this.#accounts.activeMembershipForDevice(session.subjectDeviceId);
+            if (!after || after.accountId !== before.accountId ||
+              after.authorityGeneration !== before.authorityGeneration) {
+              throw new OperatorError('RELAY_RECOVERY_INSPECT_AUTHORITY_REVOKED',
+                'Device account authority changed during observational inspection.');
+            }
+            // Do not serialize internal pending authority or any delivery inputs.
+            send(response, 200, { ok: true, observation: {
+              lastAckedSeq: record.lastAckedSeq,
+              highestEnqueuedSeq: record.highestEnqueuedSeq,
+              nextSequence: record.nextSequence,
+              retainedState: record.retainedState
+            }, snapshotOnly: true, executionAuthorized: false,
+              replayAuthorized: false, acknowledgmentAuthorized: false });
+            return;
+          }
           const observation = await this.#deliveries.inspectNextPending(
             session.subjectDeviceId, body.previousSeq as number
           );
