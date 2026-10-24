@@ -27,7 +27,10 @@ export function createRuntime(config: {
   const runtime = new OperatorRuntime(config.stateDir ? { learning: new ProviderLearningStore(config.stateDir) } : {})
     .register(new SystemInspectProvider())
     .register(new FilesystemProvider({ allowedRoots: config.allowedRoots, windowsPathLeaseExecutable: config.windowsPathLeasePath }))
-    .register(new ProjectInspectProvider({ allowedRoots: config.allowedRoots }))
+    .register(new ProjectInspectProvider({
+      allowedRoots: config.allowedRoots,
+      windowsPathLeaseExecutable: config.windowsPathLeasePath
+    }))
     .register(new ProjectCommandProvider({
       allowedRoots: config.allowedRoots,
       allowedExecutables: config.allowedExecutables,
