@@ -16,8 +16,10 @@ function nonnegative(x, m, max = 3_600_000) {
 }
 function campaign(c, name) {
   requireState(c && typeof c === 'object' && !Array.isArray(c), name + ' campaign missing');
-  for (const key of ['sourceCommit', 'fixtureDigest', 'modelConfigDigest', 'controllerDigest',
-    'authorizationDigest', 'scorerDigest', 'environmentDigest']) {
+  const campaignKeys = ['sourceCommit', 'fixtureDigest', 'modelConfigDigest', 'controllerDigest',
+    'authorizationDigest', 'scorerDigest', 'environmentDigest', 'records'];
+  requireState(Object.keys(c).every(key => campaignKeys.includes(key)), name + ' unexpected campaign field');
+  for (const key of campaignKeys.filter(key => key !== 'records')) {
     requireState(typeof c[key] === 'string' && (key === 'sourceCommit' ? COMMIT : SHA).test(c[key]), name + '.' + key + ' invalid');
   }
   requireState(Array.isArray(c.records) && c.records.length > 0 && c.records.length <= 20_000,
@@ -100,9 +102,24 @@ export function compareMatchedPerformance({ baseline, candidate }) {
     note: 'A positive comparison is diagnostic only. Independent signed oracle evidence and real physical workload acceptance are separate gates.'
   };
 }
+const MAX_CAMPAIGN_BYTES = 32 * 1024 * 1024;
+async function readCampaignFile(filename) {
+  const handle = await fs.open(filename, 'r');
+  try {
+    const stat = await handle.stat();
+    requireState(stat.isFile() && stat.size > 0 && stat.size <= MAX_CAMPAIGN_BYTES,
+      'input campaign file size invalid');
+    const contents = await handle.readFile('utf8');
+    requireState(Buffer.byteLength(contents, 'utf8') <= MAX_CAMPAIGN_BYTES,
+      'input campaign file size invalid');
+    return JSON.parse(contents);
+  } finally {
+    await handle.close();
+  }
+}
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
   if (process.argv.length !== 4) throw new Error('Usage: node scripts/c09-compare-performance.mjs baseline.json candidate.json');
-  const baseline = JSON.parse(await fs.readFile(process.argv[2], 'utf8'));
-  const candidate = JSON.parse(await fs.readFile(process.argv[3], 'utf8'));
+  const baseline = await readCampaignFile(process.argv[2]);
+  const candidate = await readCampaignFile(process.argv[3]);
   process.stdout.write(JSON.stringify(compareMatchedPerformance({ baseline, candidate }), null, 2) + '\n');
 }
