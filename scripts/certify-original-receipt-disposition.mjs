@@ -72,25 +72,83 @@ export async function certifyOriginalReceipts(dir = path.join(os.homedir(), '.op
   if (receiptDb.version !== 1 || journalDb.version !== 1 || cursorDb.version !== 1 ||
     !Array.isArray(receiptDb.records) || !Array.isArray(journalDb.entries) ||
     !Number.isSafeInteger(cursorDb.lastAckedServerSeq)) fail('ORIGINAL_STATE_SCHEMA_INVALID');
+  const receiptCounts = new Map();
+  for (const r of receiptDb.records) {
+    if (typeof r?.actionId === 'string')
+      receiptCounts.set(r.actionId, (receiptCounts.get(r.actionId) ?? 0) + 1);
+  }
+  const journalCounts = new Map();
   const entries = new Map();
   for (const j of journalDb.entries) {
     if (!j || typeof j.actionId !== 'string') continue;
+    journalCounts.set(j.actionId, (journalCounts.get(j.actionId) ?? 0) + 1);
     const previous = entries.get(j.actionId);
     if (!previous || j.generation > previous.generation) entries.set(j.actionId, j);
   }
+  // The signed history may outlive a separately pruned receipt store.
+  // Missing source receipts cannot be silently counted as fully certified.
+  // Retain their hash-only identifiers and the surviving journal state.
+  const historicalSignedWithoutReceipt = [];
+  for (const [actionId, decision] of proofs.decisions) {
+    if ((receiptCounts.get(actionId) ?? 0) > 0) continue;
+    const entry = entries.get(actionId);
+    historicalSignedWithoutReceipt.push({
+      actionIdSha256: sha(actionId),
+      signedEpoch: decision.epoch,
+      journalState: entry?.state ?? 'ABSENT',
+      signedJournalPrefixMatches: Boolean(entry &&
+        Array.isArray(entry.transitions) && entry.transitions.length >= 2 &&
+        sha(canonicalJson(entry.transitions.slice(0, -1))) === decision.transitionsDigest),
+      disposition: 'MISSING_ORIGINAL_EXECUTION_RECEIPT_REVIEW_REQUIRED'
+    });
+  }
+  historicalSignedWithoutReceipt.sort((a,b) => a.actionIdSha256.localeCompare(b.actionIdSha256));
   const outcomes = [];
   for (const record of receiptDb.records) {
     if (record.status !== 'processing') continue;
     const j = entries.get(record.actionId);
     const decision = proofs.decisions.get(record.actionId);
     let disposition;
-    if (j?.state === 'INTERRUPTED' && j?.transitions?.at(-1)?.state === 'INTERRUPTED' && decision &&
+    if (receiptCounts.get(record.actionId) === 1 &&
+      journalCounts.get(record.actionId) === 1 &&
+      j?.state === 'INTERRUPTED' && j?.transitions?.at(-1)?.state === 'INTERRUPTED' && decision &&
       decision.actionDigest === record.actionHash && j.actionDigest === record.actionHash &&
       decision.receiptAuthorityHash === record.authorityHash &&
       decision.receiptOwnerId === record.ownerId &&
-      decision.journalGeneration === j.generation && j.risk === record.risk) {
+      // Signed original review binds the exact original Windows process owner.
+      (record.ownerProcess
+        ? decision.receiptOwnerProcessDigest === sha(canonicalJson(record.ownerProcess))
+        : decision.receiptOwnerProcessDigest === undefined) &&
+      decision.journalGeneration === j.generation && j.risk === record.risk &&
+      // The signed digest was generated from the PRE-INTERRUPTION history.
+      // Signing the final state alone cannot authenticate earlier transitions.
+      Array.isArray(j.transitions) && j.transitions.length >= 2 &&
+      j.transitions.length <= 3 &&
+      sha(canonicalJson(j.transitions.slice(0, -1))) === decision.transitionsDigest &&
+      j.transitions[0]?.state === 'PREPARED' &&
+      (j.transitions.length === 2 ||
+        (j.risk === 'external' && j.transitions[1]?.state === 'DEFERRED' &&
+         j.transitions[1]?.provider === 'policy' &&
+         assertHex(j.transitions[1]?.resultDigest))) &&
+      j.transitions.at(-1)?.provider === 'agent-kernel' &&
+      j.transitions.at(-1)?.resultDigest === sha(canonicalJson({
+        actionId: j.actionId, actionDigest: j.actionDigest,
+        kind: 'pre_dispatch_interrupted'
+      })) &&
+      // Independently reconstruct the reviewed challenge binding.
+      decision.caseDigest === sha(canonicalJson({
+        actionId: decision.actionId, actionDigest: decision.actionDigest,
+        receiptAuthorityHash: decision.receiptAuthorityHash,
+        receiptOwnerId: decision.receiptOwnerId,
+        ...(decision.receiptOwnerProcessDigest
+          ? { receiptOwnerProcessDigest: decision.receiptOwnerProcessDigest } : {}),
+        journalGeneration: decision.journalGeneration,
+        transitionsDigest: decision.transitionsDigest, recoveryEpoch: decision.epoch,
+        deviceId: decision.deviceId, deviceFingerprint: decision.deviceFingerprint
+      }))) {
       disposition = 'SIGNED_TERMINAL_NO_REPLAY_RETAIN_RECEIPT';
-    } else if (!j && !decision && record.risk === 'read') {
+    } else if (receiptCounts.get(record.actionId) === 1 &&
+      !j && !decision && record.risk === 'read') {
       disposition = 'READ_ONLY_RECEIPT_NO_JOURNAL_RETAIN_UNRESOLVED';
     } else {
       disposition = 'UNPROVEN_HOLD_NO_REPLAY';
@@ -112,16 +170,19 @@ export async function certifyOriginalReceipts(dir = path.join(os.homedir(), '.op
   for (const r of outcomes) summary[r.disposition] = (summary[r.disposition] ?? 0) + 1;
   const unsupported = summary.UNPROVEN_HOLD_NO_REPLAY ?? 0;
   return {
-    reportVersion: 1, kind: 'original-device-receipt-disposition-evidence',
+    reportVersion: 2, kind: 'original-device-receipt-disposition-evidence',
     readOnly: true, effectStateProven: false, rawActionInputsIncluded: false,
     protectedStateModified: false, canDeleteReceipts: false, canReplayMutations: false,
     deviceId: proofs.deviceId, verifiedLedgerDecisions: proofs.decisions.size,
     signedChainHeadSha256: proofs.latestDigest,
     lastAckedServerSeq: cursorDb.lastAckedServerSeq,
     processingReceipts: outcomes.length, summary, unsupported, outcomes,
+    historicalSignedWithoutReceiptCount: historicalSignedWithoutReceipt.length,
+    historicalSignedWithoutReceipt,
     sourceSha256: Object.fromEntries(Object.entries(files).map(([name, v]) => [name, v.digest])),
-    releaseDisposition: unsupported === 0 ? 'FORMAL_QUARANTINE_INVENTORY_COMPLETE_HISTORICAL_RECEIPTS_RETAINED'
-       : 'HOLD_EVIDENCE_INCOMPLETE'
+    releaseDisposition: unsupported === 0 && historicalSignedWithoutReceipt.length === 0
+      ? 'FORMAL_QUARANTINE_INVENTORY_COMPLETE_HISTORICAL_RECEIPTS_RETAINED'
+      : 'HOLD_EVIDENCE_INCOMPLETE'
   };
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
@@ -129,5 +190,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   if (args.length > 1 || (args.length === 1 && !path.isAbsolute(args[0]))) fail('USAGE_STATE_DIR_OPTIONAL');
   const out = await certifyOriginalReceipts(args[0]);
   process.stdout.write(JSON.stringify(out, null, 2) + '\n');
-  if (out.unsupported > 0) process.exitCode = 2;
+  if (out.unsupported > 0 || out.historicalSignedWithoutReceiptCount > 0) process.exitCode = 2;
 }
