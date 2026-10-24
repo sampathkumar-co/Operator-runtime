@@ -127,6 +127,8 @@ export function buildWave0TraceBundle({ sourceCommit, controllerId, recorderId, 
     digest(score.oracleDigest, 'oracleDigest');
     digest(score.outcomeEvidenceDigest, 'outcomeEvidenceDigest');
     digest(score.scorecardDigest, 'scorecardDigest');
+    const { scorecardDigest, ...scorePayload } = score;
+    if (sha256(JSON.stringify(scorePayload)) !== scorecardDigest) invalid('scorecard hash does not match its contents');
     const run = perRun.get(runId + ':' + score.arm);
     if (!run || run.scenarioId !== score.scenarioId) invalid('scorecard has no matching trace');
     const key = runId + ':' + score.arm;
