@@ -158,5 +158,6 @@
     "Task roster/version are pinned from upstream v0.14.3 metadata, not executed on a browser.",
     "No real model/controller/prompt/spending budget has been selected; block empirical benchmark launch until frozen.",
     "This is not evidence of any Mecord browser task success, external benchmark controller recovery or user-workflow score."
-  ]
+  ],
+  "taskRosterGitBlobSha1": "803f9cfe5120450d5117f8ac28b3eca3c68da5cc"
 }
