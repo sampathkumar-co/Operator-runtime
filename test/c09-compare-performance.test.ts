@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { compareMatchedPerformance } from '../scripts/c09-compare-performance.mjs';
 const D = c => c.repeat(64);
 function sample(time = 100, overrides = {}) {
@@ -69,4 +73,26 @@ test('C09 refuses cost totals that exceed JavaScript exact-integer precision', (
     baseline: make(90, { records: rows }),
     candidate: make(90, { sourceCommit: '9'.repeat(40), records: rows })
   }), /aggregate counter overflow: costMicros/);
+});
+
+test('C09 rejects unapproved raw fields in top-level campaign metadata', () => {
+  assert.throws(() => compareMatchedPerformance({
+    baseline: make(), candidate: make(90, { apiKey: 'never-accept-secret-material' })
+  }), /unexpected campaign field/);
+});
+
+test('C09 CLI refuses oversized evidence before reading arbitrary JSON into memory', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'c09-size-cap-'));
+  t.after(async () => fs.rm(dir, { recursive: true, force: true }));
+  const oversized = path.join(dir, 'oversized.json');
+  const valid = path.join(dir, 'valid.json');
+  const handle = await fs.open(oversized, 'w');
+  try { await handle.truncate(32 * 1024 * 1024 + 1); } finally { await handle.close(); }
+  await fs.writeFile(valid, JSON.stringify(make()));
+  const run = spawnSync(process.execPath,
+    ['scripts/c09-compare-performance.mjs', oversized, valid],
+    { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(run.error, undefined);
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /input campaign file size invalid/);
 });
