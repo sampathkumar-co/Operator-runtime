@@ -61,11 +61,16 @@ export class VerificationKernel {
       if (names.has(name)) throw new OperatorError('VERIFICATION_INPUT_INVALID', `Duplicate verification check ${name}.`);
       names.add(name);
       const detail = bounded(check.detail, 16_384, `checks[${index}].detail`);
-      const evidenceDigests = [...new Set(check.evidenceDigests ?? [])].sort();
-      if (evidenceDigests.length > 1000 || evidenceDigests.some((value) => !/^[0-9a-f]{64}$/i.test(value))) {
+      // Proof identities are hexadecimal, so uppercase and lowercase refer to
+      // the same digest. Validate and bound the raw list BEFORE deduplicating:
+      // a hostile list of repeated entries must not bypass the input ceiling.
+      const supplied = check.evidenceDigests ?? [];
+      if (!Array.isArray(supplied) || supplied.length > 1000
+        || supplied.some((value) => typeof value !== 'string' || !/^[0-9a-f]{64}$/i.test(value))) {
         throw new OperatorError('VERIFICATION_INPUT_INVALID', `checks[${index}].evidenceDigests are invalid.`);
       }
-      return { name, ok: check.ok === true, detail, evidenceDigests: evidenceDigests.map((value) => value.toLowerCase()) };
+      const evidenceDigests = [...new Set(supplied.map((value) => value.toLowerCase()))].sort();
+      return { name, ok: check.ok === true, detail, evidenceDigests };
     }).sort((a, b) => a.name.localeCompare(b.name));
 
     const contractDigest = digestOf(input.contract);
