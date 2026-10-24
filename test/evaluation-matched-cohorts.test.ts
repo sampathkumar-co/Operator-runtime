@@ -98,3 +98,33 @@ test('strict comparator disallows comparing a source to itself', async (t) => {
     (error: any) => error?.code === 'EVALUATION_NOT_COMPARABLE'
   );
 });
+
+test('matched comparison detects p95 tail regression despite improved average and median latency', async t => {
+  const store = await fixture(t);
+  const baselineLatencies = [200, 200, 200, 1000];
+  const candidateLatencies = [0, 0, 0, 1100];
+  for (let seed = 0; seed < baselineLatencies.length; seed += 1) {
+    await store.recordRun(run(BASE, 'browser.form', seed, { latencyMs: baselineLatencies[seed]! }));
+    await store.recordRun(run(CANDIDATE, 'browser.form', seed, { latencyMs: candidateLatencies[seed]! }));
+  }
+  const result = await compare(store);
+  assert.equal(result.matchedPairs, 4);
+  assert.equal(result.baseline.p95TaskLatencyMs, 1000);
+  assert.equal(result.candidate.p95TaskLatencyMs, 1100);
+  assert.ok(result.improved.includes('averageLatencyMs'));
+  assert.ok(result.improved.includes('p50TaskLatencyMs'));
+  assert.ok(result.regressed.includes('p95TaskLatencyMs'));
+});
+
+test('matched tail latency thresholds can be configured without changing the run cohort', async t => {
+  const store = await fixture(t);
+  await store.recordRun(run(BASE, 'browser.form', 3, { latencyMs: 200 }));
+  await store.recordRun(run(CANDIDATE, 'browser.form', 3, { latencyMs: 260 }));
+  const result = await store.compareMatched({
+    baselineSourceCommit: BASE,
+    candidateSourceCommit: CANDIDATE,
+    thresholds: { p95TaskLatencyMs: 100 }
+  });
+  assert.ok(!result.regressed.includes('p95TaskLatencyMs'));
+  assert.ok(result.regressed.includes('averageLatencyMs'));
+});
