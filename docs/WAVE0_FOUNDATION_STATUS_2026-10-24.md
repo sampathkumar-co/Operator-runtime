@@ -59,7 +59,10 @@ An open issue does **not** prove a current source defect, and a green unit test 
 | #293 | Legacy approved-but-deferred receipt recovery remains a quarantined real case | PROTECTED ORIGINAL STATE / NO REPLAY |
 | #312 | Current `npm-remote-ci.yml` explicitly includes both adaptive-intelligence and verified-plan-runtime source roots | SOURCE FILTER FIX PRESENT / SOURCE-MATCHED RELEASE GATE SEPARATE |
 | #351 | Historical original receipts quarantined, independent hosted recovery inspection/owner acceptance incomplete | RELEASE HOLD / LIVE EXTERNAL DEPENDENCY |
-| #369 | Working Control Center with browser sign-in proposals in PRs #370/#372; acceptance may depend on exact running source | UX CODE PROPOSED / ORIGINAL DEVICE NOT CERTIFIED |
+| #369 | Secure browser sign-in is integrated into the stable 2.0.6 source by merged #373 at `b9682da964b8dfcda9b4ce65e1ba6352623bf7a5`; earlier #370/#372 remain open historical integration branches and are not the accepted production basis. Relevant Control Center tests and owner-reported doctor exist, but original-device browser sign-in and hosted deployment need separate evidence. | SOURCE IN RELEASE / PHYSICAL HOSTED ACCEPTANCE NOT VERIFIED |
+
+
+**2026-10-24 reconciliation correction:** Issue #369 must not be classified as only a proposal because the release-convergence PR #373 is merged into the declared 2.0.6 release SHA. Conversely, the merged source does not establish that the original Windows Control Center or independently authenticated hosted runtime passed physical acceptance. The eleven open inherited issues remain open until their distinct criteria are proved; this inventory is source-truth accounting, not permission to clear quarantined recovery state.
 
 **Older draft PRs:** #359 is reconstructed external benchmark control, not production capability. #368 is unmerged, reusable generic AI proposal/budget work requiring selective integration. #342 is historical performance code without current source-matched measurements. None is auto-merged or counted as a success baseline.
 
