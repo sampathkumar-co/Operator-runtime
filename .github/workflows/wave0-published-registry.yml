@@ -1,0 +1,47 @@
+name: Wave 0 Published 2.0.6 Registry Evidence
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'scripts/wave0-registry-artifact.mjs'
+      - 'test/wave0-registry-artifact.test.ts'
+      - '.github/workflows/wave0-published-registry.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/wave0-registry-artifact.mjs'
+      - 'test/wave0-registry-artifact.test.ts'
+      - '.github/workflows/wave0-published-registry.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  registry-evidence:
+    name: Read-only frozen npm registry tarball witness
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Check registry-verifier tampering and incomplete evidence fixtures
+        run: node --experimental-strip-types --test test/wave0-registry-artifact.test.ts
+      - name: Fetch immutable 2.0.6 from public npm registry and verify exact tarball bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/wave0-registry"
+          node scripts/wave0-registry-artifact.mjs > "$RUNNER_TEMP/wave0-registry/published-artifact.json"
+          node -e "const fs=require('fs');const a=JSON.parse(fs.readFileSync(process.argv[1]));if(a.release.sourceCommit!=='b9682da964b8dfcda9b4ce65e1ba6352623bf7a5'||a.registryTarball.status!=='REGISTRY_BYTES_VERIFIED'||a.originalWindowsInstalledRuntime!=='NOT_RUN'||a.separatelyRebuiltSourceEquivalence!=='NOT_VERIFIED')throw new Error('Registry witness claiming unproven source or physical equivalence')" "$RUNNER_TEMP/wave0-registry/published-artifact.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wave0-published-npm-2.0.6-${{ github.sha }}
+          path: ${{ runner.temp }}/wave0-registry/published-artifact.json
+          retention-days: 30
+          if-no-files-found: error
