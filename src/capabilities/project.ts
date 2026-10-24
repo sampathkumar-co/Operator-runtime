@@ -114,7 +114,7 @@ function boundProjectMetadata(
     };
     if (byteLength(candidate) > budget) {
       delete pageScripts[name];
-      if (index === next) {
+      if (index === Math.min(start, total)) {
         throw new OperatorError(
           'PROJECT_INSPECT_ENTRY_EXCEEDS_BUDGET',
           'The next project script exceeds maxBytes; raise the permitted output budget or inspect a narrower source.'
