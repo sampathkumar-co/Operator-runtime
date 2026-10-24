@@ -1,5 +1,19 @@
 # Mecord Connect — Current Release State
 
+## Channel-specific update — 2026-10-24
+
+**Do not conflate the local npm package release, the GitHub development branch and the hosted MCP deployment.** They have different evidence and potentially different source commits.
+
+| Channel | Latest source-backed evidence | Acceptance boundary |
+| --- | --- | --- |
+| Stable Windows npm package | `mecord-connect@2.0.6`; `packages/mecord-connect/package.json` identifies 2.0.6, and the 2026-10-24 GitHub baseline commit is `b9682da964b8dfcda9b4ce65e1ba6352623bf7a5`. The owner also reported a successful local `mecord-connect doctor` on 2.0.6. | Owner-reported installed-package doctor, not a new CI-based registry-integrity or original-device recovery certification. |
+| GitHub development source | 2.0.6 baseline `b9682da964b8dfcda9b4ce65e1ba6352623bf7a5`; subsequent roadmap and evaluation-only source PRs may advance `main` without publishing a new package. | Always verify the **current** `main` SHA separately; a moving branch is not an immutable npm build. |
+| Hosted public/Developer MCP and relay | Last explicitly recorded live deployment check in this repository is **2026-10-07**, at `ef3bcdc2fcbc56b1b42f7a7a6f09ceabfc5a2bf2` and npm 2.0.5 in `docs/release-state.json` / `src/core/release-truth.ts`. | This is a historical deployed-source snapshot, **not** a claim that hosted production still runs 2.0.5 or has upgraded to 2.0.6 today. Fresh authenticated runtime/source verification is required before changing hosted truth. |
+
+This source-document clarification does **not** publish npm, restart a relay, change the public nine-tool surface, clear old receipts, change secrets or promote a hosted deployment. The machine-readable production snapshot and its verification rules remain frozen until an independently authenticated deployment audit supports promotion.
+
+### Historical hosted-deployment snapshot (2026-10-07)
+
 Status date: **2026-10-07**
 
 This file is the canonical human-readable current-state summary. Machine-readable values live in `docs/release-state.json`. Older certification and gate documents may preserve historical evidence, but they must not override this file for current production facts.
