@@ -57,7 +57,11 @@ function summarize(records) {
     const nums = records.map(x => x.stageTimingsMs[stage] ?? 0).sort((a, b) => a - b);
     return [stage, { p50: quantile(nums, .5), p95: quantile(nums, .95), p99: quantile(nums, .99) }];
   }));
-  const sum = key => records.reduce((total, item) => total + item[key], 0);
+  const sum = key => records.reduce((total, item) => {
+    const next = total + item[key];
+    requireState(Number.isSafeInteger(next), 'aggregate counter overflow: ' + key);
+    return next;
+  }, 0);
   return {
     attempts: records.length, p50Ms: quantile(latency, .5), p95Ms: quantile(latency, .95),
     p99Ms: quantile(latency, .99), verifiedSuccesses: records.filter(x => x.verifiedSuccess).length,
