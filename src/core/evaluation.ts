@@ -360,6 +360,11 @@ export function evaluationRunFromTask(input: {
   candidateDirty: boolean;
   runnerHash: string;
   task: TaskCapsule;
+  /**
+   * Explicit completion claim from the model/controller, independent of the
+   * task's evidence-backed VERIFIED state. Omit only for legacy telemetry.
+   */
+  claimedSuccess?: boolean;
   seed: number;
   model: string;
   provider: string;
@@ -376,6 +381,9 @@ export function evaluationRunFromTask(input: {
   modelFailures?: number;
 }): EvaluationRun {
   const execution = input.task.execution;
+  if (input.claimedSuccess !== undefined && typeof input.claimedSuccess !== 'boolean') {
+    throw new OperatorError('EVALUATION_INPUT_INVALID', 'Model/controller claimedSuccess must be a boolean.');
+  }
   if (!execution?.startedAt) throw new OperatorError('EVALUATION_INPUT_INVALID', 'Task execution metadata is required for runtime-native evaluation.');
   const finishedAt = input.task.updatedAt;
   const records = execution.records;
@@ -405,7 +413,10 @@ export function evaluationRunFromTask(input: {
     id: input.id, scenarioId: input.scenarioId, scenarioVersion: input.scenarioVersion,
     runtimeVersion: input.runtimeVersion, sourceCommit: input.sourceCommit,
     startedAt: execution.startedAt, finishedAt,
-    claimedSuccess: input.task.state === 'VERIFIED', verifiedSuccess: input.task.state === 'VERIFIED',
+    // A reported completion is telemetry, not authorization or proof. The
+    // independently verified result continues to come ONLY from Task truth.
+    claimedSuccess: input.claimedSuccess ?? (input.task.state === 'VERIFIED'),
+    verifiedSuccess: input.task.state === 'VERIFIED',
     recoveredFailure: input.task.evidence.some((item) => /recover|reconcil/i.test(item.kind)),
     humanInterventions: records.filter((record) => record.errorCode === 'APPROVAL_REQUIRED').length,
     actionCount: execution.dispatchedActions ?? execution.stepCount,
