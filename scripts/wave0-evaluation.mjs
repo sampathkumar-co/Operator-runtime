@@ -6,7 +6,7 @@ const COMMIT = /^[a-f0-9]{40}$/;
 const DOMAIN = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
 const FAILURE_STAGES = new Set([
   'model', 'schema', 'grounding', 'action', 'policy',
-  'transport', 'verifier', 'timing', 'uncertain_side_effect', 'none'
+  'transport', 'verifier', 'timing', 'uncertain_side_effect', 'unattributed', 'none'
 ]);
 const reasons = {
   A: 'No independently scored model-only decisions on frozen observations.',
@@ -48,6 +48,8 @@ export function validateWave0Record(record, sourceCommit) {
   if (!Number.isSafeInteger(record.unauthorizedEffects) || record.unauthorizedEffects < 0) fail('unauthorizedEffects invalid');
   if (lane === 'B' && (record.model !== 'scripted' || record.provider === 'none')) fail('Lane B must be model-independent scripted runtime execution');
   if (lane === 'A' && record.provider !== 'none') fail('Lane A must not dispatch through a provider');
+  if (lane === 'A' && (record.model === 'scripted' || record.model === 'none')) fail('Lane A requires a named model, not scripted fixture decisions');
+  if (!record.verifiedSuccess && record.failureStage === 'none') fail('failed outcome requires explicit failure attribution or unattributed');
   if (lane === 'C' && (record.model === 'scripted' || record.provider === 'none')) fail('Lane C requires a specific real model and tool provider');
   return record;
 }
@@ -68,6 +70,7 @@ function summarize(records) {
     p50LatencyMs: percentile(records.map(x => x.latencyMs), 0.5),
     p95LatencyMs: percentile(records.map(x => x.latencyMs), 0.95),
     modelAndToolCostMicros: records.reduce((total, x) => total + x.costMicros, 0),
+    unattributedFailures: records.filter(x => !x.verifiedSuccess && x.failureStage === 'unattributed').length,
     failuresByStage: Object.fromEntries([...FAILURE_STAGES].sort().map(stage =>
       [stage, records.filter(x => x.failureStage === stage).length]))
   };
@@ -89,7 +92,8 @@ export function buildWave0EvaluationReport({ sourceCommit, records = [], preregi
   if (preregistered !== null) {
     if (!preregistered || !SHA.test(preregistered.suiteDigest ?? '') ||
       !Array.isArray(preregistered.expectedScenarioIds) || preregistered.expectedScenarioIds.length < 50 ||
-      new Set(preregistered.expectedScenarioIds).size !== preregistered.expectedScenarioIds.length) {
+      new Set(preregistered.expectedScenarioIds).size !== preregistered.expectedScenarioIds.length ||
+      !preregistered.expectedScenarioIds.every(id => typeof id === 'string' && id.length <= 128 && DOMAIN.test(id))) {
       fail('complete campaign requires preregistered suite digest and >=50 unique scenarios');
     }
   }
@@ -98,6 +102,7 @@ export function buildWave0EvaluationReport({ sourceCommit, records = [], preregi
   for (const lane of LANES) {
     const inLane = valid.filter(x => x.lane === lane);
     const expected = new Set(expectedIds);
+    const attributionComplete = inLane.every(x => x.verifiedSuccess || x.failureStage !== 'unattributed');
     const hasFullSuite = preregistered !== null &&
       expectedIds.every(id => inLane.some(x => x.scenarioId === id)) &&
       inLane.every(x => expected.has(x.scenarioId));
@@ -127,11 +132,13 @@ export function buildWave0EvaluationReport({ sourceCommit, records = [], preregi
       : summarize(inLane);
     laneSummaries[lane] = {
       status: inLane.length === 0 ? 'NOT_RUN'
-        : hasFullSuite && (lane !== 'C' || paired) ? 'REPORTED_FULL_COVERAGE_UNVERIFIED' : 'PARTIAL',
+        : hasFullSuite && attributionComplete && (lane !== 'C' || paired) ? 'REPORTED_FULL_COVERAGE_UNVERIFIED' : 'PARTIAL',
       physicalAcceptance: 'NOT_VERIFIED',
-      reason: inLane.length === 0 ? reasons[lane] : hasFullSuite
-        ? 'Recorded suite coverage exists; provenance and physical release qualification remain independent.'
-        : 'Partial evidence only; do not infer a completed 50-workflow campaign.',
+      reason: inLane.length === 0 ? reasons[lane] : !attributionComplete
+        ? 'At least one failed run has unattributed root cause; coverage cannot be treated as evaluation-ready.'
+        : hasFullSuite
+          ? 'Recorded suite coverage exists; provenance and physical release qualification remain independent.'
+          : 'Partial evidence only; do not infer a completed 50-workflow campaign.',
       evidence: sourceEvidence
     };
   }
