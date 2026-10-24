@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildWave0EvaluationReport } from '../src/core/wave0-evaluation.mjs';
+import { buildWave0EvaluationReport } from '../scripts/wave0-evaluation.mjs';
 
 const sourceCommit = 'a'.repeat(40);
 const d = (char = 'b') => char.repeat(64);
