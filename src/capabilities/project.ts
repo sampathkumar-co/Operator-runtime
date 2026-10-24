@@ -1,6 +1,8 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import { OperatorError } from '../core/errors.ts';
 import { evidence } from '../core/evidence.ts';
 import { PathScope } from './path-scope.ts';
 
@@ -30,7 +32,7 @@ export class ProjectInspectProvider implements CapabilityProvider {
     const packageJson = await maybeJson(path.join(root, 'package.json'));
     const pyproject = await maybeText(path.join(root, 'pyproject.toml'), 32 * 1024);
 
-    const output = {
+    const completeOutput = {
       root,
       repository: has('.git'),
       buildSystems: [
@@ -48,6 +50,8 @@ export class ProjectInspectProvider implements CapabilityProvider {
       observedAt: new Date().toISOString()
     };
 
+    const output = boundProjectMetadata(completeOutput, action.input);
+
     return {
       ok: true,
       capability: action.capability,
@@ -64,4 +68,68 @@ async function maybeJson(filePath: string): Promise<unknown | null> {
 }
 async function maybeText(filePath: string, max: number): Promise<string | null> {
   try { return (await fs.readFile(filePath, 'utf8')).slice(0, max); } catch { return null; }
+}
+
+const DEFAULT_PROJECT_INSPECT_BYTES = 49_152;
+const MAX_PROJECT_INSPECT_BYTES = 131_072;
+const MAX_SCRIPT_ENTRIES_PER_PAGE = 256;
+const byteLength = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), 'utf8');
+
+/**
+ * project.inspect can include arbitrary package.json scripts. Apply the public
+ * tool's existing offset/maxBytes parameters to script entry pagination, with
+ * an independent byte bound over the complete response. Never imply that a
+ * partially returned script dictionary was complete.
+ */
+function boundProjectMetadata(
+  full: Record<string, unknown>,
+  input: Record<string, unknown>
+): Record<string, unknown> {
+  const offset = input.offset === undefined ? 0 : input.offset;
+  const maxBytes = input.maxBytes === undefined ? DEFAULT_PROJECT_INSPECT_BYTES : input.maxBytes;
+  if (!Number.isSafeInteger(offset) || (offset as number) < 0
+    || !Number.isSafeInteger(maxBytes) || (maxBytes as number) < 1024
+    || (maxBytes as number) > MAX_PROJECT_INSPECT_BYTES) {
+    throw new OperatorError('PROJECT_INSPECT_PAGINATION_INVALID', 'project.inspect offset or maxBytes is invalid.');
+  }
+  const start = offset as number;
+  const budget = maxBytes as number;
+  if (start === 0 && byteLength(full) <= budget) return full;
+
+  const { scripts, ...base } = full;
+  if (scripts !== null && (typeof scripts !== 'object' || Array.isArray(scripts))) {
+    throw new OperatorError('PROJECT_INSPECT_SCRIPTS_INVALID', 'Script metadata cannot be safely paginated.');
+  }
+  const entries = scripts ? Object.entries(scripts) : [];
+  const total = entries.length;
+  const sourceSha256 = crypto.createHash('sha256').update(JSON.stringify(scripts ?? null)).digest('hex');
+  const pageScripts: Record<string, unknown> = Object.create(null);
+  let next = Math.min(start, total);
+  for (let index = next; index < total && index < start + MAX_SCRIPT_ENTRIES_PER_PAGE; index += 1) {
+    const [name, value] = entries[index]!;
+    pageScripts[name] = value;
+    const candidate = {
+      ...base, scripts: pageScripts,
+      scriptPage: { offset: start, nextOffset: index + 1 < total ? index + 1 : null, total, sourceSha256 }
+    };
+    if (byteLength(candidate) > budget) {
+      delete pageScripts[name];
+      if (index === Math.min(start, total)) {
+        throw new OperatorError(
+          'PROJECT_INSPECT_ENTRY_EXCEEDS_BUDGET',
+          'The next project script exceeds maxBytes; raise the permitted output budget or inspect a narrower source.'
+        );
+      }
+      break;
+    }
+    next = index + 1;
+  }
+  const output = {
+    ...base, scripts: pageScripts,
+    scriptPage: { offset: start, nextOffset: next < total ? next : null, total, sourceSha256 }
+  };
+  if (byteLength(output) > budget) {
+    throw new OperatorError('PROJECT_INSPECT_OUTPUT_EXCEEDS_BUDGET', 'Project metadata exceeds maxBytes even without scripts.');
+  }
+  return output;
 }
