@@ -60,3 +60,13 @@ test('C09 invalid negative/stage-overflow values, hidden fields and duplicated r
     baseline: make(), candidate: make(80, { records: [sample(80), sample(80)] })
   }), /duplicate journey/);
 });
+
+test('C09 refuses cost totals that exceed JavaScript exact-integer precision', () => {
+  const rows = Array.from({ length: 9_008 }, (_, i) => sample(90, {
+    scenarioId: `cost_scenario_${i}`, costMicros: 1_000_000_000_000
+  }));
+  assert.throws(() => compareMatchedPerformance({
+    baseline: make(90, { records: rows }),
+    candidate: make(90, { sourceCommit: '9'.repeat(40), records: rows })
+  }), /aggregate counter overflow: costMicros/);
+});
