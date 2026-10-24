@@ -160,7 +160,15 @@ export class EvaluationStore {
     return await this.#mutate((state) => {
       const same = state.scenarios.find((item) => item.id === scenario.id && item.version === scenario.version);
       if (same) {
-        if (canonicalJson(same) !== canonicalJson(scenario)) throw new OperatorError('EVALUATION_SCENARIO_CONFLICT', 'Scenario id/version already refers to different content.');
+        // A caller may register the same immutable scenario on each startup.
+        // createdAt is store metadata, not part of the immutable scenario
+        // contract unless the caller explicitly supplied that timestamp.
+        const { createdAt: existingTimestamp, ...existingContract } = same;
+        const { createdAt: requestedTimestamp, ...requestedContract } = scenario;
+        if (canonicalJson(existingContract) !== canonicalJson(requestedContract)
+          || (input.createdAt !== undefined && requestedTimestamp !== existingTimestamp)) {
+          throw new OperatorError('EVALUATION_SCENARIO_CONFLICT', 'Scenario id/version already refers to different content.');
+        }
         return same;
       }
       if (state.scenarios.length >= MAX_SCENARIOS) throw new OperatorError('EVALUATION_LIMIT', 'Evaluation scenario limit reached.');
