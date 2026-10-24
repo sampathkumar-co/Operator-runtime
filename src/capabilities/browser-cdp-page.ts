@@ -294,7 +294,7 @@ export function normalizeTargetSpec(input: unknown): { ref?: string; css?: strin
   const raw = input as JsonMap;
   const maxLength = { ref: 128, css: 500, text: 500, role: 500, name: 500, renderedColor: 64 } as const;
   for (const key of Object.keys(raw)) {
-    if (!(key in maxLength)) {
+    if (!Object.hasOwn(maxLength, key)) {
       throw new OperatorError('INVALID_BROWSER_TARGET', 'Browser target contains an unsupported selector field.');
     }
   }
