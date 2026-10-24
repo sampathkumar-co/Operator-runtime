@@ -6,7 +6,7 @@ import type { Evidence } from './types.ts';
 import type { TaskActionRecord, TaskCapsule } from './task.ts';
 import { VerificationKernel } from './verification-kernel.ts';
 import { postgresSelectActionInput } from './semantic-task-input.ts';
-import { assertTaskMachineState, type TaskStateAssertion } from './task-state-assertion.ts';
+import { assertTaskMachineState, normalizeTaskStateAssertions } from './task-state-assertion.ts';
 
 export interface TaskVerificationBundle {
   version: 1;
@@ -210,10 +210,25 @@ function structuredOutcomeTruth(task: TaskCapsule): TaskOutcomeTruth {
       const record = lastSucceeded(execution.records, `autonomous:${index}:verify`);
       records.push(record);
       if (!record?.observation || record.observation.schemaVersion !== 2) return outcome(true, false, `Autonomous step ${index + 1} lacks durable verification state.`, mergeRecordVersions(records));
+      const observed = record.observation;
+      // A verification read cannot be replaced by the action's own success result,
+      // a stale observation, or an epistemically uncertain snapshot.
+      const startedAt = Date.parse(record.startedAt);
+      const observedAt = Date.parse(observed.observedAt);
+      if (record.risk !== 'read' || observed.capability !== record.capability
+        || observed.epistemicStatus !== 'KNOWN' || observed.ambiguous === true
+        || !Number.isFinite(startedAt) || !Number.isFinite(observedAt) || observedAt < startedAt) {
+        return outcome(true, false, `Autonomous step ${index + 1} lacks a fresh, known, read-only verification observation.`, mergeRecordVersions(records));
+      }
       const verify = asRecord(steps[index]!.verify);
-      const assertions = Array.isArray(verify.assertions) ? verify.assertions as TaskStateAssertion[] : [];
-      try { assertTaskMachineState(record.observation.importantState, assertions); }
-      catch { return outcome(true, false, `Autonomous step ${index + 1} machine-state assertions are not satisfied.`, mergeRecordVersions(records)); }
+      // Checking an empty array was previously vacuously true and could promote
+      // VERIFIED without proving even one requested postcondition.
+      try {
+        const assertions = normalizeTaskStateAssertions(verify.assertions, `autonomous step ${index + 1}.verify.assertions`);
+        assertTaskMachineState(observed.importantState, assertions);
+      } catch {
+        return outcome(true, false, `Autonomous step ${index + 1} has missing/invalid or unsatisfied verification assertions.`, mergeRecordVersions(records));
+      }
     }
     return outcome(true, true, `All ${steps.length} autonomous steps are independently proven by read-only durable machine observations.`, mergeRecordVersions(records));
   }
