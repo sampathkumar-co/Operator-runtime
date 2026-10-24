@@ -27,11 +27,11 @@ export function registerPublicTools(
 
   server.registerTool('project.inspect', {
     title: 'Inspect authorized project',
-    description: 'Inspect bounded semantic metadata for an authorized project root.',
+    description: 'Inspect byte-bounded semantic metadata for an authorized project root; offset advances through script entries when pagination is needed.'
     inputSchema: z.object({ path: z.string().min(1).max(4096), offset: z.number().int().min(0).default(0), maxBytes: z.number().int().min(1024).max(131072).default(49152) }),
     _meta: { securitySchemes: oauthSchemes(auth.readScope) },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ path }) => invoke('project.inspect', 'read', { path }, path));
+  }, async ({ path, offset, maxBytes }) => invoke('project.inspect', 'read', { path, offset, maxBytes }, path));
 
   server.registerTool('project.commands', {
     title: 'List trusted project commands',
