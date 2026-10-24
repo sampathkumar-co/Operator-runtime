@@ -103,7 +103,7 @@ test('authenticated next-record status is read-only, redacted and cannot grant A
 
 test('both public edge configurations expose the authenticated recovery-status route', async () => {
   for (const config of ['Caddyfile.example', 'Caddyfile.shared-vps-internal.example']) {
-    const file = path.resolve('deploy', 'public-edge', config);
+    const file = new URL('../../../deploy/public-edge/' + config, import.meta.url);
     const text = await fs.readFile(file, 'utf8');
     const deviceMatcher = text.split('\n').find(line => line.includes('@device_api path'));
     assert.ok(deviceMatcher?.includes('/v1/device-recovery/inspect') &&
