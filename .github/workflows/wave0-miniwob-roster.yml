@@ -1,0 +1,49 @@
+name: Wave 0 Pinned MiniWoB 125 Roster
+
+on:
+  pull_request:
+    paths:
+      - 'certification/wave0/miniwob-125-v0143.json'
+      - 'scripts/wave0-miniwob-freeze.mjs'
+      - 'test/wave0-miniwob-freeze.test.ts'
+      - '.github/workflows/wave0-miniwob-roster.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'certification/wave0/miniwob-125-v0143.json'
+      - 'scripts/wave0-miniwob-freeze.mjs'
+      - 'test/wave0-miniwob-freeze.test.ts'
+      - '.github/workflows/wave0-miniwob-roster.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-only-lock:
+    name: Validate 125 exact tasks without model/browser dispatch
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Reject tampered task identities and invented benchmark runs
+        run: node --experimental-strip-types --test test/wave0-miniwob-freeze.test.ts
+      - name: Capture frozen roster and explicit NOT_RUN truth
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/wave0-miniwob"
+          node scripts/wave0-miniwob-freeze.mjs > "$RUNNER_TEMP/wave0-miniwob/locked-roster.json"
+          node -e "const fs=require('fs');const x=JSON.parse(fs.readFileSync(process.argv[1]));if(x.officialTaskCount!==125||x.execution.status!=='NOT_LOCKED'||x.physicalBrowserRun!=='NOT_RUN'||x.nativeScorerOutcome!=='NOT_RUN')throw Error('Wave0 MiniWoB evidence must remain source-only')" "$RUNNER_TEMP/wave0-miniwob/locked-roster.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wave0-miniwob-roster-${{ github.sha }}
+          path: ${{ runner.temp }}/wave0-miniwob/locked-roster.json
+          if-no-files-found: error
+          retention-days: 30
