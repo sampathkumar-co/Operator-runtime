@@ -219,7 +219,7 @@ export class EvaluationStore {
   async compare(input: {
     baseline: { runtimeVersion?: string; sourceCommit?: string };
     candidate: { runtimeVersion?: string; sourceCommit?: string };
-    thresholds?: Partial<Record<'verifiedSuccessRate' | 'falseSuccessRate' | 'recoveryRate' | 'humanInterventionRate' | 'averageLatencyMs' | 'p50TaskLatencyMs' | 'p95TaskLatencyMs' | 'averageCostMicros', number>>;
+    thresholds?: Partial<Record<'verifiedSuccessRate' | 'falseSuccessRate' | 'recoveryRate' | 'humanInterventionRate' | 'averageLatencyMs' | 'averageCostMicros', number>>;
   }): Promise<EvaluationRegression> {
     const baseline = await this.summary(input.baseline);
     const candidate = await this.summary(input.candidate);
@@ -239,10 +239,6 @@ export class EvaluationStore {
     compareHigher('recoveryRate', baseline, candidate, threshold.recoveryRate, improved, regressed);
     compareLower('humanInterventionRate', baseline, candidate, threshold.humanInterventionRate, improved, regressed);
     compareLower('averageLatencyMs', baseline, candidate, threshold.averageLatencyMs, improved, regressed);
-    // Average latency can improve while a small set of real tasks regresses.
-    // Use the existing deterministic percentile estimator on matched cohorts.
-    compareLower('p50TaskLatencyMs', baseline, candidate, threshold.p50TaskLatencyMs ?? 50, improved, regressed);
-    compareLower('p95TaskLatencyMs', baseline, candidate, threshold.p95TaskLatencyMs ?? 50, improved, regressed);
     compareLower('averageCostMicros', baseline, candidate, threshold.averageCostMicros, improved, regressed);
     return { improved, regressed, baseline, candidate };
   }
@@ -259,7 +255,7 @@ export class EvaluationStore {
   async compareMatched(input: {
     baselineSourceCommit: string;
     candidateSourceCommit: string;
-    thresholds?: Partial<Record<'verifiedSuccessRate' | 'falseSuccessRate' | 'recoveryRate' | 'humanInterventionRate' | 'averageLatencyMs' | 'averageCostMicros', number>>;
+    thresholds?: Partial<Record<'verifiedSuccessRate' | 'falseSuccessRate' | 'recoveryRate' | 'humanInterventionRate' | 'averageLatencyMs' | 'p50TaskLatencyMs' | 'p95TaskLatencyMs' | 'averageCostMicros', number>>;
   }): Promise<MatchedEvaluationRegression> {
     const baselineSourceCommit = shaCommit(input.baselineSourceCommit);
     const candidateSourceCommit = shaCommit(input.candidateSourceCommit);
@@ -315,6 +311,9 @@ export class EvaluationStore {
     compareHigher('recoveryRate', baseline, candidate, threshold.recoveryRate, improved, regressed);
     compareLower('humanInterventionRate', baseline, candidate, threshold.humanInterventionRate, improved, regressed);
     compareLower('averageLatencyMs', baseline, candidate, threshold.averageLatencyMs, improved, regressed);
+    // Source-matched tail latency can regress despite a faster overall mean.
+    compareLower('p50TaskLatencyMs', baseline, candidate, threshold.p50TaskLatencyMs ?? 50, improved, regressed);
+    compareLower('p95TaskLatencyMs', baseline, candidate, threshold.p95TaskLatencyMs ?? 50, improved, regressed);
     compareLower('averageCostMicros', baseline, candidate, threshold.averageCostMicros, improved, regressed);
     return {
       matchedPairs: baselineCohort.size, baselineSourceCommit, candidateSourceCommit,
