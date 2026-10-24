@@ -3,7 +3,7 @@ import test from 'node:test';
 import { createTask, type TaskCapsule, type TaskActionRecord } from '../src/core/task.ts';
 import { verifyGoalOutcomeTruth, verifyTaskCompletion } from '../src/core/task-verifier.ts';
 
-function fixture(assertions: unknown = [{ path: 'verified', operator: 'equals', value: true }]): TaskCapsule {
+function fixture(assertions: unknown): TaskCapsule {
   const record: TaskActionRecord = {
     stepKey: 'autonomous:0:verify', actionId: 'synthetic-verify-01',
     capability: 'browser.inspect', risk: 'read', inputHash: 'a'.repeat(64), attempt: 0,
@@ -32,7 +32,7 @@ function fixture(assertions: unknown = [{ path: 'verified', operator: 'equals', 
   });
 }
 test('C07 a matching fresh known read-only machine assertion verifies a supported autonomous step', () => {
-  const task = fixture();
+  const task = fixture([{ path: 'verified', operator: 'equals', value: true }]);
   assert.equal(verifyGoalOutcomeTruth(task).ok, true);
   assert.equal(verifyTaskCompletion(task).ok, true);
 });
@@ -64,7 +64,7 @@ test('C07 stale, ambiguous, non-KNOWN and self-action verification results fail 
     r => { r.startedAt = 'invalid-time'; }
   ];
   for (const change of mutations) {
-    const task = fixture();
+    const task = fixture([{ path: 'verified', operator: 'equals', value: true }]);
     change(task.execution!.records[0]!);
     assert.equal(verifyGoalOutcomeTruth(task).ok, false);
     assert.equal(verifyTaskCompletion(task).ok, false);
