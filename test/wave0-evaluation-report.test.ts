@@ -73,7 +73,7 @@ test('complete suite coverage never claims release or physical acceptance by its
   }));
   const r = buildWave0EvaluationReport({ sourceCommit, records,
     preregistered: { suiteDigest: d('a'), expectedScenarioIds: ids } });
-  assert.equal(r.lanes.B.status, 'COMPLETE_SYNTHETIC_OR_RECORDED');
+  assert.equal(r.lanes.B.status, 'REPORTED_FULL_COVERAGE_UNVERIFIED');
   assert.equal(r.lanes.B.physicalAcceptance, 'NOT_VERIFIED');
   assert.equal(r.releaseAcceptance, 'NOT_ACCEPTED');
   assert.equal(r.lanes.C.status, 'NOT_RUN');
