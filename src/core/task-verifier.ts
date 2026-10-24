@@ -214,10 +214,13 @@ function structuredOutcomeTruth(task: TaskCapsule): TaskOutcomeTruth {
       // A verification read cannot be replaced by the action's own success result,
       // a stale observation, or an epistemically uncertain snapshot.
       const startedAt = Date.parse(record.startedAt);
+      const finishedAt = record.finishedAt ? Date.parse(record.finishedAt) : NaN;
       const observedAt = Date.parse(observed.observedAt);
       if (record.risk !== 'read' || observed.capability !== record.capability
         || observed.epistemicStatus !== 'KNOWN' || observed.ambiguous === true
-        || !Number.isFinite(startedAt) || !Number.isFinite(observedAt) || observedAt < startedAt) {
+        || !Number.isFinite(startedAt) || !Number.isFinite(finishedAt)
+        || !Number.isFinite(observedAt) || finishedAt < startedAt
+        || observedAt < startedAt || observedAt > finishedAt) {
         return outcome(true, false, `Autonomous step ${index + 1} lacks a fresh, known, read-only verification observation.`, mergeRecordVersions(records));
       }
       const verify = asRecord(steps[index]!.verify);
