@@ -61,20 +61,26 @@ test('C01 raw observations and credentials cannot enter the digest-only record s
   assert.throws(() => bundle([base({ timestampMs: 1.5 })]), /nonnegative integer/);
 });
 test('C01 recorded scorer claim is never confused with independently authenticated real-world success', () => {
-  const scoring = {
+  const scorePayload = {
     runId: 'run_001', arm: 'mecord_scripted', scenarioId: 'isolated_repo_task',
     scorerId: 'independent_fixture_oracle', verdict: 'pass',
-    oracleDigest: digest('e'), outcomeEvidenceDigest: digest('f'), scorecardDigest: digest('1')
+    oracleDigest: digest('e'), outcomeEvidenceDigest: digest('f')
+  };
+  const scoring = { ...scorePayload, scorecardDigest: sha256(JSON.stringify(scorePayload)) };
+  const retag = (updates: Record<string, string>) => {
+    const next = { ...scorePayload, ...updates };
+    return { ...next, scorecardDigest: sha256(JSON.stringify(next)) };
   };
   const ok = bundle([base()], { scorecards: [scoring] });
   assert.equal(ok.manifest.scorecardCount, 1);
   assert.equal(ok.manifest.scorerStatus, 'EXTERNAL_SCORECARDS_RECORDED_NOT_INDEPENDENTLY_AUTHENTICATED');
   assert.equal(ok.manifest.releaseAcceptance, 'NOT_ACCEPTED');
-  assert.throws(() => bundle([base()], { scorecards: [{ ...scoring, scorerId: 'controller_fixture' }] }),
+  assert.throws(() => bundle([base()], { scorecards: [retag({ scorerId: 'controller_fixture' })] }),
     /not separate/);
-  assert.throws(() => bundle([base()], { scorecards: [{ ...scoring, scenarioId: 'other' }] }),
+  assert.throws(() => bundle([base()], { scorecards: [retag({ scenarioId: 'other' })] }),
     /no matching trace/);
   assert.throws(() => bundle([base()], { scorecards: [scoring, scoring] }), /duplicate scorer/);
+  assert.throws(() => bundle([base()], { scorecards: [{ ...scoring, verdict: 'fail' }] }), /scorecard hash/);
 });
 test('C01 recorder never overwrites an existing evidence directory', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wave0-record-test-'));
