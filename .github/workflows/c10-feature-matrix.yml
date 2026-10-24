@@ -1,0 +1,36 @@
+name: C10 Source-Derived Public and Developer Feature Matrix
+
+on:
+  pull_request:
+    paths:
+      - 'docs/C10_SOURCE_FEATURE_MATRIX_2026-10-24.md'
+      - 'test/c10-source-feature-matrix.test.ts'
+      - 'src/core/public-plugin-surface.ts'
+      - 'apps/mcp-server/src/tool-surface.ts'
+      - '.github/workflows/c10-feature-matrix.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/C10_SOURCE_FEATURE_MATRIX_2026-10-24.md'
+      - 'test/c10-source-feature-matrix.test.ts'
+      - 'src/core/public-plugin-surface.ts'
+      - 'apps/mcp-server/src/tool-surface.ts'
+      - '.github/workflows/c10-feature-matrix.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  contractual-release-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Check nine public tool declarations and withheld private permissions
+        run: node --experimental-strip-types --test test/c10-source-feature-matrix.test.ts
