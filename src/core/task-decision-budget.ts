@@ -1,4 +1,5 @@
 import type { TaskExecution } from './task.ts';
+import { OperatorError } from './errors.ts';
 
 export interface TaskDecisionBudgetDimension { used: number; limit: number; remaining: number }
 export interface TaskDecisionBudget {
@@ -16,6 +17,14 @@ export interface TaskDecisionBudget {
 }
 
 export function taskDecisionBudget(execution: TaskExecution, nowMs: number): TaskDecisionBudget {
+  // Corrupt persisted planner limits must not turn budget comparisons into
+  // NaN and accidentally disable the pre-dispatch exhaustion fence.
+  if (![execution.maxSteps, execution.maxAttemptsPerStep, execution.timeoutMs].every((value) =>
+    Number.isSafeInteger(value) && value > 0
+  ) || execution.maxSteps * 1_000_000 > Number.MAX_SAFE_INTEGER
+    || execution.maxSteps * execution.maxAttemptsPerStep > Number.MAX_SAFE_INTEGER) {
+    throw new OperatorError('TASK_DECISION_BUDGET_INVALID', 'Persisted task execution limits are invalid.');
+  }
   const basePlannerLimit = Math.max(4, execution.maxSteps * 4);
   const verifiedExtensions = Math.min(execution.maxSteps, Math.max(0, execution.progressExtensions ?? 0));
   const plannerLimit = basePlannerLimit + verifiedExtensions;
@@ -51,7 +60,15 @@ export function decisionBudgetExhaustion(budget: TaskDecisionBudget): string | u
 }
 
 function dimension(usedInput: number, limitInput: number): TaskDecisionBudgetDimension {
-  const used = Math.max(0, Math.floor(usedInput));
-  const limit = Math.max(0, Math.floor(limitInput));
+  if (!Number.isSafeInteger(limitInput) || limitInput < 0) {
+    // A computed invalid limit always exhausts. Zero is legitimate for some
+    // optional categories (e.g. retries when maxAttemptsPerStep is one).
+    return { used: 1, limit: 1, remaining: 0 };
+  }
+  const limit = limitInput;
+  // NaN and infinities in durable counters are not a free allowance.
+  const used = !Number.isFinite(usedInput) || usedInput < 0
+    ? limit
+    : Math.floor(usedInput);
   return { used, limit, remaining: Math.max(0, limit - used) };
 }
