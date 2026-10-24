@@ -44,7 +44,7 @@
 		}
 	}
 
-	@pair_claim path /pair/api/claim
+	@pair_claim path /pair/api/claim /pair/api/devices /pair/api/devices/remove
 	handle @pair_claim {
 		request_body {
 			max_size 16KB
