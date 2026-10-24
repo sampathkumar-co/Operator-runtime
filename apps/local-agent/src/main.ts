@@ -30,6 +30,7 @@ import { DeviceRoutingStore } from '../../../src/core/device-routing.ts';
 import { DevicePoolScheduler } from '../../../src/core/device-pool.ts';
 import { ExecutionOptimizerStore } from '../../../src/core/execution-optimizer.ts';
 import { OrganizationCoordinator } from '../../../src/core/organization-coordinator.ts';
+import { configureQuarantineProduction } from './quarantine-production.ts';
 import { DigitalOperationsLayer } from '../../../src/core/digital-operations.ts';
 import { evidence } from '../../../src/core/evidence.ts';
 import { ResourceLeaseStore } from '../../../src/core/resource-leases.ts';
@@ -275,7 +276,10 @@ const teams = new TeamCoordinator(stateDir, {
   agentKernel,
   permissions
 });
-const organizations = new OrganizationCoordinator(stateDir, teams);
+const quarantineTrust = await configureQuarantineProduction(stateDir);
+const organizations = new OrganizationCoordinator(stateDir, teams, {
+  adjudicator: quarantineTrust?.adjudicator
+});
 let organizationRecovery = { recovered: 0, pending: 0 };
 if (!startupEmergencyStatus.engaged) {
   organizationRecovery = await organizations.recoverPendingCompensations();
@@ -543,6 +547,7 @@ const agent = createLocalAgentServer({
   devicePool,
   optimizer,
   organizations,
+  quarantineReviewAuthorization: quarantineTrust?.reviewer,
   operations,
   events,
   perception,

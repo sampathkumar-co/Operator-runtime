@@ -1,0 +1,53 @@
+name: P0 Reconciliation Writer Stress
+
+on:
+  pull_request:
+    paths:
+      - 'src/core/relay-reservation-reconciliation.ts'
+      - 'src/core/durable-state-lock.ts'
+      - 'src/core/durable-state.ts'
+      - 'src/core/process-instance.ts'
+      - 'native/windows-path-lease/**'
+      - 'test/relay-reservation-reconciliation-provenance.test.ts'
+      - '.github/workflows/relay-reconciliation-writer-stress.yml'
+  push:
+    branches: [main, 'integration/p0-hardening-20261011']
+    paths:
+      - 'src/core/relay-reservation-reconciliation.ts'
+      - 'src/core/durable-state-lock.ts'
+      - 'src/core/durable-state.ts'
+      - 'src/core/process-instance.ts'
+      - 'native/windows-path-lease/**'
+      - 'test/relay-reservation-reconciliation-provenance.test.ts'
+      - '.github/workflows/relay-reconciliation-writer-stress.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  multi-process-recovery-ledger:
+    name: Reservation reconciliation writers (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Establish real Windows process-instance authority
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Never substitute a synthetic PID/timestamp or weaken process
+          # ownership checks in reservation reconciliation certification.
+          ./native/windows-path-lease/build.ps1
+          $helper = (Resolve-Path native/windows-path-lease/target/release/operator-windows-path-lease.exe).Path
+          "OPERATOR_WINDOWS_PATH_LEASE_PATH=$helper" >> $env:GITHUB_ENV
+      - name: Execute real independent-process writer collisions
+        run: node --experimental-strip-types --test test/relay-reservation-reconciliation-provenance.test.ts

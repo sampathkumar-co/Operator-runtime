@@ -54,22 +54,29 @@ test('relay result payloads are bounded and stored hashes are corruption-detecti
   );
 });
 
-test('relay results expire by TTL and are physically pruned from durable state', async (t) => {
+test('unacknowledged relay results survive TTL; only payload-free consumed tombstones are pruned', async (t) => {
   const state = await temp(t);
   const deviceId = crypto.randomUUID();
   const deliveryId = crypto.randomUUID();
   let now = new Date('2026-09-13T00:00:00.000Z');
   const store = new RelayResultStore(state, { clock: () => now, retentionMs: 60_000 });
   await store.put(deviceId, 1, deliveryId, { ok: true, output: { content: 'sensitive result' } });
-  assert.equal((await store.get(deviceId, 1))?.result.output?.content, 'sensitive result');
+  assert.equal((await store.get(deviceId, 1))?.result?.output?.content, 'sensitive result');
 
   now = new Date('2026-09-13T00:01:00.001Z');
-  assert.equal(await store.get(deviceId, 1), null);
-  assert.equal(await store.pruneExpired(), 1);
+  assert.equal((await store.get(deviceId, 1))?.result?.output?.content, 'sensitive result');
+  assert.equal(await store.pruneExpired(), 0, 'unacknowledged result must never disappear by age alone');
+  assert.equal(await new RelayResultStore(state).has(deviceId, 1, deliveryId), true);
 
-  const persisted = await fs.readFile(path.join(state, 'relay-results.json'), 'utf8');
-  assert.equal(persisted.includes('sensitive result'), false);
-  assert.deepEqual(JSON.parse(persisted).streams, []);
+  const consumed = await store.consume(deviceId, 1, deliveryId);
+  assert.equal(consumed?.result?.output?.content, 'sensitive result');
+  const redacted = await fs.readFile(path.join(state, 'relay-results.json'), 'utf8');
+  assert.equal(redacted.includes('sensitive result'), false);
+  assert.equal((await store.get(deviceId, 1)), null);
+
+  now = new Date('2026-09-13T00:02:00.002Z');
+  assert.equal(await store.pruneExpired(), 1);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(state, 'relay-results.json'), 'utf8')).streams, []);
 });
 
 
@@ -100,7 +107,7 @@ test('successful result consumption returns one copy and persists only a payload
 });
 
 
-test('completed replay authority remains available for the full result retention window', async (t) => {
+test('unconsumed replay authority remains available until acknowledged, even after retention age', async (t) => {
   const state = await temp(t);
   const deviceId = crypto.randomUUID();
   const deliveryId = crypto.randomUUID();
@@ -117,5 +124,9 @@ test('completed replay authority remains available for the full result retention
   assert.equal((await store.findByIdempotencyKey(key))?.result.result?.output?.value, 'late-complete');
 
   now = new Date('2026-09-13T00:01:50.001Z');
+  assert.equal((await store.findByIdempotencyKey(key))?.result.result?.output?.value, 'late-complete');
+  assert.equal((await store.consume(deviceId, 7, deliveryId))?.result?.output?.value, 'late-complete');
   assert.equal(await store.findByIdempotencyKey(key), null);
+  now = new Date('2026-09-13T00:02:50.002Z');
+  assert.equal(await store.pruneExpired(), 1);
 });

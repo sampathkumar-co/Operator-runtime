@@ -8,6 +8,8 @@ import { withDurableStateLock } from './durable-state-lock.ts';
 import { canonicalResourceKeys } from './resource-identity.ts';
 import type { ActionRequest, ActionResult, IntentBinding, ProviderReconciliationResult } from './types.ts';
 import { validIntentBinding } from './intent-registry.ts';
+import { DeviceIdentityStore } from './device-identity.ts';
+import { observeProcessInstance } from './process-instance.ts';
 import { kernelVerificationDigest, verifyActionOutcome } from './action-verification.ts';
 
 export type ActionJournalState =
@@ -187,10 +189,141 @@ export class ActionTransitionJournal {
         throw new OperatorError('ACTION_JOURNAL_ID_CONFLICT', 'Pre-dispatch interruption requires exact mutation identity.');
       }
       if (entry.state === 'INTERRUPTED') return entry;
-      if (entry.generation !== 1 || entry.state !== 'PREPARED' || entry.transitions.length !== 1 ||
-          entry.transitions[0]?.state !== 'PREPARED') {
+      const initiallyPrepared = entry.state === 'PREPARED' && entry.transitions.length === 1;
+      const initiallyPolicyDeferred = entry.state === 'DEFERRED' && entry.transitions.length === 2
+        && entry.transitions[1]?.state === 'DEFERRED'
+        && entry.transitions[1]?.provider === 'policy'
+        && typeof entry.transitions[1]?.resultDigest === 'string';
+      if (entry.generation !== 1 || entry.transitions[0]?.state !== 'PREPARED' ||
+          (!initiallyPrepared && !initiallyPolicyDeferred)) {
         throw new OperatorError('ACTION_JOURNAL_PRE_DISPATCH_UNPROVEN',
           'Execution history does not prove the provider was never dispatched.');
+      }
+      applyTransition(entry, 'INTERRUPTED', now, {
+        provider: 'agent-kernel',
+        resultDigest: digest({ actionId: entry.actionId, actionDigest: entry.actionDigest, kind: 'pre_dispatch_interrupted' })
+      });
+      return entry;
+    });
+  }
+
+  /**
+   * Trusted local-operator repair for an original policy deferral or an original
+   * PREPARED write with an exited, process-bound Windows owner. Caller MUST independently
+   * authorize the exact receipt/journal digest and persist a signed recovery
+   * decision before invoking this method. Never exposed to relay/MCP callers.
+   */
+  async interruptOperatorReviewedPolicyDeferral(input: {
+    actionId: string;
+    actionDigest: string;
+    generation: number;
+    transitionsDigest: string;
+  }): Promise<ActionJournalEntry> {
+    return await this.#mutate(async (state, now) => {
+      const entry = findEntry(state, input.actionId);
+      if (entry.actionDigest !== input.actionDigest || entry.generation !== input.generation ||
+          (entry.risk !== 'external' && entry.risk !== 'write')) {
+        throw new OperatorError('ACTION_JOURNAL_ID_CONFLICT', 'Operator recovery identity or generation conflicts.');
+      }
+      const originalPolicyDeferral = entry.risk === 'external' && entry.state === 'DEFERRED'
+        && entry.transitions.length === 2 && entry.transitions[0]?.state === 'PREPARED'
+        && entry.transitions[1]?.state === 'DEFERRED' && entry.transitions[1]?.provider === 'policy'
+        && Boolean(entry.transitions[1]?.resultDigest);
+      const originalPreparedWrite = entry.risk === 'write' && entry.state === 'PREPARED'
+        && entry.transitions.length === 1 && entry.transitions[0]?.state === 'PREPARED';
+      if (entry.generation !== 1 || (!originalPolicyDeferral && !originalPreparedWrite)
+        || digest(entry.transitions) !== input.transitionsDigest) {
+        throw new OperatorError('ACTION_JOURNAL_PRE_DISPATCH_UNPROVEN',
+          'Operator recovery requires an exact original never-dispatched journal state.');
+      }
+      // The public method cannot itself grant recovery authority. Validate
+      // the precommitted original-device Ed25519 operator decision INSIDE the
+      // same journal lock as markDispatched(), independent of the caller.
+      const stateRoot = path.dirname(this.#file);
+      let ledger: unknown;
+      try {
+        ledger = JSON.parse(await readDurableStateText(
+          path.join(stateRoot, 'operator-pre-dispatch-adjudications.json'), {
+            maxBytes: 256 * 1024,
+            errorCode: 'OPERATOR_RECOVERY_PROOF_INVALID',
+            invalidMessage: 'Signed operator recovery decisions could not be verified.'
+          }));
+      } catch {
+        throw new OperatorError('OPERATOR_RECOVERY_PROOF_REQUIRED',
+          'The signed local-operator recovery decision must precede journal fencing.');
+      }
+      const raw = ledger as { version?: unknown; decisions?: unknown };
+      if (!raw || raw.version !== 1 || !Array.isArray(raw.decisions)) {
+        throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID', 'Operator recovery ledger shape is invalid.');
+      }
+      const matches = (raw.decisions as any[]).filter((item) => item?.actionId === entry.actionId);
+      if (matches.length !== 1) {
+        throw new OperatorError('OPERATOR_RECOVERY_PROOF_REQUIRED', 'One exact signed operator decision is required.');
+      }
+      const decision = matches[0] as Record<string, unknown>;
+      const device = new DeviceIdentityStore(stateRoot);
+      const existing = await device.loadExisting();
+      if (!existing || decision.deviceId !== existing.deviceId ||
+          decision.deviceFingerprint !== existing.fingerprint ||
+          decision.actionDigest !== entry.actionDigest ||
+          decision.transitionsDigest !== input.transitionsDigest ||
+          decision.journalGeneration !== entry.generation ||
+          decision.operatorAttestation !== 'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED' ||
+          !Number.isSafeInteger(decision.epoch) || (decision.epoch as number) < 1 ||
+          typeof decision.caseDigest !== 'string' || !/^[a-f0-9]{64}$/.test(decision.caseDigest) ||
+          typeof decision.signature !== 'string') {
+        throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID', 'Operator recovery decision is not bound to this device, action and generation.');
+      }
+      const { signature, ...unsigned } = decision;
+      let valid = false;
+      try { valid = await device.verify(Buffer.from(canonicalJson(unsigned)), signature as string); }
+      catch { /* no signature errors may authorize journal mutation */ }
+      if (!valid) {
+        throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID', 'Operator recovery decision signature is not authentic.');
+      }
+      // Verify signed authority and exact owner identity against the ACTUAL
+      // durable receipt, not merely a caller's claimed action hash. The
+      // provider dispatch lock remains held while this comparison occurs.
+      let receipts: any;
+      try {
+        receipts = JSON.parse(await readDurableStateText(
+          path.join(stateRoot, 'action-executions.json'), {
+            maxBytes: 32 * 1024 * 1024,
+            errorCode: 'OPERATOR_RECOVERY_PROOF_INVALID',
+            invalidMessage: 'Original local action receipt is unavailable.'
+          }));
+      } catch {
+        throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID',
+          'Original processing receipt cannot be authenticated for local operator adjudication.');
+      }
+      const matching = Array.isArray(receipts?.records)
+        ? receipts.records.filter((record: any) => record?.actionId === entry.actionId)
+        : [];
+      const receipt = matching.length === 1 ? matching[0] : null;
+      if (!receipt || receipt.status !== 'processing' || receipt.risk !== entry.risk ||
+          (entry.risk === 'write' && (!receipt.ownerProcess || !decision.receiptOwnerProcessDigest)) ||
+          receipt.ownerId !== decision.receiptOwnerId ||
+          receipt.actionHash !== entry.actionDigest ||
+          receipt.authorityHash !== decision.receiptAuthorityHash) {
+        throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID',
+          'Signed operator proof no longer matches the original pending receipt and authority.');
+      }
+      // A Windows FILETIME process identity is not transferable host proof.
+      // The signed original-device operator attestation is mandatory, and
+      // this exact PID must independently be observed dead at fence commit.
+      const ownerProcess = receipt.ownerProcess;
+      if (ownerProcess === undefined) {
+        if (decision.receiptOwnerProcessDigest !== undefined) {
+          throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID', 'Owner identity changed after signed operator review.');
+        }
+      } else {
+        if (process.platform !== 'win32' || !Number.isSafeInteger(ownerProcess.pid) || ownerProcess.pid < 1 ||
+            typeof ownerProcess.started !== 'string' || !/^windows-filetime:[0-9]{15,20}$/.test(ownerProcess.started) ||
+            decision.receiptOwnerProcessDigest !== digest(ownerProcess) ||
+            (await observeProcessInstance(ownerProcess.pid)).status !== 'dead') {
+          throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID',
+            'Signed Windows owner identity changed or its original process is not proven stopped.');
+        }
       }
       applyTransition(entry, 'INTERRUPTED', now, {
         provider: 'agent-kernel',
@@ -483,7 +616,7 @@ export class ActionTransitionJournal {
 function allowedTransition(current: ActionJournalState, next: ActionJournalState): boolean {
   if (current === next) return true;
   if (current === 'PREPARED') return next === 'DEFERRED' || next === 'DISPATCHED' || next === 'COMPLETED' || next === 'INTERRUPTED';
-  if (current === 'DEFERRED') return next === 'DEFERRED' || next === 'DISPATCHED' || next === 'COMPLETED';
+  if (current === 'DEFERRED') return next === 'DEFERRED' || next === 'DISPATCHED' || next === 'COMPLETED' || next === 'INTERRUPTED';
   if (current === 'DISPATCHED') return next === 'PREPARED' || next === 'OBSERVED' || next === 'UNCERTAIN' || next === 'RECONCILED' || next === 'COMPLETED';
   if (current === 'OBSERVED') return next === 'RECONCILED' || next === 'COMPLETED' || next === 'UNCERTAIN';
   if (current === 'UNCERTAIN') return next === 'RECONCILED' || next === 'UNCERTAIN';
@@ -577,11 +710,16 @@ function validateState(input: unknown): JournalState {
     }
     if (entry.transitions.at(-1)?.state !== entry.state) throw corrupt('Entry state does not match its latest transition.');
     if (entry.state === 'INTERRUPTED') {
-      const proof = entry.transitions[1];
+      const policyDeferred = entry.transitions.length === 3
+        && entry.transitions[1]?.state === 'DEFERRED'
+        && entry.transitions[1]?.provider === 'policy'
+        && typeof entry.transitions[1]?.resultDigest === 'string';
+      const initiallyPrepared = entry.transitions.length === 2;
+      const proof = entry.transitions.at(-1);
       const expectedDigest = digest({
         actionId: entry.actionId, actionDigest: entry.actionDigest, kind: 'pre_dispatch_interrupted'
       });
-      if (entry.risk === 'read' || entry.generation !== 1 || entry.transitions.length !== 2 ||
+      if (entry.risk === 'read' || entry.generation !== 1 || (!initiallyPrepared && !policyDeferred) ||
           proof?.state !== 'INTERRUPTED' || proof.provider !== 'agent-kernel' ||
           proof.resultDigest !== expectedDigest) {
         throw corrupt('Interrupted journal is not bound to an original never-dispatched mutation.');

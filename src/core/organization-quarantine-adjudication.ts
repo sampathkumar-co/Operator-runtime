@@ -123,9 +123,14 @@ export class OrganizationQuarantineAdjudicator {
     const now = this.#clock().getTime();
     const issued = Date.parse(claim.issuedAt), expires = Date.parse(claim.expiresAt);
     const signature = String(input.providerClaim.signature ?? '');
-    if (!/^[A-Za-z0-9_-]{86}$/.test(signature) ||
+    const signatureBytes = /^[A-Za-z0-9_-]{86}$/.test(signature)
+      ? Buffer.from(signature, 'base64url') : Buffer.alloc(0);
+    // Ed25519 signatures are exactly 64 bytes. Reject non-canonical base64url
+    // aliases: the unused bits of its last symbol could otherwise be modified
+    // without changing verified bytes, but would change the durable evidence digest.
+    if (signatureBytes.length !== 64 || signatureBytes.toString('base64url') !== signature ||
         !crypto.verify(null, Buffer.from(JSON.stringify(claim), 'utf8'),
-          this.#providerPublicKeyPem, Buffer.from(signature, 'base64url'))) {
+          this.#providerPublicKeyPem, signatureBytes)) {
       throw invalid('Independent provider origin signature failed verification.');
     }
     // A crash can occur AFTER the signed decision is durably recorded but

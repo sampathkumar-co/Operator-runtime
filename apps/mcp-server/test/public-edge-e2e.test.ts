@@ -62,7 +62,17 @@ async function waitForHealth(port: number, child: ChildProcess, stderr: () => st
     if (child.exitCode !== null) throw new Error(`public edge exited early: ${stderr()}`);
     try {
       const response = await request(port, '/health');
-      if (response.status === 200) return;
+      if (response.status === 200) {
+        // Multiple tests reserve ephemeral ports concurrently. An unrelated
+        // local agent can answer /health with 200 before our edge binds.
+        // Require this process's public OAuth metadata before proceeding.
+        const marker = await request(port, '/.well-known/oauth-protected-resource/mcp');
+        if (marker.status === 200) {
+          try {
+            if (JSON.parse(marker.body).resource === 'https://edge.operator-runtime.dev/mcp') return;
+          } catch { /* another service owns the port */ }
+        }
+      }
     } catch { /* startup race */ }
     await new Promise((resolve) => setTimeout(resolve, 75));
   }
@@ -70,14 +80,17 @@ async function waitForHealth(port: number, child: ChildProcess, stderr: () => st
 }
 
 test('public MCP edge serves OAuth metadata and challenges unauthenticated callers', async (t) => {
-  const port = await reservePort();
+  let port = await reservePort();
   const noticesDir = mkdtempSync(path.join(tmpdir(), 'operator-edge-notices-'));
   writeFileSync(path.join(noticesDir, 'privacy.md'), '# Production Privacy\nController: SPLCART\nRetention: 24 hours.');
   writeFileSync(path.join(noticesDir, 'terms.md'), '# Production Terms\nEffective for this deployed service.');
   writeFileSync(path.join(noticesDir, 'support.md'), '# Production Support\nContact and private security reporting are configured.');
   t.after(() => rmSync(noticesDir, { recursive: true, force: true }));
-  let stderr = '';
-  const child = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
+  let child: ChildProcess | undefined;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) port = await reservePort();
+    let stderr = '';
+    const next = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
     cwd: MCP_ROOT,
     env: {
       ...process.env,
@@ -101,10 +114,19 @@ test('public MCP edge serves OAuth metadata and challenges unauthenticated calle
     },
     stdio: ['ignore', 'ignore', 'pipe']
   });
-  child.stderr?.setEncoding('utf8');
-  child.stderr?.on('data', (chunk: string) => { stderr = `${stderr}${chunk}`.slice(-8000); });
-  t.after(() => stop(child));
-  await waitForHealth(port, child, () => stderr);
+    next.stderr?.setEncoding('utf8');
+    next.stderr?.on('data', (chunk: string) => { stderr = `${stderr}${chunk}`.slice(-8000); });
+    try {
+      await waitForHealth(port, next, () => stderr);
+      child = next;
+      break;
+    } catch (error) {
+      await stop(next);
+      if (attempt === 3 || !/EADDRINUSE|health timeout/.test(String(error))) throw error;
+    }
+  }
+  if (!child) throw new Error('Could not bind a private public-edge fixture.');
+  t.after(() => stop(child!));
 
   const metadata = await request(port, '/.well-known/oauth-protected-resource/mcp');
   assert.equal(metadata.status, 200, metadata.body);

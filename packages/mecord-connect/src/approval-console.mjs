@@ -10,6 +10,7 @@ export function parseApprovalConsoleCommand(input) {
   if (parts.length === 0) return null;
   const verb = parts[0].toLowerCase();
   if (verb === 'approvals' && parts.length === 1) return { kind: 'list' };
+  if (verb === 'control-center' && parts.length === 1) return { kind: 'control-center' };
   if (verb === 'status' && parts.length === 1) return { kind: 'runtime-status' };
   if (verb === 'help' && parts.length === 1) return { kind: 'help' };
   if (verb === 'session-status' && parts.length === 1) return { kind: 'session-status' };
@@ -257,17 +258,33 @@ export function startLocalApprovalConsole({
   let rl = null;
   if (interactive) {
     rl = createInterface({ input, output, terminal: true });
-    output.write('[mecord-connect] local approval console ready. Type "approvals" to list pending actions.\n');
+    output.write('[mecord-connect] local console ready. Type "control-center" for one-time dashboard login, or "approvals" for pending actions.\n');
     rl.on('line', (line) => {
       void (async () => {
         const command = parseApprovalConsoleCommand(line);
         if (!command) return;
         if (command.kind === 'help') {
-          output.write('[mecord-connect] commands: status | approvals | approve [id-prefix] | session [id-prefix] | deny [id-prefix] | session-status | revoke-session\n');
+          output.write('[mecord-connect] commands: status | control-center | approvals | approve [id-prefix] | session [id-prefix] | deny [id-prefix] | session-status | revoke-session\n');
           return;
         }
         if (command.kind === 'invalid') {
           output.write('[mecord-connect] unknown approval command. Type "help".\n');
+          return;
+        }
+        if (command.kind === 'control-center') {
+          try {
+            const login = await localAgentJson(baseUrl, agentToken, {
+              pathName: '/v1/control-center/browser-login/code',
+              method: 'POST',
+              body: {}
+            });
+            // Printed only in the user's existing local approval terminal. Not logged remotely.
+            output.write(`[mecord-connect] Control Center: ${baseUrl}/control-center\n`);
+            output.write(`[mecord-connect] One-time login code (valid 90 seconds): ${login.code}\n`);
+            output.write('[mecord-connect] Enter the code on the local webpage. Never share your agent or recovery tokens.\n');
+          } catch {
+            output.write('[mecord-connect] Cannot issue local browser login code. Check runtime status.\n');
+          }
           return;
         }
         if (command.kind === 'runtime-status') {

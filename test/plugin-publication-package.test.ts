@@ -20,9 +20,9 @@ test('public plugin manifest satisfies final directory field limits', async () =
   assert.equal(manifest.version, PRODUCT_VERSION, 'plugin manifest version must match the public MCP product version');
   assert.equal(manifest.version, releaseState.versions.publicProduct);
   const runtimePackage = await json('packages/mecord-connect/package.json');
-  assert.match(runtimePackage.version, /^\d+\.\d+\.\d+$/);
+  assert.match(runtimePackage.version, /^\d+\.\d+\.\d+(?:-rc\.[1-9]\d*)?$/);
   assert.equal(runtimePackage.name, 'mecord-connect');
-  const runtimeParts = runtimePackage.version.split('.').map(Number);
+  const runtimeParts = runtimePackage.version.split('-')[0]!.split('.').map(Number);
   const publishedRuntimeParts = releaseState.versions.runtimePackage.split('.').map(Number);
   const compare = (left: number[], right: number[]) => {
     for (let index = 0; index < 3; index += 1) {

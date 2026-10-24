@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
 import { actionHash, canonicalJson } from '../../../src/core/action-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { assertCanonicalRisk, capabilityRiskRule } from '../../../src/core/capability-policy.ts';
 import { readDurableStateText, writeDurableStateText } from '../../../src/core/durable-state.ts';
 import { withDurableStateLock } from '../../../src/core/durable-state-lock.ts';
 import {
@@ -66,6 +67,13 @@ export class LocalActionExecutionStore {
     | { status: 'processing'; record: LocalActionExecutionRecord }
     | { status: 'completed'; record: LocalActionExecutionRecord; result: ActionResult }
   > {
+    // Authoritative static capability risk must be checked BEFORE persisting a
+    // receipt. Otherwise untrusted risk='write' on file.read creates permanent
+    // non-dispatchable mutation fences and eventually exhausts MAX_RECORDS.
+    // Dynamic capabilities retain conservative receipt fencing until their
+    // provider-specific canonical risk can be established.
+    const canonical = capabilityRiskRule(action.capability);
+    if (canonical !== 'dynamic') assertCanonicalRisk(action, canonical);
     const identity = executionIdentity(action, authority);
     const ownerProcess = this.#ownerProcess ?? await currentProcessInstance();
     return await this.#mutate((state) => {
@@ -73,7 +81,7 @@ export class LocalActionExecutionStore {
       const existing = state.records.find((entry) => entry.actionId === action.id);
       if (existing) {
         assertIdentity(existing, identity);
-        if (existing.risk === 'read') {
+        if (existing.risk === 'read' && capabilityRiskRule(action.capability) === 'read') {
           if (existing.status === 'processing' && existing.ownerId === this.#ownerId) {
             return { status: 'processing', record: clone(existing) };
           }
@@ -134,6 +142,17 @@ export class LocalActionExecutionStore {
     });
   }
 
+  /** Read-only, metadata-only local operator review. Not wired to MCP/relay. */
+  async inspectOperatorReceipt(actionId: string): Promise<LocalActionExecutionRecord | null> {
+    if (typeof actionId !== 'string' || actionId.length < 1 || actionId.length > 256) {
+      throw new OperatorError('ACTION_EXECUTION_ACTION_MISMATCH', 'Invalid operator recovery action identity.');
+    }
+    await this.#queue;
+    const state = await this.#read();
+    const found = state.records.find((entry) => entry.actionId === actionId);
+    return found ? clone(found) : null;
+  }
+
   async lookup(action: ActionRequest, authority?: ApprovalAuthorityContext): Promise<
     | { status: 'missing' }
     | { status: 'processing'; record: LocalActionExecutionRecord }
@@ -150,6 +169,54 @@ export class LocalActionExecutionStore {
     });
   }
 
+  /**
+   * A one-time approved relay action may resume ONLY its own previous policy
+   * rejection. The kernel journal must prove the original provider was never
+   * dispatched. Caller independently verifies the exact approval grant.
+   * This atomic receipt CAS prevents concurrent retries from dispatching twice.
+   */
+  async resumeApprovedPreDispatch(
+    action: ActionRequest, authority: ApprovalAuthorityContext | undefined,
+    journal: ActionTransitionJournal
+  ): Promise<
+    | { status: 'started'; record: LocalActionExecutionRecord }
+    | { status: 'processing'; record: LocalActionExecutionRecord }
+    | { status: 'completed'; record: LocalActionExecutionRecord; result: ActionResult }
+  > {
+    const entry = await journal.inspect(action.id);
+    if (entry.actionDigest !== actionHash(action) || entry.capability !== action.capability ||
+        entry.risk !== action.risk || entry.generation !== 1 ||
+        entry.state !== 'DEFERRED' || entry.transitions.length !== 2 ||
+        entry.transitions[0]?.state !== 'PREPARED' ||
+        entry.transitions[1]?.state !== 'DEFERRED' ||
+        entry.transitions[1]?.provider !== 'policy' ||
+        typeof entry.transitions[1]?.resultDigest !== 'string') {
+      throw reconciliationRequired('Approved continuation requires exact first-generation policy deferral with no provider dispatch.');
+    }
+    const identity = executionIdentity(action, authority);
+    const ownerProcess = this.#ownerProcess ?? await currentProcessInstance();
+    return await this.#mutate((state) => {
+      const record = state.records.find(x => x.actionId === action.id);
+      if (!record) throw reconciliationRequired('Original approval receipt is missing.');
+      assertIdentity(record, identity);
+      if (record.status === 'processing') return { status: 'processing', record: clone(record) };
+      if (record.result?.provider !== 'policy' ||
+          record.result.error?.code !== 'APPROVAL_REQUIRED' ||
+          record.result.error?.sideEffectState !== 'none') {
+        return { status: 'completed', record: clone(record), result: cloneResult(record.result!) };
+      }
+      record.status = 'processing';
+      record.ownerId = this.#ownerId;
+      record.ownerProcess = ownerProcess;
+      record.startedAt = this.#clock().toISOString();
+      record.completedAt = undefined;
+      record.resultSha256 = undefined;
+      record.result = undefined;
+      record.kernelCompletion = undefined;
+      return { status: 'started', record: clone(record) };
+    });
+  }
+
   async reconcileWithKernel(
     action: ActionRequest,
     authority: ApprovalAuthorityContext | undefined,
@@ -160,7 +227,30 @@ export class LocalActionExecutionStore {
     | { status: 'completed'; record: LocalActionExecutionRecord; result: ActionResult }
   > {
     const local = await this.lookup(action, authority);
-    if (local.status === 'missing' || action.risk === 'read') return local;
+    if (local.status === 'missing' || (action.risk === 'read' && capabilityRiskRule(action.capability) === 'read')) return local;
+    // Trusted dynamic capabilities can resolve to an actual read at runtime.
+    // Unlike mutation completions, read journals deliberately have no saved
+    // resultDigest. The immutable, validated local receipt is authoritative,
+    // but only when the kernel ALSO proves this exact action was a read.
+    // Never use this path for a dynamically classified mutation or a
+    // processing receipt, which could conceal an unverified side effect.
+    if (action.risk === 'read' && capabilityRiskRule(action.capability) === 'dynamic'
+      && local.status === 'completed') {
+      let readEntry;
+      try {
+        readEntry = await journal.inspect(action.id);
+      } catch {
+        throw reconciliationRequired('Completed dynamic read has no independently validated kernel journal.');
+      }
+      if (readEntry.actionId !== action.id ||
+          readEntry.actionDigest !== actionHash(action) ||
+          readEntry.capability !== action.capability ||
+          readEntry.risk !== 'read' ||
+          readEntry.state !== 'COMPLETED') {
+        throw reconciliationRequired('Completed dynamic read receipt conflicts with exact kernel read completion.');
+      }
+      return local;
+    }
 
     let entry;
     try {
@@ -193,16 +283,18 @@ export class LocalActionExecutionStore {
       && locallyBound(storedProcess) && locallyBound(currentProcess)
       && localPidObservationAdmissible(storedProcess, currentProcess)
       && processInstanceDefinitelyStale(storedProcess, await this.#observeProcess(storedProcess.pid));
-    // A different, now-ended local-agent instance left a receipt in processing,
-    // but the kernel journal proves no provider was ever dispatched. Only an
-    // initial, single PREPARED transition is sufficient: later PREPARED states
-    // can follow a real dispatch and MUST remain uncertain.
-    const initiallyPrepared = oldOwnerDefinitelyExited
-      && entry.generation === 1 && entry.state === 'PREPARED'
-      && entry.transitions.length === 1 && entry.transitions[0]?.state === 'PREPARED';
+    // Only an original PREPARED state or its single policy DEFERRED successor
+    // can be fenced before dispatch. A later PREPARED/DEFERRED after provider
+    // dispatch must never be interpreted as proof of no side effect.
+    const originalPreDispatch = entry.generation === 1 && entry.transitions[0]?.state === 'PREPARED'
+      && ((entry.state === 'PREPARED' && entry.transitions.length === 1)
+        || (entry.state === 'DEFERRED' && entry.transitions.length === 2
+          && entry.transitions[1]?.state === 'DEFERRED'
+          && entry.transitions[1]?.provider === 'policy'
+          && typeof entry.transitions[1]?.resultDigest === 'string'));
     if (local.status === 'processing'
       && local.record.ownerId !== undefined && local.record.ownerId !== this.#ownerId
-      && (entry.state === 'INTERRUPTED' || initiallyPrepared)) {
+      && (entry.state === 'INTERRUPTED' || (oldOwnerDefinitelyExited && originalPreDispatch))) {
       // The prior PREPARED check is merely a candidate. Only an atomic,
       // terminal journal transition on the journal's OWN cross-process lock
       // can prove provider dispatch did not win this race. Crash between
@@ -348,6 +440,12 @@ function assertIdentity(record: LocalActionExecutionRecord, identity: { actionHa
 
 function prune(state: State, now: number): void {
   state.records = state.records.filter((record) => {
+    // Unresolved writes are permanent replay fences until reconciled against
+    // the authoritative kernel journal. Dropping one after 30 days could
+    // permit an old action ID to execute twice following a relay retry.
+    // Bounded capacity intentionally fails closed instead of silently
+    // deleting unknown mutation history.
+    if (record.status === 'processing' && record.risk !== 'read') return true;
     const anchor = record.completedAt ?? record.startedAt;
     const retention = record.status === 'completed' ? COMPLETED_RETENTION_MS : UNCERTAIN_RETENTION_MS;
     return Date.parse(anchor) > now - retention;

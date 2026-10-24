@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
-import { RelayClient, reconnectDelay, validateRelayUrl, type RelayClientStatus, type RelayConnectionState, type RelaySocketLike } from '../src/core/relay-client.ts';
+import { OperatorError } from '../src/core/errors.ts';
+import { RelayClient, isConcurrentReadDelivery, reconnectDelay, validateRelayUrl, type RelayClientStatus, type RelayConnectionState, type RelaySocketLike } from '../src/core/relay-client.ts';
 import { createRelayCapabilitySessionBinding, relayCapabilitySessionDigest } from '../src/core/relay-capability-binding.ts';
 
 const TEST_ACCOUNT_ID = '11111111-1111-4111-8111-111111111111';
@@ -682,6 +683,45 @@ test('handler uncertainty persists processing state and refuses blind replay wit
   assert.ok(sockets.length >= 2);
 });
 
+test('quick welcome-success / uncertain-execution loops still increase reconnect backoff', async (t) => {
+  const state = await stateDir(t, 'operator-relay-uncertain-backoff-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Read Failure Backoff PC');
+  const delays: number[] = [];
+  let client!: RelayClient;
+  let opens = 0;
+  const factory = () => {
+    const socket = new FakeSocket();
+    socket.onSend = (frame) => {
+      if (frame.type === 'hello') {
+        opens += 1;
+        socket.server({ type: 'welcome', protocol: 1, connectionId: `uncertain-${opens}`, resumeFromSeq: 0, heartbeatMs: 60_000 });
+        socket.server({ type: 'delivery', seq: 1, id: 'uncertain-read-1', kind: 'action',
+          payload: { action: { id: 'uncertain-read-1', capability: 'docker.inspect', risk: 'read', input: {} } } });
+      }
+    };
+    queueMicrotask(() => socket.open());
+    return socket;
+  };
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity, socketFactory: factory,
+    getSessionToken: async () => 'session',
+    onDelivery: async () => { throw new OperatorError('RELAY_LOCAL_EXECUTION_UNCERTAIN', 'read did not complete', { retryable: true }); },
+    onRecovery: async () => 'retry',
+    random: () => 0.5,
+    sleep: async (ms) => {
+      delays.push(ms);
+      if (delays.length >= 3) client.stop();
+    }
+  });
+  await client.run();
+  assert.equal(opens, 3);
+  assert.deepEqual(delays, [250, 500, 1000]);
+});
+
 test('relay URL policy requires TLS except explicit loopback development and backoff stays bounded', () => {
   assert.match(validateRelayUrl('wss://relay.example.com/operator'), /^wss:/);
   assert.match(validateRelayUrl('ws://127.0.0.1:9000/operator', true), /^ws:/);
@@ -1165,4 +1205,86 @@ test('stage7 relay rejects invalid resource profile before opening authority', a
     resourceProfile: { cpuSlots: 0, memoryMb: 16384, gpu: false, tags: [], maxConcurrentJobs: 1 },
     onDelivery: async () => {}
   }), (error: any) => error?.code === 'RELAY_RESOURCE_PROFILE_INVALID');
+});
+
+test('single-delivery recovery stops after one proven hosted ACK and refuses subsequent queued work', async (t) => {
+  const state = await stateDir(t, 'operator-single-recovery-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Original owner synthetic');
+  await fs.writeFile(path.join(state, 'relay-client.json'), JSON.stringify({ version: 1, lastAckedServerSeq: 3134 }), 'utf8');
+  const deliveryId = '523e4567-e89b-42d3-a456-426614173135';
+  const extraId = '523e4567-e89b-42d3-a456-426614173136';
+  const socket = new FakeSocket();
+  let executed = 0;
+  let acknowledged = 0;
+  socket.onSend = (frame) => {
+    if (frame.type !== 'hello') return;
+    const session = modernSession(frame, { connectionId: 'recovery-once', capabilities: ['app.operate'], resumeFromSeq: 3134, readConcurrency: 1 });
+    queueMicrotask(() => {
+      socket.server(session.welcome);
+      socket.server({
+        type: 'delivery', seq: 3135, id: deliveryId, kind: 'action',
+        ...session.delivery(['app.operate']), payload: session.payload({ action: { capability: 'app.operate' } })
+      });
+      socket.server({
+        type: 'delivery', seq: 3136, id: extraId, kind: 'action',
+        ...session.delivery(['app.operate']), payload: session.payload({ action: { capability: 'app.operate' } })
+      });
+    });
+  };
+  const client = new RelayClient({
+    stateDir: state, url: 'ws://127.0.0.1:9976/device', allowLoopbackInsecureWs: true,
+    identity, socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
+    supportedCapabilities: ['app.operate'], maxConcurrentReadDeliveries: 1,
+    singleDeliveryRecovery: { previousSeq: 3134, seq: 3135, deliveryId },
+    getSessionToken: async () => 'mock-session-token',
+    onDelivery: async delivery => {
+      assert.equal(delivery.seq, 3135);
+      assert.equal(delivery.id, deliveryId);
+      executed++;
+    },
+    onAcknowledged: async delivery => { assert.equal(delivery.seq, 3135); acknowledged++; }
+  });
+  await client.run();
+  assert.equal(executed, 1, 'a subsequent real delivery must not execute');
+  assert.equal(acknowledged, 1);
+  assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 3135 });
+  assert.equal(socket.sent.filter(x => x.type === 'ack' && x.seq === 3135).length, 1);
+});
+
+test('single-delivery recovery refuses any hosted cursor advancement without a matching exact delivery', async t => {
+  const state = await stateDir(t, 'operator-single-recovery-cursor-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Original owner synthetic');
+  await fs.writeFile(path.join(state, 'relay-client.json'), JSON.stringify({ version: 1, lastAckedServerSeq: 3134 }), 'utf8');
+  const deliveryId = '523e4567-e89b-42d3-a456-426614173135';
+  const socket = new FakeSocket();
+  socket.onSend = frame => {
+    if (frame.type !== 'hello') return;
+    const session = modernSession(frame, { connectionId: 'recovery-stale-remote', capabilities: [], resumeFromSeq: 3135 });
+    queueMicrotask(() => socket.server({ ...session.welcome, expiredThroughSeq: 3135 }));
+  };
+  const client = new RelayClient({
+    stateDir: state, url: 'ws://127.0.0.1:9976/device', allowLoopbackInsecureWs: true,
+    identity, socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
+    supportedCapabilities: [], maxConcurrentReadDeliveries: 1,
+    singleDeliveryRecovery: { previousSeq: 3134, seq: 3135, deliveryId },
+    getSessionToken: async () => 'mock-session-token',
+    onDelivery: async () => assert.fail('new work forbidden')
+  });
+  await assert.rejects(client.run(), (error: any) => error?.code === 'RELAY_SINGLE_RECOVERY_CURSOR_MISMATCH');
+  assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 3134 });
+});
+
+test('concurrent read scheduling refuses caller-labeled write or unknown capability', () => {
+  const frame = (capability: string, risk = 'read') => ({
+    seq: 1, id: 'concurrency-risk-test', kind: 'action',
+    payload: { action: { id: 'concurrency-risk-test', capability, risk, input: {}, provenance: { kind: 'chatgpt' } } }
+  });
+  assert.equal(isConcurrentReadDelivery(frame('docker.inspect')), true);
+  assert.equal(isConcurrentReadDelivery(frame('project.command.run')), false, 'unverified dynamic risk is never concurrent on a caller read label');
+  assert.equal(isConcurrentReadDelivery(frame('file.write')), false);
+  assert.equal(isConcurrentReadDelivery(frame('docker.manage')), false);
+  assert.equal(isConcurrentReadDelivery(frame('not.a.registered.capability')), false);
+  assert.equal(isConcurrentReadDelivery(frame('file.read', 'write')), false);
 });
