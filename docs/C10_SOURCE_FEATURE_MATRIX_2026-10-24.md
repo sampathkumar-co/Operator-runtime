@@ -28,6 +28,9 @@ This is a representative source-declared list, not a promise that each operation
 
 ## Platform and feature evidence
 
+**Original-device physical acceptance not established.** GitHub-hosted Windows test results do not certify installed local user sessions, live approvals, native helper recovery or two independent host authority.
+
+
 | Feature | Source/platform constraint | Certification state |
 | --- | --- | --- |
 | Filesystem and Git | Requires explicitly authorized roots, bounds, stable path identity; some write actions need approval | CI fixtures exist; original device acceptance varies |
