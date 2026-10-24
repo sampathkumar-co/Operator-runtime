@@ -12,7 +12,7 @@ function record(lane, arm, overrides = {}) {
     provider: lane === 'A' ? 'none' : arm,
     runnerDigest: d(), modelConfigDigest: d('c'), environmentDigest: d('d'),
     independentOracleDigest: d('e'), resultEvidenceDigest: d('f'),
-    claimedSuccess: false, verifiedSuccess: false, failureStage: 'none',
+    claimedSuccess: false, verifiedSuccess: false, failureStage: 'model',
     latencyMs: 100, costMicros: 0, humanInterventions: 0, unauthorizedEffects: 0,
     ...overrides
   };
@@ -87,4 +87,46 @@ test('unregistered or duplicate test suite must never be marked a completed camp
     records: [record('B', 'mecord_scripted', { model: 'scripted' }),
       record('B', 'mecord_scripted', { model: 'scripted', id: 'another' })]
   }), /duplicate evaluation identity/);
+});
+
+test('Lane A cannot masquerade scripted fixtures as independent model decisions', () => {
+  assert.throws(() => buildWave0EvaluationReport({ sourceCommit, records: [
+    record('A', 'model_only', { model: 'scripted' })
+  ] }), /requires a named model/);
+});
+
+test('failed outcomes cannot silently use success-stage none as their root cause', () => {
+  assert.throws(() => buildWave0EvaluationReport({ sourceCommit, records: [
+    record('B', 'mecord_scripted', { model: 'scripted', failureStage: 'none' })
+  ] }), /requires explicit failure attribution/);
+  const passed = buildWave0EvaluationReport({ sourceCommit, records: [
+    record('B', 'mecord_scripted', {
+      model: 'scripted', verifiedSuccess: true, claimedSuccess: true, failureStage: 'none'
+    })
+  ] });
+  assert.equal(passed.lanes.B.evidence.verifiedSuccesses, 1);
+});
+
+test('a fully registered suite with unattributed failures stays PARTIAL', () => {
+  const ids = Array.from({ length: 50 }, (_, i) => 'journey_' + i);
+  const runs = ids.map((scenarioId, i) => record('B', 'mecord_scripted', {
+    model: 'scripted', scenarioId, id: 'run_' + i, seed: i,
+    failureStage: i === 0 ? 'unattributed' : 'model'
+  }));
+  const r = buildWave0EvaluationReport({
+    sourceCommit, records: runs,
+    preregistered: { suiteDigest: d('a'), expectedScenarioIds: ids }
+  });
+  assert.equal(r.lanes.B.status, 'PARTIAL');
+  assert.match(r.lanes.B.reason, /unattributed root cause/);
+  assert.equal(r.lanes.B.evidence.unattributedFailures, 1);
+  assert.equal(r.releaseAcceptance, 'NOT_ACCEPTED');
+});
+
+test('invalid preregistered scenario names are rejected instead of being treated as frozen identities', () => {
+  const invalid = Array.from({ length: 50 }, (_, i) => 'journey_' + i);
+  invalid[0] = { value: 'object-not-a-scenario-id' };
+  assert.throws(() => buildWave0EvaluationReport({
+    sourceCommit, preregistered: { suiteDigest: d('a'), expectedScenarioIds: invalid }
+  }), /preregistered suite/);
 });
