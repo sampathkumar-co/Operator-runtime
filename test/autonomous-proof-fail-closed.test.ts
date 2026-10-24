@@ -61,7 +61,11 @@ test('C07 stale, ambiguous, non-KNOWN and self-action verification results fail 
     r => { if (r.observation?.schemaVersion === 2) r.observation.ambiguous = true; },
     r => { r.risk = 'external'; },
     r => { if (r.observation?.schemaVersion === 2) r.observation.capability = 'browser.interact'; },
-    r => { r.startedAt = 'invalid-time'; }
+    r => { r.startedAt = 'invalid-time'; },
+    r => { r.finishedAt = undefined; },
+    r => { r.finishedAt = 'invalid-time'; },
+    r => { r.finishedAt = '2026-10-24T10:59:59.000Z'; },
+    r => { if (r.observation?.schemaVersion === 2) r.observation.observedAt = '2026-10-24T11:00:03.000Z'; }
   ];
   for (const change of mutations) {
     const task = fixture([{ path: 'verified', operator: 'equals', value: true }]);
