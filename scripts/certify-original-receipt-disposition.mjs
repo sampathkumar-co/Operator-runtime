@@ -73,9 +73,11 @@ export async function certifyOriginalReceipts(dir = path.join(os.homedir(), '.op
     !Array.isArray(receiptDb.records) || !Array.isArray(journalDb.entries) ||
     !Number.isSafeInteger(cursorDb.lastAckedServerSeq)) fail('ORIGINAL_STATE_SCHEMA_INVALID');
   const receiptCounts = new Map();
+  const receiptsByAction = new Map();
   for (const r of receiptDb.records) {
-    if (typeof r?.actionId === 'string')
-      receiptCounts.set(r.actionId, (receiptCounts.get(r.actionId) ?? 0) + 1);
+    if (typeof r?.actionId !== 'string') continue;
+    receiptCounts.set(r.actionId, (receiptCounts.get(r.actionId) ?? 0) + 1);
+    receiptsByAction.set(r.actionId, r);
   }
   const journalCounts = new Map();
   const entries = new Map();
@@ -85,12 +87,20 @@ export async function certifyOriginalReceipts(dir = path.join(os.homedir(), '.op
     const previous = entries.get(j.actionId);
     if (!previous || j.generation > previous.generation) entries.set(j.actionId, j);
   }
-  // The signed history may outlive a separately pruned receipt store.
-  // Missing source receipts cannot be silently counted as fully certified.
-  // Retain their hash-only identifiers and the surviving journal state.
+  // A signed historical decision can be excluded from the evidence-gap list
+  // ONLY by an EXACT matching original processing receipt. Action-ID presence,
+  // terminal/completed status or a fabricated replacement are not proof.
   const historicalSignedWithoutReceipt = [];
   for (const [actionId, decision] of proofs.decisions) {
-    if ((receiptCounts.get(actionId) ?? 0) > 0) continue;
+    const receipt = receiptsByAction.get(actionId);
+    const verifiedReceipt = receiptCounts.get(actionId) === 1 && receipt?.status === 'processing' &&
+      receipt.actionHash === decision.actionDigest &&
+      receipt.authorityHash === decision.receiptAuthorityHash &&
+      receipt.ownerId === decision.receiptOwnerId &&
+      (receipt.ownerProcess
+        ? decision.receiptOwnerProcessDigest === sha(canonicalJson(receipt.ownerProcess))
+        : decision.receiptOwnerProcessDigest === undefined);
+    if (verifiedReceipt) continue;
     const entry = entries.get(actionId);
     historicalSignedWithoutReceipt.push({
       actionIdSha256: sha(actionId),
@@ -99,7 +109,7 @@ export async function certifyOriginalReceipts(dir = path.join(os.homedir(), '.op
       signedJournalPrefixMatches: Boolean(entry &&
         Array.isArray(entry.transitions) && entry.transitions.length >= 2 &&
         sha(canonicalJson(entry.transitions.slice(0, -1))) === decision.transitionsDigest),
-      disposition: 'MISSING_ORIGINAL_EXECUTION_RECEIPT_REVIEW_REQUIRED'
+      disposition: 'MISSING_OR_UNVERIFIED_ORIGINAL_EXECUTION_RECEIPT_REVIEW_REQUIRED'
     });
   }
   historicalSignedWithoutReceipt.sort((a,b) => a.actionIdSha256.localeCompare(b.actionIdSha256));

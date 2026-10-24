@@ -117,6 +117,24 @@ test('original receipt disposition verifies exact signed journal history, termin
   assert.equal(orphan.processingReceipts,1);
   assert.equal(orphan.unsupported,0);
 
+  const forged=structuredClone(initial);
+  forged['action-executions.json'].records[0].status='completed';
+  forged['action-executions.json'].records[0].actionHash=digest('wrong-action');
+  forged['action-executions.json'].records[0].authorityHash=digest('wrong-authority');
+  for(const [n,v] of Object.entries(forged)) await write(n,v);
+  const completedReplacement=await certifyOriginalReceipts(root);
+  assert.equal(completedReplacement.processingReceipts,1);
+  assert.equal(completedReplacement.historicalSignedWithoutReceiptCount,1,
+    'Completed forged same-action-ID receipt must not hide missing historic provenance');
+  assert.equal(completedReplacement.releaseDisposition,'HOLD_EVIDENCE_INCOMPLETE');
+  const forgedProcessing=structuredClone(initial);
+  forgedProcessing['action-executions.json'].records[0].authorityHash=digest('forged-authority');
+  for(const [n,v] of Object.entries(forgedProcessing)) await write(n,v);
+  const invalidProcessing=await certifyOriginalReceipts(root);
+  assert.equal(invalidProcessing.historicalSignedWithoutReceiptCount,1,
+    'Invalid processing receipt cannot prove signed history');
+  assert.ok(invalidProcessing.unsupported>=1);
+
   for(const [n,v] of Object.entries(initial)) await write(n,v);
   const tampered=structuredClone(initial['operator-pre-dispatch-adjudications.json']);
   tampered.decisions[0].signature='AAAA'+tampered.decisions[0].signature.slice(4);
