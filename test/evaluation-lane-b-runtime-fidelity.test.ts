@@ -10,10 +10,9 @@ import type { ActionRequest, ActionRisk, PermissionProfile } from '../src/core/t
 
 const sha256 = (data: string) => crypto.createHash('sha256').update(data).digest('hex');
 
+const laneTest = process.platform === 'win32' && !process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH ? test.skip : test;
+
 async function fixture(t: test.TestContext) {
-  if (process.platform === 'win32' && !process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH) {
-    t.skip('Windows path-lease native helper absent; no physical Windows certification claimed.');
-  }
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-lane-b-fixed-trace-'));
   const root = path.join(base, 'authorized');
   const outside = path.join(base, 'outside');
@@ -33,7 +32,7 @@ async function fixture(t: test.TestContext) {
   return { base, root, outside, runtime, permission, action };
 }
 
-test('C01 Lane B fixed-action create/read/replace is verified against independent filesystem state', async t => {
+laneTest('C01 Lane B fixed-action create/read/replace is verified against independent filesystem state', async t => {
   const { root, runtime, permission, action } = await fixture(t);
   const target = path.join(root, 'synthetic.txt');
   const firstBytes = 'model-neutral fixture version 1\n';
@@ -55,7 +54,7 @@ test('C01 Lane B fixed-action create/read/replace is verified against independen
   assert.equal(sha256(actual), sha256(finalBytes));
 });
 
-test('C01 Lane B stale expected hash fails closed and cannot change destination bytes', async t => {
+laneTest('C01 Lane B stale expected hash fails closed and cannot change destination bytes', async t => {
   const { root, runtime, permission, action } = await fixture(t);
   const target = path.join(root, 'stale.txt');
   await fs.writeFile(target, 'fresh-on-disk');
@@ -67,7 +66,7 @@ test('C01 Lane B stale expected hash fails closed and cannot change destination 
   assert.equal(await fs.readFile(target, 'utf8'), 'fresh-on-disk');
 });
 
-test('C01 Lane B out-of-scope write is denied before any outside file changes', async t => {
+laneTest('C01 Lane B out-of-scope write is denied before any outside file changes', async t => {
   const { outside, runtime, permission, action } = await fixture(t);
   const target = path.join(outside, 'forbidden.txt');
   const result = await runtime.execute(action('lane-b-outside', 'file.create', 'write', {
@@ -79,7 +78,7 @@ test('C01 Lane B out-of-scope write is denied before any outside file changes', 
   await assert.rejects(() => fs.access(target));
 });
 
-test('C01 Lane B missing one-use destructive approval cannot mutate an existing file', async t => {
+laneTest('C01 Lane B missing explicit destructive approval cannot mutate an existing file', async t => {
   const { root, runtime, permission, action } = await fixture(t);
   const target = path.join(root, 'approval.txt');
   await fs.writeFile(target, 'original');
