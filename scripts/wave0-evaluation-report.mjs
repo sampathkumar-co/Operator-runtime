@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildWave0EvaluationReport } from '../src/core/wave0-evaluation.mjs';
+import { buildWave0EvaluationReport } from './wave0-evaluation.mjs';
 
 export async function reportForCurrentCheckout(inputPath) {
   const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim().toLowerCase();
