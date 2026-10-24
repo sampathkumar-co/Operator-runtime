@@ -15,7 +15,7 @@ export const SOURCE_FILES = Object.freeze([
   'src/core/evaluation.ts',
   'src/core/agent-kernel.ts',
   'src/core/policy.ts',
-  'native/windows-path-lease/Cargo.toml',
+  'native/windows-path-lease/Program.cs',
   'native/windows-uia/Cargo.toml',
   '.github/workflows/ci.yml',
   '.github/workflows/platform-matrix.yml',
