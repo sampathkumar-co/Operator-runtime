@@ -65,7 +65,7 @@ An open issue does **not** prove a current source defect, and a green unit test 
 
 ## C01 three-lane truth contract
 
-`src/core/wave0-evaluation.mjs` requires frozen SHA identities, exact scenario revision, seed, model/config digest, runner, environment and independent oracle/result digests. No records produce `NOT_RUN`, not 0% success or an invented pass.
+`scripts/wave0-evaluation.mjs` requires frozen SHA identities, exact scenario revision, seed, model/config digest, runner, environment and independent oracle/result digests. No records produce `NOT_RUN`, not 0% success or an invented pass.
 
 - **Lane A:** model-only decisions using frozen observations, no Mecord provider dispatch; real model/scorer campaign still **NOT_RUN**.
 - **Lane B:** scripted, model-independent Mecord provider execution with independent outcome oracle. Focused synthetic file trace merged in #398; browser discovery fixtures proposed in #402. Full prescribed action matrix **NOT RUN**.
