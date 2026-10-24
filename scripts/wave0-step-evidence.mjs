@@ -93,13 +93,17 @@ export function buildWave0TraceBundle({ sourceCommit, controllerId, recorderId, 
         invalid('action identity reused for a changed action');
       }
       if (attempt > earlier.attempt) {
-        if (row.risk !== 'read' && earlier.sideEffectState !== 'none') {
+        if (row.risk !== 'read' && earlier.maximumSideEffectState !== 'none') {
           invalid('mutating action retried after known or uncertain effects');
         }
       }
     }
+    const rank = { none: 0, known: 1, uncertain: 2 };
+    const previousMaximum = earlier?.maximumSideEffectState ?? 'none';
+    const maximumSideEffectState = rank[row.sideEffectState] > rank[previousMaximum]
+      ? row.sideEffectState : previousMaximum;
     perAction.set(aKey, { actionDigest: row.actionDigest, risk: row.risk, attempt,
-      sideEffectState: row.sideEffectState });
+      maximumSideEffectState });
     sanitized.push({ runId, lane, arm: row.arm, scenarioId: row.scenarioId, seed,
       step, attempt, phase: row.phase, actionId: row.actionId, capability: row.capability,
       risk: row.risk, sideEffectState: row.sideEffectState,
