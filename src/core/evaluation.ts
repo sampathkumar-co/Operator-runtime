@@ -255,7 +255,7 @@ export class EvaluationStore {
   async compareMatched(input: {
     baselineSourceCommit: string;
     candidateSourceCommit: string;
-    thresholds?: Partial<Record<'verifiedSuccessRate' | 'falseSuccessRate' | 'recoveryRate' | 'humanInterventionRate' | 'averageLatencyMs' | 'averageCostMicros', number>>;
+    thresholds?: Partial<Record<'verifiedSuccessRate' | 'falseSuccessRate' | 'recoveryRate' | 'humanInterventionRate' | 'averageLatencyMs' | 'p50TaskLatencyMs' | 'p95TaskLatencyMs' | 'averageCostMicros', number>>;
   }): Promise<MatchedEvaluationRegression> {
     const baselineSourceCommit = shaCommit(input.baselineSourceCommit);
     const candidateSourceCommit = shaCommit(input.candidateSourceCommit);
@@ -300,7 +300,8 @@ export class EvaluationStore {
     const candidate = summarize([...candidateCohort.values()]);
     const threshold = {
       verifiedSuccessRate: 0.005, falseSuccessRate: 0.001, recoveryRate: 0.01,
-      humanInterventionRate: 0.01, averageLatencyMs: 50, averageCostMicros: 1000,
+      humanInterventionRate: 0.01, averageLatencyMs: 50,
+      p50TaskLatencyMs: 50, p95TaskLatencyMs: 50, averageCostMicros: 1000,
       ...(input.thresholds ?? {})
     };
     const improved: string[] = [];
@@ -310,6 +311,9 @@ export class EvaluationStore {
     compareHigher('recoveryRate', baseline, candidate, threshold.recoveryRate, improved, regressed);
     compareLower('humanInterventionRate', baseline, candidate, threshold.humanInterventionRate, improved, regressed);
     compareLower('averageLatencyMs', baseline, candidate, threshold.averageLatencyMs, improved, regressed);
+    // Source-matched tail latency can regress despite a faster overall mean.
+    compareLower('p50TaskLatencyMs', baseline, candidate, threshold.p50TaskLatencyMs ?? 50, improved, regressed);
+    compareLower('p95TaskLatencyMs', baseline, candidate, threshold.p95TaskLatencyMs ?? 50, improved, regressed);
     compareLower('averageCostMicros', baseline, candidate, threshold.averageCostMicros, improved, regressed);
     return {
       matchedPairs: baselineCohort.size, baselineSourceCommit, candidateSourceCommit,
