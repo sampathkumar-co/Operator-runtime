@@ -284,7 +284,10 @@ function isUsefulRole(role: string): boolean {
 }
 
 export function normalizeTargetSpec(input: unknown): { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string } {
-  if (input === undefined) return {};
+  if (input === undefined) return {
+    ref: undefined, css: undefined, text: undefined,
+    role: undefined, name: undefined, renderedColor: undefined
+  };
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
     throw new OperatorError('INVALID_BROWSER_TARGET', 'Browser target must be a selector object.');
   }
