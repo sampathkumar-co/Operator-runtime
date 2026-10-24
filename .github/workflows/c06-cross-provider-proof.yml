@@ -1,0 +1,50 @@
+name: C06 Mixed Developer Provider Verification
+
+on:
+  pull_request:
+    paths:
+      - 'test/c06-cross-provider-goal-proof.test.ts'
+      - '.github/workflows/c06-cross-provider-proof.yml'
+      - 'src/capabilities/filesystem.ts'
+      - 'src/capabilities/git.ts'
+      - 'src/core/runtime.ts'
+  push:
+    branches: [main]
+    paths:
+      - 'test/c06-cross-provider-goal-proof.test.ts'
+      - '.github/workflows/c06-cross-provider-proof.yml'
+      - 'src/capabilities/filesystem.ts'
+      - 'src/capabilities/git.ts'
+      - 'src/core/runtime.ts'
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-mixed-provider:
+    name: Fixed file/Git oracle (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 18
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Build native Windows path-identity helper
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./native/windows-path-lease/build.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'native helper build failed' }
+          $exe = (Resolve-Path native/windows-path-lease/target/release/operator-windows-path-lease.exe).Path
+          "OPERATOR_WINDOWS_PATH_LEASE_PATH=$exe" >> $env:GITHUB_ENV
+      - name: Run mixed-provider independent fixed outcome oracle
+        run: node --experimental-strip-types --test test/c06-cross-provider-goal-proof.test.ts
