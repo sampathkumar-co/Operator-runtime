@@ -121,7 +121,7 @@ export function buildWave0EvaluationReport({ sourceCommit, records = [], preregi
         identities.add(key);
       }
     }
-    const sourceEvidence = lane === 'C'
+    const sourceEvidence = inLane.length === 0 ? null : lane === 'C'
       ? { mecord: summarize(inLane.filter(x => x.arm === 'mecord')),
           direct: summarize(inLane.filter(x => x.arm === 'direct')) }
       : summarize(inLane);
