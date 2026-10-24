@@ -132,6 +132,13 @@ export interface EvaluationRegression {
   candidate: EvaluationSummary;
 }
 
+/** Strictly paired evaluations. This is separate from the legacy unpaired trend comparison. */
+export interface MatchedEvaluationRegression extends EvaluationRegression {
+  matchedPairs: number;
+  baselineSourceCommit: string;
+  candidateSourceCommit: string;
+}
+
 const MAX_SCENARIOS = 20_000;
 const MAX_RUNS = 200_000;
 const STORE_OPTIONS = {
@@ -226,6 +233,80 @@ export class EvaluationStore {
     compareLower('averageLatencyMs', baseline, candidate, threshold.averageLatencyMs, improved, regressed);
     compareLower('averageCostMicros', baseline, candidate, threshold.averageCostMicros, improved, regressed);
     return { improved, regressed, baseline, candidate };
+  }
+
+  /**
+   * Compare the same workload under two exact source commits. Reject missing,
+   * duplicate or provenance-incompatible cohorts rather than reporting a
+   * misleading improvement against a different test selection.
+   *
+   * Model-independent scripted traces can identify their model as "scripted".
+   * Both sources must use the same runner, scenario revision, seed, model,
+   * provider, model configuration and environment digest.
+   */
+  async compareMatched(input: {
+    baselineSourceCommit: string;
+    candidateSourceCommit: string;
+    thresholds?: Partial<Record<'verifiedSuccessRate' | 'falseSuccessRate' | 'recoveryRate' | 'humanInterventionRate' | 'averageLatencyMs' | 'averageCostMicros', number>>;
+  }): Promise<MatchedEvaluationRegression> {
+    const baselineSourceCommit = shaCommit(input.baselineSourceCommit);
+    const candidateSourceCommit = shaCommit(input.candidateSourceCommit);
+    if (baselineSourceCommit === candidateSourceCommit) {
+      throw new OperatorError('EVALUATION_NOT_COMPARABLE', 'Source commits must differ for a source regression comparison.');
+    }
+    await this.#serial;
+    const state = await this.#read();
+    const baselineRuns = state.runs.filter((run) => run.sourceCommit === baselineSourceCommit);
+    const candidateRuns = state.runs.filter((run) => run.sourceCommit === candidateSourceCommit);
+    if (baselineRuns.length === 0 || candidateRuns.length === 0) {
+      throw new OperatorError('EVALUATION_NOT_COMPARABLE', 'Both source commits require recorded evaluation runs.');
+    }
+    const cohort = (runs: EvaluationRun[], label: string): Map<string, EvaluationRun> => {
+      const indexed = new Map<string, EvaluationRun>();
+      for (const run of runs) {
+        if (run.candidateDirty !== false || run.seed === undefined || !run.runnerHash
+          || !run.model || !run.provider || !run.modelConfigDigest || !run.environmentDigest) {
+          throw new OperatorError('EVALUATION_PROVENANCE_MISSING', `${label} run ${run.id} lacks immutable clean-source or experiment provenance.`);
+        }
+        const key = canonicalJson({
+          scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion,
+          seed: run.seed, runnerHash: run.runnerHash, model: run.model,
+          provider: run.provider, modelConfigDigest: run.modelConfigDigest,
+          environmentDigest: run.environmentDigest
+        });
+        if (indexed.has(key)) {
+          throw new OperatorError('EVALUATION_DUPLICATE_COHORT_RUN', `${label} has multiple runs for the same experiment identity.`);
+        }
+        indexed.set(key, run);
+      }
+      return indexed;
+    };
+    const baselineCohort = cohort(baselineRuns, 'Baseline');
+    const candidateCohort = cohort(candidateRuns, 'Candidate');
+    if (baselineCohort.size !== candidateCohort.size
+      || [...baselineCohort.keys()].some((key) => !candidateCohort.has(key))) {
+      throw new OperatorError('EVALUATION_NOT_COMPARABLE', 'Scenario/version/seed/runner/model/provider/environment cohorts differ.');
+    }
+
+    const baseline = summarize([...baselineCohort.values()]);
+    const candidate = summarize([...candidateCohort.values()]);
+    const threshold = {
+      verifiedSuccessRate: 0.005, falseSuccessRate: 0.001, recoveryRate: 0.01,
+      humanInterventionRate: 0.01, averageLatencyMs: 50, averageCostMicros: 1000,
+      ...(input.thresholds ?? {})
+    };
+    const improved: string[] = [];
+    const regressed: string[] = [];
+    compareHigher('verifiedSuccessRate', baseline, candidate, threshold.verifiedSuccessRate, improved, regressed);
+    compareLower('falseSuccessRate', baseline, candidate, threshold.falseSuccessRate, improved, regressed);
+    compareHigher('recoveryRate', baseline, candidate, threshold.recoveryRate, improved, regressed);
+    compareLower('humanInterventionRate', baseline, candidate, threshold.humanInterventionRate, improved, regressed);
+    compareLower('averageLatencyMs', baseline, candidate, threshold.averageLatencyMs, improved, regressed);
+    compareLower('averageCostMicros', baseline, candidate, threshold.averageCostMicros, improved, regressed);
+    return {
+      matchedPairs: baselineCohort.size, baselineSourceCommit, candidateSourceCommit,
+      improved, regressed, baseline, candidate
+    };
   }
 
   async #mutate<T>(fn: (state: EvaluationState) => T): Promise<T> {
