@@ -241,8 +241,8 @@ export class EvaluationStore {
     compareLower('averageLatencyMs', baseline, candidate, threshold.averageLatencyMs, improved, regressed);
     // Average latency can improve while a small set of real tasks regresses.
     // Use the existing deterministic percentile estimator on matched cohorts.
-    compareLower('p50TaskLatencyMs', baseline, candidate, threshold.p50TaskLatencyMs, improved, regressed);
-    compareLower('p95TaskLatencyMs', baseline, candidate, threshold.p95TaskLatencyMs, improved, regressed);
+    compareLower('p50TaskLatencyMs', baseline, candidate, threshold.p50TaskLatencyMs ?? 50, improved, regressed);
+    compareLower('p95TaskLatencyMs', baseline, candidate, threshold.p95TaskLatencyMs ?? 50, improved, regressed);
     compareLower('averageCostMicros', baseline, candidate, threshold.averageCostMicros, improved, regressed);
     return { improved, regressed, baseline, candidate };
   }
