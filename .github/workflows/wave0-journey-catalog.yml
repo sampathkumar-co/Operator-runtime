@@ -1,0 +1,47 @@
+name: Wave 0 Candidate Journey Roster
+
+on:
+  pull_request:
+    paths:
+      - 'certification/wave0/realistic-journey-candidates-v1.json'
+      - 'scripts/wave0-journey-catalog.mjs'
+      - 'test/wave0-journey-catalog.test.ts'
+      - '.github/workflows/wave0-journey-catalog.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'certification/wave0/realistic-journey-candidates-v1.json'
+      - 'scripts/wave0-journey-catalog.mjs'
+      - 'test/wave0-journey-catalog.test.ts'
+      - '.github/workflows/wave0-journey-catalog.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  read-only-goal-inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Verify all 50 spec-only journeys and absent evaluation evidence
+        run: node --experimental-strip-types --test test/wave0-journey-catalog.test.ts
+      - name: Capture immutable candidate description digest without a fake pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/wave0-journeys"
+          node scripts/wave0-journey-catalog.mjs > "$RUNNER_TEMP/wave0-journeys/roster-report.json"
+          node -e "const fs=require('fs');const r=JSON.parse(fs.readFileSync(process.argv[1]));if(r.totalCandidateJourneys!==50||r.independence!=='PUBLIC_NOT_SEALED_OR_HELD_OUT'||r.releaseAcceptance!=='NOT_ACCEPTED')throw Error('unearned held-out qualification')" "$RUNNER_TEMP/wave0-journeys/roster-report.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wave0-journey-candidates-${{ github.sha }}
+          path: ${{ runner.temp }}/wave0-journeys/roster-report.json
+          retention-days: 30
+          if-no-files-found: error
