@@ -30,11 +30,12 @@ export function normalizeObservationOptions(input: unknown): BrowserObservationO
     return value;
   };
   const boundedString = (key: string, max: number) => {
-    if (raw[key] === undefined) return undefined;
-    if (typeof raw[key] !== 'string' || !raw[key].trim() || raw[key].trim().length > max) {
+    const value = raw[key];
+    if (value === undefined) return undefined;
+    if (typeof value !== 'string' || !value.trim() || value.trim().length > max) {
       throw new OperatorError('BROWSER_OBSERVATION_FOCUS_INVALID', `${key} must be a non-empty string at most ${max} characters.`);
     }
-    return raw[key].trim();
+    return value.trim();
   };
   const regionRaw = raw.focusRegion && typeof raw.focusRegion === 'object' && !Array.isArray(raw.focusRegion)
     ? raw.focusRegion as JsonMap : undefined;
