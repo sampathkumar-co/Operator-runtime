@@ -1,0 +1,85 @@
+name: Wave 0 Synthetic Authority and Recovery Matrix
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/wave0-authority-matrix.yml'
+      - 'test/approval-path-parity.test.ts'
+      - 'test/control-plane-exact-generation-integrity.test.ts'
+      - 'test/durable-state-race.test.ts'
+      - 'test/action-transition-journal-integrity.test.ts'
+      - 'test/original-receipt-disposition.test.ts'
+      - 'test/priority-durable-writer-collisions.test.ts'
+      - 'test/relay-reservation-reconciliation-provenance.test.ts'
+      - 'src/core/**'
+      - 'apps/local-agent/src/**'
+      - 'native/windows-path-lease/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/wave0-authority-matrix.yml'
+      - 'src/core/**'
+      - 'test/approval-path-parity.test.ts'
+      - 'test/control-plane-exact-generation-integrity.test.ts'
+      - 'test/durable-state-race.test.ts'
+      - 'test/action-transition-journal-integrity.test.ts'
+      - 'test/original-receipt-disposition.test.ts'
+      - 'test/priority-durable-writer-collisions.test.ts'
+      - 'test/relay-reservation-reconciliation-provenance.test.ts'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-adversarial-recovery:
+    name: No-replay and CAS authority (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 24
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Compile authentic Windows process ownership witness
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./native/windows-path-lease/build.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows path-lease helper build failed' }
+          $exe = (Resolve-Path native/windows-path-lease/target/release/operator-windows-path-lease.exe).Path
+          "OPERATOR_WINDOWS_PATH_LEASE_PATH=$exe" >> $env:GITHUB_ENV
+      - name: Run source-bound isolated adversarial tests only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/wave0-security"
+          node --experimental-strip-types --test \
+            test/approval-path-parity.test.ts \
+            test/control-plane-exact-generation-integrity.test.ts \
+            test/durable-state-race.test.ts \
+            test/action-transition-journal-integrity.test.ts \
+            test/original-receipt-disposition.test.ts \
+            test/priority-durable-writer-collisions.test.ts \
+            test/relay-reservation-reconciliation-provenance.test.ts \
+            | tee "$RUNNER_TEMP/wave0-security/synthetic-tests.tap"
+      - name: Capture audit scope with explicit physical/cross-host limits
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -e "const fs=require('fs');const crypto=require('crypto');const path=require('path');const raw=fs.readFileSync(path.join(process.env.RUNNER_TEMP,'wave0-security','synthetic-tests.tap'));const r={schemaVersion:1,sourceCommit:process.env.GITHUB_SHA,runnerOS:process.platform,node:process.version,tapSha256:crypto.createHash('sha256').update(raw).digest('hex'),testEvidence:'CI_SYNTHETIC_ONLY',originalWindowsReceipts:'NOT_TOUCHED',twoHostAuthority:'NOT_RUN',livePostgresRestore:'NOT_RUN',physicalUserTask:'NOT_RUN',releaseAcceptance:'NOT_ACCEPTED'};fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'wave0-security','scope.json'),JSON.stringify(r,null,2)+'\n');if(!/^[0-9a-f]{40}$/.test(r.sourceCommit))throw Error('source SHA missing')"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: wave0-authority-matrix-${{ matrix.os }}-${{ github.sha }}
+          path: ${{ runner.temp }}/wave0-security/*
+          if-no-files-found: warn
+          retention-days: 30
