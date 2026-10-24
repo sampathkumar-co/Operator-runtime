@@ -127,7 +127,7 @@ export function buildWave0EvaluationReport({ sourceCommit, records = [], preregi
       : summarize(inLane);
     laneSummaries[lane] = {
       status: inLane.length === 0 ? 'NOT_RUN'
-        : hasFullSuite && (lane !== 'C' || paired) ? 'COMPLETE_SYNTHETIC_OR_RECORDED' : 'PARTIAL',
+        : hasFullSuite && (lane !== 'C' || paired) ? 'REPORTED_FULL_COVERAGE_UNVERIFIED' : 'PARTIAL',
       physicalAcceptance: 'NOT_VERIFIED',
       reason: inLane.length === 0 ? reasons[lane] : hasFullSuite
         ? 'Recorded suite coverage exists; provenance and physical release qualification remain independent.'
