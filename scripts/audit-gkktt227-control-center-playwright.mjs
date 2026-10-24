@@ -84,7 +84,12 @@ try {
     try {
       await page.setContent(html, { waitUntil: 'load' });
       await page.getByRole('heading', { name: 'Mecord Control Center' }).waitFor({ timeout: 5000 });
-      assert.equal(await page.locator('input[type=password]').count(), 2);
+      // Secure Control Center login uses a short-lived one-time browser code.
+      // The previous two password fields were raw agent/recovery token entry
+      // and must never be reintroduced merely to satisfy the visual suite.
+      assert.equal(await page.locator('input[type=password]').count(), 0);
+      assert.equal(await page.locator('#loginCode[type=text]').count(), 1);
+      assert.equal(await page.locator('#agentToken, #recoveryToken').count(), 0);
       assert.equal(await page.locator('[role=tab]').count(), tabs.length);
 
       const layout = await page.evaluate(() => {

@@ -237,6 +237,42 @@ export class RelayDeliveryStore {
     };
   }
 
+  /**
+   * Read-only, exact-cursor recovery triage. This deliberately returns no
+   * delivery ID, action metadata, result, arguments or payload. The caller
+   * must authenticate the original device and check account generation.
+   *
+   * Unlike pending()/cursor(), this never runs maintenance and never writes.
+   * Terminal or absent records are diagnostic facts, NOT ACK authority.
+   */
+  async inspectRecoveryRecordState(deviceIdInput: string, expectedPreviousSeqInput: number): Promise<{
+    lastAckedSeq: number;
+    highestEnqueuedSeq: number;
+    nextSequence: number;
+    retainedState: 'pending' | 'expired' | 'acked' | 'missing';
+    authority?: RelayDeliveryAuthority;
+  }> {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    const previous = validNonNegativeSeq(expectedPreviousSeqInput);
+    const state = await this.#read();
+    const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
+    if (!stream || stream.lastAckedSeq !== previous) {
+      throw new OperatorError('RELAY_RECOVERY_INSPECT_CURSOR_MISMATCH',
+        'Original device and hosted relay do not agree on the preceding acknowledged sequence.', { retryable: false });
+    }
+    const nextSequence = previous + 1;
+    const delivery = stream.deliveries.find((candidate) => candidate.seq === nextSequence);
+    return {
+      lastAckedSeq: stream.lastAckedSeq,
+      highestEnqueuedSeq: stream.nextSeq - 1,
+      nextSequence,
+      retainedState: delivery?.status ?? 'missing',
+      ...(delivery?.status === 'pending' && delivery.authority
+        ? { authority: { ...delivery.authority } }
+        : {})
+    };
+  }
+
   async pending(deviceIdInput: string, limitInput = 100): Promise<StoredRelayDelivery[]> {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const limit = boundedLimit(limitInput);
