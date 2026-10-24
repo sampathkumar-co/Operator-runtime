@@ -27,7 +27,7 @@ jobs:
           node-version: '22.23.2'
           package-manager-cache: false
       - name: Validate Wave 0 manifests and evaluator fail-closed contracts
-        run: node --experimental-strip-types --test test/wave0-source-manifest.test.ts test/wave0-evaluation-report.test.ts
+        run: node --experimental-strip-types --test test/wave0-source-manifest.test.ts test/wave0-evaluation-report.test.ts test/wave0-provider-census.test.ts
       - name: Capture exact source/package and NOT_RUN evaluation report
         shell: bash
         run: |
@@ -35,7 +35,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/wave0"
           node scripts/wave0-source-manifest.mjs > "$RUNNER_TEMP/wave0/source-manifest.json"
           node scripts/wave0-evaluation-report.mjs > "$RUNNER_TEMP/wave0/evaluation-report.json"
+          node --experimental-strip-types scripts/wave0-provider-census.ts > "$RUNNER_TEMP/wave0/provider-census.json"
           node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync(process.argv[1]));const r=JSON.parse(fs.readFileSync(process.argv[2]));if(m.candidate.commit!==process.env.GITHUB_SHA||m.release.npmRegistryTarball.status!=='NOT_VERIFIED'||r.lanes.C.status!=='NOT_RUN'||r.releaseAcceptance!=='NOT_ACCEPTED')throw Error('Wave 0 provenance/NOT_RUN contract violated')" "$RUNNER_TEMP/wave0/source-manifest.json" "$RUNNER_TEMP/wave0/evaluation-report.json"
+          node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync(process.argv[1]));if(c.sourceCommit!==process.env.GITHUB_SHA||c.runtimeRegisteredProviderCount<15||c.declaredBuiltInRiskCount!==52||!c.boundaries.every(Boolean))throw Error('Wave 0 provider census invalid or pretending complete certification')" "$RUNNER_TEMP/wave0/provider-census.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wave0-source-and-evaluation-${{ github.sha }}
