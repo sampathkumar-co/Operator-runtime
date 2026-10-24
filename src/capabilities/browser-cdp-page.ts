@@ -23,20 +23,34 @@ export type BrowserObservationOptions = {
 export function normalizeObservationOptions(input: unknown): BrowserObservationOptions {
   const raw = input && typeof input === 'object' && !Array.isArray(input) ? input as JsonMap : {};
   const integer = (key: string, fallback: number, min: number, max: number) => {
-    const value = raw[key] === undefined ? fallback : Number(raw[key]);
-    if (!Number.isSafeInteger(value) || value < min || value > max) {
+    const value = raw[key] === undefined ? fallback : raw[key];
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) {
       throw new OperatorError('BROWSER_OBSERVATION_BUDGET_INVALID', `${key} must be an integer between ${min} and ${max}.`);
     }
     return value;
   };
   const boundedString = (key: string, max: number) => {
-    if (raw[key] === undefined) return undefined;
-    if (typeof raw[key] !== 'string' || !String(raw[key]).trim()) throw new OperatorError('BROWSER_OBSERVATION_FOCUS_INVALID', `${key} must be a non-empty string.`);
-    return String(raw[key]).trim().slice(0, max);
+    const value = raw[key];
+    if (value === undefined) return undefined;
+    if (typeof value !== 'string' || !value.trim() || value.trim().length > max) {
+      throw new OperatorError('BROWSER_OBSERVATION_FOCUS_INVALID', `${key} must be a non-empty string at most ${max} characters.`);
+    }
+    return value.trim();
   };
-  const regionRaw = raw.focusRegion && typeof raw.focusRegion === 'object' && !Array.isArray(raw.focusRegion) ? raw.focusRegion as JsonMap : undefined;
+  const regionRaw = raw.focusRegion && typeof raw.focusRegion === 'object' && !Array.isArray(raw.focusRegion)
+    ? raw.focusRegion as JsonMap : undefined;
+  if (raw.focusRegion !== undefined && !regionRaw) {
+    throw new OperatorError('BROWSER_OBSERVATION_FOCUS_INVALID', 'focusRegion must be a rectangle with numeric coordinates.');
+  }
+  const regionNumber = (key: 'x' | 'y' | 'width' | 'height') => {
+    const value = regionRaw?.[key];
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new OperatorError('BROWSER_OBSERVATION_FOCUS_INVALID', `focusRegion.${key} must be a finite number.`);
+    }
+    return value;
+  };
   const focusRegion = regionRaw ? {
-    x: Number(regionRaw.x), y: Number(regionRaw.y), width: Number(regionRaw.width), height: Number(regionRaw.height)
+    x: regionNumber('x'), y: regionNumber('y'), width: regionNumber('width'), height: regionNumber('height')
   } : undefined;
   if (focusRegion && (![focusRegion.x, focusRegion.y, focusRegion.width, focusRegion.height].every(Number.isFinite) || focusRegion.width <= 0 || focusRegion.height <= 0 || focusRegion.width > 100_000 || focusRegion.height > 100_000)) {
     throw new OperatorError('BROWSER_OBSERVATION_FOCUS_INVALID', 'focusRegion must contain finite x/y and positive bounded width/height values.');
