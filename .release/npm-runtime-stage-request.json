@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "enabled": true,
-  "version": "2.0.5",
+  "version": "2.0.6",
   "npmTag": "latest",
   "publicationMode": "stage",
-  "requestedAt": "2026-10-04",
-  "purpose": "Stage Mecord Connect runtime 2.0.5 with completed non-benchmark runtime hardening: semantic and visual browser recovery, first-class epistemic uncertainty, universal capability and reconciliation contracts, durable lifecycle limits, accurate failure taxonomy, and large-environment proof. Final npm activation remains an explicit owner-authenticated action."
+  "requestedAt": "2026-10-24",
+  "purpose": "Stage source-exact Mecord Connect 2.0.6 after final merged-main CI and signed native/provenance checks. Includes Control Center one-time browser login, accessible 39-tab visual verification, preserved Account Portal 2.0, and original-host P0 relay recovery hardening. Historical receipt limitations and temporarily deferred two-device testing remain disclosed. Final npm publication still requires owner 2FA approval."
 }
