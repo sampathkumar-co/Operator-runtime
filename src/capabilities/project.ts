@@ -20,7 +20,11 @@ export class ProjectInspectProvider implements CapabilityProvider {
   readonly name = 'project.semantic';
   #scope: PathScope;
 
-  constructor(options: { allowedRoots: string[] }) { this.#scope = new PathScope(options.allowedRoots); }
+  constructor(options: { allowedRoots: string[]; windowsPathLeaseExecutable?: string }) {
+    this.#scope = new PathScope(options.allowedRoots, {
+      ...(options.windowsPathLeaseExecutable ? { windowsPathLeaseExecutable: options.windowsPathLeaseExecutable } : {})
+    });
+  }
   supports(action: ActionRequest): boolean { return action.capability === 'project.inspect'; }
   score(): CapabilityScore { return SCORE; }
 
@@ -29,8 +33,11 @@ export class ProjectInspectProvider implements CapabilityProvider {
     const root = await this.#scope.resolveExisting(String(action.input.path ?? ''));
     const names = await fs.readdir(root);
     const has = (name: string) => names.includes(name);
-    const packageJson = await maybeJson(path.join(root, 'package.json'));
-    const pyproject = await maybeText(path.join(root, 'pyproject.toml'), 32 * 1024);
+    // Resolve each manifest independently under the approved scope. Merely
+    // validating the project directory cannot authorize symlinked children.
+    const packageText = await maybeScopedText(this.#scope, path.join(root, 'package.json'), 4 * 1024 * 1024);
+    const packageJson = parseOptionalJson(packageText);
+    const pyproject = await maybeScopedText(this.#scope, path.join(root, 'pyproject.toml'), 32 * 1024, true);
 
     const completeOutput = {
       root,
@@ -63,11 +70,59 @@ export class ProjectInspectProvider implements CapabilityProvider {
   }
 }
 
-async function maybeJson(filePath: string): Promise<unknown | null> {
-  try { return JSON.parse(await fs.readFile(filePath, 'utf8')); } catch { return null; }
+function parseOptionalJson(content: string | null): unknown | null {
+  if (content === null) return null;
+  try { return JSON.parse(content); } catch (error) {
+    if (error instanceof SyntaxError) return null;
+    throw error;
+  }
 }
-async function maybeText(filePath: string, max: number): Promise<string | null> {
-  try { return (await fs.readFile(filePath, 'utf8')).slice(0, max); } catch { return null; }
+
+/** Read a bounded manifest through the existing per-file path authority boundary. */
+async function maybeScopedText(
+  scope: PathScope, filePath: string, maxBytes: number, prefixOnly = false
+): Promise<string | null> {
+  try {
+    await fs.lstat(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+
+  try {
+    return await scope.withExisting(filePath, async (resolved) => {
+      const handle = await fs.open(resolved, 'r');
+      try {
+        const stat = await handle.stat();
+        if (!stat.isFile()) {
+          throw new OperatorError('PROJECT_MANIFEST_NOT_FILE', 'Project manifest is not a regular file.');
+        }
+        if (!prefixOnly && stat.size > maxBytes) {
+          throw new OperatorError('PROJECT_MANIFEST_TOO_LARGE', 'Project manifest exceeds the safe inspection limit.');
+        }
+        // Never use unbounded readFile on a project-controlled manifest. A
+        // concurrently growing file cannot force a memory-unbounded read.
+        const limit = maxBytes + (prefixOnly ? 0 : 1);
+        const buffer = Buffer.alloc(limit);
+        let used = 0;
+        while (used < limit) {
+          const { bytesRead } = await handle.read(buffer, used, limit - used, used);
+          if (bytesRead === 0) break;
+          used += bytesRead;
+        }
+        if (!prefixOnly && used > maxBytes) {
+          throw new OperatorError('PROJECT_MANIFEST_TOO_LARGE', 'Project manifest exceeds the safe inspection limit.');
+        }
+        return buffer.toString('utf8', 0, used);
+      } finally {
+        await handle.close();
+      }
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    // Never convert an authorization or path-lease denial to missing metadata.
+    throw error;
+  }
 }
 
 const DEFAULT_PROJECT_INSPECT_BYTES = 49_152;
