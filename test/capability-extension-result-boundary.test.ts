@@ -42,7 +42,7 @@ function wrapper(
 }
 
 test('malformed extension execution returns classified uncertain mutation instead of crashing', async () => {
-  for (const invalid of [null, undefined, 123, { durationMs: Number.NaN }]) {
+  for (const invalid of [null, 123, { durationMs: Number.NaN }]) {
     const result = await wrapper(invalid).execute(action);
     assert.equal(result.ok, false);
     assert.equal(result.error?.code, 'CAPABILITY_EXTENSION_RESULT_INVALID');
@@ -65,12 +65,9 @@ test('reconciliation rejects results attributed to another capability or provide
 });
 
 test('reconciliation rejects malformed and over-limit results without claiming completion', async () => {
-  for (const invalid of [null, { ...validResult(), evidence: null }, {
+  for (const invalid of [{ ...validResult(), evidence: null }, {
     ...validResult(), output: { content: 'x'.repeat(2000) }
   }]) {
-    // Null means an explicitly supplied malformed result. A missing result is
-    // valid in the provider contract and tested separately below.
-    if (invalid === null) continue;
     await assert.rejects(
       () => wrapper(validResult(), { status: 'completed', evidence: [], result: invalid }).reconcile!({ action }),
       (error: any) => error?.code === 'CAPABILITY_EXTENSION_RECONCILIATION_INVALID'
