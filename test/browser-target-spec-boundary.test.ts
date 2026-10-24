@@ -55,3 +55,14 @@ test('missing target retains pre-existing empty-selector semantics for outer act
     role: undefined, name: undefined, renderedColor: undefined
   });
 });
+
+test('prototype-inherited selector names are never accepted as defined fields', () => {
+  for (const invalid of [
+    { role: 'button', toString: 'shadow-selector' },
+    { role: 'button', constructor: 'mutated-constructor' },
+    JSON.parse('{"role":"button","__proto__":"shadow-selector"}')
+  ]) {
+    assert.throws(() => normalizeTargetSpec(invalid),
+      (error: any) => error?.code === 'INVALID_BROWSER_TARGET');
+  }
+});
