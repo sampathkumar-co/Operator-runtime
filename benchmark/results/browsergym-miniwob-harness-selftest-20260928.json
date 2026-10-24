@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "runId": "browsergym-miniwob-harness-selftest-20260928",
+  "classification": "environment-and-scorer-self-test",
+  "notAMecordAgentScore": true,
+  "runner": {
+    "os": "ubuntu-22.04",
+    "python": "3.12",
+    "browsergymMiniwob": "0.14.3",
+    "miniwobPlusPlusCommit": "7fd85d71a4b60325c6585396ec4f48377d049838"
+  },
+  "task": "browsergym/miniwob.click-test",
+  "environmentReset": {
+    "ok": true,
+    "resetMs": 2687.696,
+    "goalPresent": true,
+    "observationKeys": [
+      "active_page_index",
+      "axtree_object",
+      "chat_messages",
+      "dom_object",
+      "elapsed_time",
+      "extra_element_properties",
+      "focused_element_bid",
+      "goal",
+      "goal_object",
+      "last_action",
+      "last_action_error",
+      "open_pages_titles",
+      "open_pages_urls",
+      "screenshot",
+      "url"
+    ]
+  },
+  "scorerSelfTest": {
+    "action": "click('13')",
+    "clickableCandidateCount": 1,
+    "reward": 1.0,
+    "terminated": true,
+    "truncated": false,
+    "lastActionError": "",
+    "ok": true
+  },
+  "githubActions": {
+    "runId": 36465396396,
+    "jobId": 109074082473
+  },
+  "notes": [
+    "The action is intentionally deterministic and is only a harness/scorer validation.",
+    "This result must never be reported as Mecord task success or a leaderboard score.",
+    "A Mecord score begins only when Mecord itself selects and executes benchmark actions under the frozen protocol."
+  ]
+}
