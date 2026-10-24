@@ -219,7 +219,7 @@ export class EvaluationStore {
   async compare(input: {
     baseline: { runtimeVersion?: string; sourceCommit?: string };
     candidate: { runtimeVersion?: string; sourceCommit?: string };
-    thresholds?: Partial<Record<'verifiedSuccessRate' | 'falseSuccessRate' | 'recoveryRate' | 'humanInterventionRate' | 'averageLatencyMs' | 'averageCostMicros', number>>;
+    thresholds?: Partial<Record<'verifiedSuccessRate' | 'falseSuccessRate' | 'recoveryRate' | 'humanInterventionRate' | 'averageLatencyMs' | 'p50TaskLatencyMs' | 'p95TaskLatencyMs' | 'averageCostMicros', number>>;
   }): Promise<EvaluationRegression> {
     const baseline = await this.summary(input.baseline);
     const candidate = await this.summary(input.candidate);
@@ -239,6 +239,10 @@ export class EvaluationStore {
     compareHigher('recoveryRate', baseline, candidate, threshold.recoveryRate, improved, regressed);
     compareLower('humanInterventionRate', baseline, candidate, threshold.humanInterventionRate, improved, regressed);
     compareLower('averageLatencyMs', baseline, candidate, threshold.averageLatencyMs, improved, regressed);
+    // Average latency can improve while a small set of real tasks regresses.
+    // Use the existing deterministic percentile estimator on matched cohorts.
+    compareLower('p50TaskLatencyMs', baseline, candidate, threshold.p50TaskLatencyMs, improved, regressed);
+    compareLower('p95TaskLatencyMs', baseline, candidate, threshold.p95TaskLatencyMs, improved, regressed);
     compareLower('averageCostMicros', baseline, candidate, threshold.averageCostMicros, improved, regressed);
     return { improved, regressed, baseline, candidate };
   }
@@ -300,7 +304,8 @@ export class EvaluationStore {
     const candidate = summarize([...candidateCohort.values()]);
     const threshold = {
       verifiedSuccessRate: 0.005, falseSuccessRate: 0.001, recoveryRate: 0.01,
-      humanInterventionRate: 0.01, averageLatencyMs: 50, averageCostMicros: 1000,
+      humanInterventionRate: 0.01, averageLatencyMs: 50,
+      p50TaskLatencyMs: 50, p95TaskLatencyMs: 50, averageCostMicros: 1000,
       ...(input.thresholds ?? {})
     };
     const improved: string[] = [];
