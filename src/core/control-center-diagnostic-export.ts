@@ -15,8 +15,6 @@ const ISSUE_CODES = new Set([
 ]);
 const APPROVAL_KEYS = ['pending','approved','inUse','consumed','denied','expired'] as const;
 const RELAY_STATES = new Set(['ONLINE','OFFLINE','DEGRADED','CONNECTED','DISCONNECTED','UNKNOWN']);
-const STATE = Symbol('untrusted');
-
 function object(input: unknown): Record<string, unknown> {
   return input !== null && typeof input === 'object' && !Array.isArray(input)
     ? input as Record<string, unknown> : {};
