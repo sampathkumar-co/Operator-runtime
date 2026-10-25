@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkpointCurrentCheckout } from './wave4-source-readiness.mjs';
@@ -26,7 +27,8 @@ function base64Bytes(value, label, maximum = 32 * 1024) {
   return bytes;
 }
 export function validateOwnerApprovedPublication({
-  readiness, signedJsonBase64, detachedSignatureBase64, publicKeyPem, nowMs = Date.now()
+  readiness, signedJsonBase64, detachedSignatureBase64, publicKeyPem,
+  expectedPinnedKeySha256, nowMs = Date.now()
 }) {
   if (!readiness || readiness.totalTasks !== 134 || readiness.sourceChecklistPending !== 0 ||
       readiness.sourceChecklistAccepted !== 134 || readiness.releaseAuthorization !== 'NOT_GRANTED' ||
@@ -42,6 +44,12 @@ export function validateOwnerApprovedPublication({
   let key;
   try { key = crypto.createPublicKey(publicKeyPem); }
   catch { fail('invalid owner public key'); }
+  const actualSpkiSha256 = crypto.createHash('sha256')
+    .update(key.export({ format: 'der', type: 'spki' })).digest('hex');
+  if (typeof expectedPinnedKeySha256 !== 'string' || !/^[0-9a-f]{64}$/.test(expectedPinnedKeySha256) ||
+      actualSpkiSha256 !== expectedPinnedKeySha256) {
+    fail('owner signer is not source-pinned or trust anchor is not enrolled');
+  }
   if (key.asymmetricKeyType !== 'ed25519' || !crypto.verify(null, messageBytes, key, signature)) {
     fail('owner release attestation signature invalid');
   }
@@ -91,11 +99,16 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     repository: process.env.GITHUB_REPOSITORY,
     token: process.env.GITHUB_TOKEN
   });
+  const trust = JSON.parse(await fs.readFile(new URL('../certification/wave4-owner-key.json', import.meta.url), 'utf8'));
+  if (trust.schemaVersion !== 1 || trust.status !== 'ENROLLED_AND_REVIEWED') {
+    fail('release approval signer has not been enrolled in reviewed source');
+  }
   const certified = validateOwnerApprovedPublication({
     readiness,
     signedJsonBase64: process.env.OPERATOR_WAVE4_RELEASE_ATTESTATION_B64,
     detachedSignatureBase64: process.env.OPERATOR_WAVE4_RELEASE_SIGNATURE_B64,
-    publicKeyPem: process.env.OPERATOR_WAVE4_RELEASE_PUBLIC_KEY_PEM
+    publicKeyPem: process.env.OPERATOR_WAVE4_RELEASE_PUBLIC_KEY_PEM,
+    expectedPinnedKeySha256: trust.publicKeySpkiSha256
   });
   process.stdout.write(JSON.stringify(certified) + '\n');
 }
