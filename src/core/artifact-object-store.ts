@@ -88,15 +88,29 @@ export class PresignedHttpsArtifactBlobBackend implements ArtifactBlobBackend {
 async function readBoundedResponse(response:ArtifactFetchResponse,declaredSize?:number):Promise<Buffer>{
   if(response.body&&typeof response.body.getReader==='function'){
     const reader=response.body.getReader();
-    const chunks:Buffer[]=[]; let total=0;
+    const chunks:Buffer[]=[]; let total=0,chunkCount=0,emptyChunks=0;
+    // Even streams under the byte cap can never finish if a broken transport
+    // returns unlimited empty chunks. Keep an independent bounded read count.
+    const fail=async(message:string):Promise<never>=>{
+      try{await reader.cancel?.('artifact stream rejected');}catch{}
+      throw new OperatorError('ARTIFACT_SIZE_INVALID',message);
+    };
     while(true){
       const part=await reader.read();
       if(part.done)break;
-      const chunk=Buffer.from(part.value??[]);
+      chunkCount++;
+      if(chunkCount>65536)await fail('Artifact stream exceeds the bounded chunk count.');
+      if(!(part.value instanceof Uint8Array))await fail('Artifact stream must return typed binary chunks.');
+      const chunk=Buffer.from(part.value as Uint8Array);
+      if(chunk.byteLength===0){
+        emptyChunks++;
+        if(emptyChunks>4)await fail('Artifact stream made no forward progress.');
+        continue;
+      }
+      emptyChunks=0;
       total+=chunk.byteLength;
-      if(total>MAX_BYTES){
-        try{await reader.cancel?.('artifact size limit exceeded');}catch{}
-        throw new OperatorError('ARTIFACT_SIZE_INVALID','Object artifact stream exceeds the bounded size limit.');
+      if(total>MAX_BYTES||(declaredSize!==undefined&&total>declaredSize)){
+        await fail('Object artifact stream exceeds its bounded declared size.');
       }
       chunks.push(chunk);
     }
