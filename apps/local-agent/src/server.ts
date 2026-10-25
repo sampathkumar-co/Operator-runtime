@@ -13,6 +13,8 @@ import type { DurableSagaKernel } from '../../../src/core/durable-saga.ts';
 import type { AuditLog } from '../../../src/core/audit.ts';
 import type { TaskStore } from '../../../src/core/task-store.ts';
 import type { TaskOrchestrator, SemanticTaskGoal, SubmitTaskOptions } from '../../../src/core/task-orchestrator.ts';
+import type { TrustedReviewedModelTaskIntake } from '../../../src/core/trusted-reviewed-model-task-intake.ts';
+import type { ModelGoalProposalRequest } from '../../../src/core/model-goal-proposal.ts';
 import type { TeamCoordinator, TeamRole, TeamWorkInput } from '../../../src/core/team-coordinator.ts';
 import type { ProcedureMemoryStore } from '../../../src/core/procedure-memory.ts';
 import { validateWorldObservation, type WorldModelStore } from '../../../src/core/world-model.ts';
@@ -118,6 +120,10 @@ export function createLocalAgentServer(options: {
   audit?: AuditLog;
   tasks?: TaskStore;
   taskOrchestrator?: TaskOrchestrator;
+  /** Optional private proposal/one-use native review adapter. Never installed by default. */
+  modelTaskIntake?: TrustedReviewedModelTaskIntake;
+  /** Trusted request-bound identity, never read from a JSON-supplied principal. */
+  resolveModelPrincipal?: (request: http.IncomingMessage) => Promise<string | null> | string | null;
   teams?: TeamCoordinator;
   procedures?: ProcedureMemoryStore;
   world?: WorldModelStore;
@@ -1980,6 +1986,70 @@ export function createLocalAgentServer(options: {
         send(res, 200, { ok: true, mission });
       } catch (error) {
         send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_WORK_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    // Optional model assistance does not add public MCP tools. The endpoint
+    // is local-agent bearer-only, never Control Center cookie or relay-claimed
+    // principal authority, and it cannot dispatch a task.
+    if ((pathname === '/v1/model-proposals' || pathname === '/v1/model-proposals/confirm') && req.method === 'POST') {
+      if (!options.modelTaskIntake || !options.resolveModelPrincipal) {
+        send(res, 503, { ok: false, error: { code: 'MODEL_TASK_INTAKE_NOT_CONFIGURED' } });
+        return;
+      }
+      if (relayRequest || !timingSafeTokenMatch(req.headers.authorization, options.token)) {
+        send(res, 403, { ok: false, error: { code: 'MODEL_TASK_LOCAL_AUTH_REQUIRED' } });
+        return;
+      }
+      if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+        send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED' } });
+        return;
+      }
+      try {
+        const principal = await options.resolveModelPrincipal(req);
+        if (typeof principal !== 'string' || principal.length === 0) {
+          send(res, 403, { ok: false, error: { code: 'MODEL_TASK_TRUSTED_PRINCIPAL_REQUIRED' } });
+          return;
+        }
+        const body = await readJson(req) as Record<string, unknown>;
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          throw new OperatorError('MODEL_TASK_REQUEST_INVALID', 'Expected JSON object.');
+        }
+        if (pathname === '/v1/model-proposals') {
+          if (Object.keys(body).some(key => !['request', 'allowModelTransmission'].includes(key))
+            || body.allowModelTransmission !== true) {
+            throw new OperatorError('MODEL_TASK_REQUEST_INVALID', 'Explicit scoped opt-in required.');
+          }
+          const proposal = await options.modelTaskIntake.propose({
+            principal,
+            request: body.request as ModelGoalProposalRequest,
+            allowModelTransmission: true,
+            signal: emergencyExecutionGeneration.signal
+          });
+          if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+            send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED' } });
+            return;
+          }
+          send(res, 200, { ok: true, ...proposal, executionStarted: false });
+          return;
+        }
+        if (Object.keys(body).some(key => !['proposalId', 'proposalDigest', 'reviewProof'].includes(key))) {
+          throw new OperatorError('MODEL_TASK_REQUEST_INVALID', 'Review request contains unsupported fields.');
+        }
+        // Native proof validation and one-use consumption happen inside the
+        // injected trusted intake. The response is a queued task, never a run.
+        const confirmation = await options.modelTaskIntake.confirm({
+          principal,
+          proposalId: body.proposalId as string,
+          proposalDigest: body.proposalDigest as string,
+          reviewProof: body.reviewProof
+        });
+        send(res, 202, { ok: true, ...confirmation, executionStarted: false });
+      } catch {
+        // Native reviewers and model transports can throw arbitrary content.
+        // Do not copy credentials, prompts, proofs or error strings to HTTP.
+        send(res, 409, { ok: false, error: { code: 'MODEL_TASK_INTAKE_REJECTED' } });
       }
       return;
     }
