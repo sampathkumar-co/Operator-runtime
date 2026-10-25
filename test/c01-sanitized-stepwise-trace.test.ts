@@ -69,7 +69,6 @@ test('C01 no new dispatch after a prior uncertain effect, even with apparently s
  a.steps[1].sideEffectState='uncertain';
  const later={...a.steps[1],sequence:3,phase:'DISPATCH',actionOrdinal:2};
  a.steps.push(later);
- await assert.doesNotReject(async()=>{});
  assert.throws(()=>createSanitizedEvaluationTrace(a),/Uncertain prior side effect/);
 });
 test('C01 malformed optional fields, wrong run identity, nonsequential events and invented scopes fail closed',()=>{
