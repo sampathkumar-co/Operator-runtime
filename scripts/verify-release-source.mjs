@@ -13,16 +13,22 @@ function fail(message) {
 }
 
 export function validateReleaseSourceEvidence({ sha, pullRequests, workflowRuns }) {
-  const commitSha = String(sha ?? '').trim().toLowerCase();
+  // Release authority is not a general-purpose stringification boundary.
+  // Reject coercible objects rather than allowing user-defined toString() to
+  // forge a GitHub commit SHA supplied to this source-matched certification.
+  const commitSha = typeof sha === 'string' ? sha.trim().toLowerCase() : '';
   if (!/^[0-9a-f]{40}$/.test(commitSha)) fail('Release source SHA must be a full 40-character commit SHA.');
   if (!Array.isArray(pullRequests)) fail('Release source pull-request evidence is missing.');
   if (!Array.isArray(workflowRuns)) fail('Release source workflow evidence is missing.');
 
   const mergedPullRequests = pullRequests.filter((pr) =>
-    pr?.state === 'closed' &&
-    Boolean(pr?.merged_at) &&
-    pr?.base?.ref === 'main' &&
-    String(pr?.merge_commit_sha ?? '').toLowerCase() === commitSha
+    pr && typeof pr === 'object' && !Array.isArray(pr) &&
+    Number.isSafeInteger(pr.number) && pr.number > 0 &&
+    pr.state === 'closed' &&
+    typeof pr.merged_at === 'string' && Number.isFinite(Date.parse(pr.merged_at)) &&
+    pr.base && typeof pr.base === 'object' && !Array.isArray(pr.base) &&
+    pr.base.ref === 'main' &&
+    typeof pr.merge_commit_sha === 'string' && pr.merge_commit_sha.toLowerCase() === commitSha
   );
   if (mergedPullRequests.length < 1) {
     fail('Release source commit must be the exact merge commit of a merged pull request into main.');
@@ -37,9 +43,11 @@ export function validateReleaseSourceEvidence({ sha, pullRequests, workflowRuns 
         run?.path === workflowPath &&
         run?.event === 'push' &&
         run?.head_branch === 'main' &&
-        String(run?.head_sha ?? '').toLowerCase() === commitSha
+        typeof run?.head_sha === 'string' && run.head_sha.toLowerCase() === commitSha &&
+        Number.isSafeInteger(run.id) && run.id > 0 &&
+        typeof run.created_at === 'string' && Number.isFinite(Date.parse(run.created_at))
       )
-      .sort((a, b) => String(b?.created_at ?? '').localeCompare(String(a?.created_at ?? '')));
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
     const run = candidates[0];
     if (!run) fail(`Release source is missing required ${workflowName} push evidence from ${workflowPath}.`);
     if (run.status !== 'completed' || run.conclusion !== 'success') {
