@@ -287,3 +287,40 @@ test('C05 native confirmation accepts only literal boolean true, never truthy pr
   assert.equal((await intake.confirm(review)).taskId, 'queued-task');
   assert.equal(submits, 1);
 });
+
+test('C05 Stop while refreshing post-model approved scope cannot mint a review receipt', async () => {
+  let releaseRefresh!: () => void;
+  const refresh = new Promise<void>(resolve => { releaseRefresh = resolve; });
+  let secondRead!: () => void;
+  const secondReadStarted = new Promise<void>(resolve => { secondRead = resolve; });
+  let reads = 0, submitted = 0;
+  const model = new BoundedModelGoalInference({
+    modelId: 'injected-model', maxOutputTokens: 256, maxCostMicros: 0, timeoutMs: 1000,
+    ledger: { async reserve() { return { reservationId: 'reserved' }; }, async finalize() {} },
+    generator: { async generate() { return { text: JSON.stringify(modelResponse) }; } }
+  });
+  const intake = new TrustedReviewedModelTaskIntake({
+    model, authority: {
+      async currentApprovedScope() {
+        reads++;
+        if (reads === 2) { secondRead(); await refresh; }
+        return scope;
+      },
+      async verifyTrustedReview() { return true; },
+      async submitReviewedTask() {
+        submitted++;
+        return { id: 'should-not-submit', executionStarted: false as const };
+      }
+    }
+  });
+  const stop = new AbortController();
+  const pending = intake.propose({
+    principal: 'trusted-local-owner', request: scope, allowModelTransmission: true,
+    signal: stop.signal
+  });
+  await secondReadStarted;
+  stop.abort('EMERGENCY_STOPPED');
+  releaseRefresh();
+  await assert.rejects(pending, (error: any) => error?.code === 'TASK_MODEL_INFERENCE_ABORTED');
+  assert.equal(submitted, 0);
+});
