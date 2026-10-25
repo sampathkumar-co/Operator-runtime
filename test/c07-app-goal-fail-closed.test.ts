@@ -129,3 +129,29 @@ test('C07 a later failed goal attempt supersedes earlier physical fallback proof
   task.execution!.records.push(mutation('verify-app-target', 300, 'FAILED'));
   assert.equal(verifyGoalOutcomeTruth(task).ok, false);
 });
+
+test('C07 a newer failed or unfinished initial UIA inspection supersedes earlier matching no-op proof', () => {
+  for (const status of ['FAILED', 'BLOCKED', 'STARTED'] as const) {
+    const task = fixture();
+    assert.equal(verifyGoalOutcomeTruth(task).ok, true);
+    const later = observation('inspect-app-target', 300, 400, {
+      uiaElements: [{ automationIdHash: digest('editor'), valueHash: digest('ready') }]
+    });
+    later.state = status;
+    if (status === 'STARTED') delete later.finishedAt;
+    task.execution!.records.push(later);
+    assert.equal(verifyGoalOutcomeTruth(task).ok, false, status);
+  }
+});
+
+test('C07 the latest successfully observed initial value is the only no-op evidence', () => {
+  const task = fixture();
+  task.execution!.records.push(observation('inspect-app-target', 300, 400, {
+    uiaElements: [{ automationIdHash: digest('editor'), valueHash: digest('changed') }]
+  }));
+  assert.equal(verifyGoalOutcomeTruth(task).ok, false);
+  task.execution!.records.push(observation('inspect-app-target', 500, 600, {
+    uiaElements: [{ automationIdHash: digest('editor'), valueHash: digest('ready') }]
+  }));
+  assert.equal(verifyGoalOutcomeTruth(task).ok, true);
+});
