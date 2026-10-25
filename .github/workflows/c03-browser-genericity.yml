@@ -1,0 +1,54 @@
+name: C03 Shipping Browser Independence
+
+on:
+  pull_request:
+    paths:
+      - 'src/capabilities/browser-*.ts'
+      - 'src/core/task-orchestrator.ts'
+      - 'src/core/model-goal-proposal.ts'
+      - 'src/core/reviewed-model-goal.ts'
+      - 'apps/local-agent/src/runtime-factory.ts'
+      - 'apps/mcp-server/src/public-tools.ts'
+      - 'certification/wave0/miniwob-125-v0143.json'
+      - 'scripts/c03-browser-genericity.mjs'
+      - 'test/c03-browser-genericity.test.ts'
+      - '.github/workflows/c03-browser-genericity.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/capabilities/browser-*.ts'
+      - 'src/core/task-orchestrator.ts'
+      - 'src/core/model-goal-proposal.ts'
+      - 'src/core/reviewed-model-goal.ts'
+      - 'apps/local-agent/src/runtime-factory.ts'
+      - 'apps/mcp-server/src/public-tools.ts'
+      - 'certification/wave0/miniwob-125-v0143.json'
+      - 'scripts/c03-browser-genericity.mjs'
+      - 'test/c03-browser-genericity.test.ts'
+      - '.github/workflows/c03-browser-genericity.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  shipping-browser-no-benchmark-special-cases:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Reject benchmark-specific shipping browser branches
+        run: node --experimental-strip-types --test test/c03-browser-genericity.test.ts
+      - name: Emit checked source SHA digests without pretending to run BrowserGym
+        run: node scripts/c03-browser-genericity.mjs > "$RUNNER_TEMP/browser-genericity.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: c03-source-only-genericity-${{ github.sha }}
+          path: ${{ runner.temp }}/browser-genericity.json
+          retention-days: 30
+          if-no-files-found: error
