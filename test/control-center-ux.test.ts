@@ -204,3 +204,42 @@ test('guided onboarding completes only after a verified task', () => {
   assert.equal(complete.nextStep, undefined);
   assert.ok(complete.steps.every((step) => step.status === 'COMPLETE'));
 });
+
+test('C10 recovery never recommends retry from a missing execution phase after possible dispatch', () => {
+  for (const executionPhase of [undefined, 'dispatched', 'effect_observed', 'reconciled'] as const) {
+    const model = buildRecoveryCenterModel([{
+      actionId: 'unknown-phase' + (executionPhase ?? '-missing'),
+      capability: 'browser.interact',
+      retryable: true,
+      sideEffectState: 'none',
+      executionPhase,
+      updatedAt: NOW
+    }]);
+    assert.equal(model.items[0]?.recommendedAction, 'ESCALATE', String(executionPhase));
+    assert.equal(model.items[0]?.requiresFreshApproval, false);
+  }
+});
+
+test('C10 confirmed pre-dispatch failure and proven not-applied effects can request separately approved retry', () => {
+  const model = buildRecoveryCenterModel([
+    {
+      actionId: 'pre-dispatch', capability: 'browser.interact',
+      retryable: true, sideEffectState: 'none',
+      executionPhase: 'pre_dispatch', updatedAt: NOW
+    },
+    {
+      actionId: 'reconciled-not-applied', capability: 'browser.interact',
+      retryable: true, sideEffectState: 'none',
+      executionPhase: 'dispatched', reconciliationStatus: 'not_applied', updatedAt: NOW
+    },
+    {
+      actionId: 'inconsistent-completed', capability: 'browser.interact',
+      retryable: true, sideEffectState: 'none',
+      executionPhase: 'pre_dispatch', reconciliationStatus: 'completed', updatedAt: NOW
+    }
+  ]);
+  assert.equal(model.items.find(x => x.actionId === 'pre-dispatch')?.recommendedAction, 'RETRY');
+  assert.equal(model.items.find(x => x.actionId === 'reconciled-not-applied')?.recommendedAction, 'RETRY');
+  assert.equal(model.items.find(x => x.actionId === 'inconsistent-completed')?.recommendedAction, 'ESCALATE');
+  assert.equal(model.items.find(x => x.actionId === 'pre-dispatch')?.requiresFreshApproval, true);
+});
