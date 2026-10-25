@@ -394,8 +394,9 @@ function validateExecution(input: unknown): TaskExecution {
   const modelReservedCostMicros = raw.modelReservedCostMicros === undefined
     ? 0
     : boundedInteger(raw.modelReservedCostMicros, 0, maxSteps * 1_000_000, 'execution modelReservedCostMicros');
-  if (modelCallCount === 0 && (modelReservedTokens !== 0 || modelReservedCostMicros !== 0)) {
-    throw corrupt('execution nonzero model reservations require at least one charged model call.');
+  if ((modelCallCount === 0 && (modelReservedTokens !== 0 || modelReservedCostMicros !== 0))
+    || (modelCallCount > 0 && modelReservedTokens < modelCallCount)) {
+    throw corrupt('execution model reservations must match a charged model call and its minimum token allowance.');
   }
   const dispatchedActions = raw.dispatchedActions === undefined
     ? stepCount
