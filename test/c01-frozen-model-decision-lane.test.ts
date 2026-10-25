@@ -47,7 +47,7 @@ test('C01 Lane A never exposes oracle answers to the model decision callback', a
 test('C01 wrong choice is model failure, unsupported output is schema failure', async () => {
   const wrong = await runFrozenModelDecisionLane(args({decide:async ()=>'publish'}));
   assert.equal(wrong.oracleMatches,0);
-  assert.equal(wrong.results[0]?.failureStage,'none');
+  assert.equal(wrong.results[0]?.failureStage,'model');
   assert.equal(wrong.results[0]?.matchedOracle,false);
   const invalid = await runFrozenModelDecisionLane(args({decide:async ()=>({action:'inspect'})}));
   assert.equal(invalid.oracleMatches,0);
