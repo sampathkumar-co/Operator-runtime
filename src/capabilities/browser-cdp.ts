@@ -31,6 +31,26 @@ const SCORE: CapabilityScore = {
   interactionCost: 0.01
 };
 
+/** Browser target identity must not be derived from object/array coercion. */
+function optionalTargetId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(value)) {
+    throw new OperatorError('INVALID_BROWSER_TARGET', 'Browser targetId must be an exact bounded target identity.');
+  }
+  return value;
+}
+function requiredTargetId(value: unknown): string {
+  const id = optionalTargetId(value);
+  if (!id) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
+  return id;
+}
+function exactDelta(value: unknown): number | undefined {
+  return value === undefined ? 0 : typeof value === 'number' ? value : undefined;
+}
+function optionalCoordinate(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
 const MAX_TABS = 100;
 const MAX_CDP_DISCOVERY_BYTES = 1024 * 1024;
 
@@ -162,9 +182,9 @@ export class BrowserCdpProvider implements CapabilityProvider {
   ): Promise<ProviderReconciliationResult> {
     try {
       if (action.capability === 'browser.navigate') {
-        const requestedUrl = validateNavigationUrl(String(action.input.url ?? ''));
+        const requestedUrl = validateNavigationUrl(action.input.url);
         const tabs = await this.#listTargets(context.signal);
-        const requestedTargetId = typeof action.input.targetId === 'string' ? action.input.targetId : undefined;
+        const requestedTargetId = optionalTargetId(action.input.targetId);
         if (requestedTargetId) {
           const target = tabs.find((item) => item.id === requestedTargetId);
           if (target && typeof target.url === 'string' && sameDestination(target.url, requestedUrl)) {
@@ -187,7 +207,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
       }
 
       if (action.capability === 'browser.tab.close') {
-        const targetId = String(action.input.targetId ?? '');
+        const targetId = optionalTargetId(action.input.targetId);
         if (!targetId) return browserReconciliation('uncertain', 'Tab-close reconciliation requires targetId.');
         const exists = (await this.#listTargets(context.signal)).some((item) => item.id === targetId);
         return exists
@@ -196,7 +216,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
       }
 
       if (action.capability === 'browser.tab.focus') {
-        const targetId = String(action.input.targetId ?? '');
+        const targetId = optionalTargetId(action.input.targetId);
         if (!targetId) return browserReconciliation('uncertain', 'Tab-focus reconciliation requires targetId.');
         const tabs = await this.#listTargets(context.signal);
         const target = tabs.find((item) => item.id === targetId);
@@ -210,7 +230,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
       }
 
       if (action.capability === 'browser.interact') {
-        const targetId = String(action.input.targetId ?? '');
+        const targetId = optionalTargetId(action.input.targetId);
         const expect = action.input.expect;
         if (!targetId || !expect || typeof expect !== 'object' || Array.isArray(expect)) {
           return browserReconciliation('uncertain', 'Generic browser interaction has no explicit post-state verification contract.');
@@ -246,7 +266,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
 
   async #inspect(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
     const tabs = await this.#listTargets(signal);
-    const targetId = typeof action.input.targetId === 'string' ? action.input.targetId : undefined;
+    const targetId = optionalTargetId(action.input.targetId);
     if (!targetId) {
       return {
         ok: true,
@@ -284,9 +304,15 @@ export class BrowserCdpProvider implements CapabilityProvider {
   }
 
   async #navigate(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
-    const url = validateNavigationUrl(String(action.input.url ?? ''));
+    const url = validateNavigationUrl(action.input.url);
+    if (action.input.newTab !== undefined && typeof action.input.newTab !== 'boolean') {
+      throw new OperatorError('INVALID_BROWSER_TAB_MODE', 'newTab must be an exact Boolean.');
+    }
     const newTab = action.input.newTab === true;
-    const requestedTargetId = typeof action.input.targetId === 'string' ? action.input.targetId : undefined;
+    const requestedTargetId = optionalTargetId(action.input.targetId);
+    if (newTab && requestedTargetId) {
+      throw new OperatorError('INVALID_BROWSER_TAB_MODE', 'newTab cannot refer to an existing targetId.');
+    }
 
     let target: CdpTarget;
     if (newTab) {
@@ -330,8 +356,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
   }
 
   async #focusTab(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
-    const targetId = String(action.input.targetId ?? '');
-    if (!targetId) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
+    const targetId = requiredTargetId(action.input.targetId);
     const tabs = await this.#listTargets(signal);
     const target = requireTarget(tabs, targetId);
     const response = await fetch(new URL(`/json/activate/${encodeURIComponent(targetId)}`, this.#endpoint), {
@@ -359,8 +384,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
   }
 
   async #closeTab(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
-    const targetId = String(action.input.targetId ?? '');
-    if (!targetId) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
+    const targetId = requiredTargetId(action.input.targetId);
     requireTarget(await this.#listTargets(signal), targetId);
     const response = await fetch(new URL(`/json/close/${encodeURIComponent(targetId)}`, this.#endpoint), {
       redirect: 'error',
@@ -386,8 +410,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
   }
 
   async #verify(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
-    const targetId = String(action.input.targetId ?? '');
-    if (!targetId) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
+    const targetId = requiredTargetId(action.input.targetId);
     const rawExpect = action.input.expect && typeof action.input.expect === 'object' && !Array.isArray(action.input.expect)
       ? action.input.expect as JsonMap
       : {};
@@ -455,9 +478,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
   }
 
   async #interact(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
-    const targetId = String(action.input.targetId ?? '');
-    if (!targetId) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
-    const operation = String(action.input.operation ?? '');
+    const targetId = requiredTargetId(action.input.targetId);
+    const operation = typeof action.input.operation === 'string' ? action.input.operation : '';
     if (!['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll', 'type', 'select', 'set_value', 'select_date', 'key_press', 'hotkey', 'keyboard_text', 'format_text', 'select_text_range'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation is not a supported bounded browser interaction.');
 
     const targetSpec = normalizeTargetSpec(action.input.target);
@@ -469,37 +491,37 @@ export class BrowserCdpProvider implements CapabilityProvider {
       throw new OperatorError('INVALID_BROWSER_TARGET', 'drag_between requires observed source and destination refs from the same current observation context.');
     }
     const deltaOperation = ['drag', 'drag_by', 'resize', 'scroll'].includes(operation);
-    const deltaX = deltaOperation ? Number(action.input.deltaX ?? 0) : undefined;
-    const deltaY = deltaOperation ? Number(action.input.deltaY ?? 0) : undefined;
+    const deltaX = deltaOperation ? exactDelta(action.input.deltaX) : undefined;
+    const deltaY = deltaOperation ? exactDelta(action.input.deltaY) : undefined;
     if (deltaOperation && (!Number.isFinite(deltaX) || !Number.isFinite(deltaY) || Math.abs(deltaX!) > 2000 || Math.abs(deltaY!) > 2000 || (deltaX === 0 && deltaY === 0))) {
       throw new OperatorError(operation === 'scroll' ? 'INVALID_BROWSER_SCROLL' : 'INVALID_BROWSER_DRAG', 'Drag/resize/scroll requires non-zero finite deltaX/deltaY within 2000 CSS pixels.');
     }
     if (operation === 'scroll' && !targetSpec.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'scroll requires an observed target ref.');
     if (operation === 'resize' && !targetSpec.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'resize requires an observed semantic target ref.');
     if (operation === 'format_text') {
-      const format = String(action.input.value ?? '').toLowerCase();
-      const formatScope = String(action.input.scope ?? 'all').toLowerCase();
+      const format = typeof action.input.value === 'string' ? action.input.value.toLowerCase() : '';
+      const formatScope = action.input.scope === undefined ? 'all' : typeof action.input.scope === 'string' ? action.input.scope.toLowerCase() : '';
       if (!targetSpec.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'format_text requires an observed editable target ref.');
       if (!['bold', 'italic', 'italics', 'underline', 'underlined'].includes(format) || !['all', 'selection'].includes(formatScope)) {
         throw new OperatorError('INVALID_BROWSER_FORMAT', 'format_text supports bold, italic, or underline with scope all or selection.');
       }
     }
     if (operation === 'keyboard_text') {
-      const text = String(action.input.value ?? '');
+      const text = typeof action.input.value === 'string' ? action.input.value : '';
       if (!targetSpec.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'keyboard_text requires an observed target ref.');
       if (!text.length || text.length > 4096 || Buffer.byteLength(text, 'utf8') > 16 * 1024) throw new OperatorError('INVALID_BROWSER_TEXT', 'keyboard_text requires 1-4096 characters and at most 16 KiB UTF-8.');
     }
     if (operation === 'select_date') {
-      const requestedDate = String(action.input.value ?? '');
+      const requestedDate = typeof action.input.value === 'string' ? action.input.value : '';
       if (!targetSpec.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'select_date requires an observed target ref.');
       if (!/^\d{4}-\d{2}-\d{2}$/.test(requestedDate)) throw new OperatorError('INVALID_BROWSER_DATE', 'select_date requires an ISO YYYY-MM-DD value.');
     }
     const hasRatioPoint = operation === 'click_relative' && (action.input.xRatio !== undefined || action.input.yRatio !== undefined);
     const hasPixelPoint = operation === 'click_relative' && (action.input.xPx !== undefined || action.input.yPx !== undefined);
-    const xRatio = hasRatioPoint ? Number(action.input.xRatio) : undefined;
-    const yRatio = hasRatioPoint ? Number(action.input.yRatio) : undefined;
-    const xPx = hasPixelPoint ? Number(action.input.xPx) : undefined;
-    const yPx = hasPixelPoint ? Number(action.input.yPx) : undefined;
+    const xRatio = hasRatioPoint ? optionalCoordinate(action.input.xRatio) : undefined;
+    const yRatio = hasRatioPoint ? optionalCoordinate(action.input.yRatio) : undefined;
+    const xPx = hasPixelPoint ? optionalCoordinate(action.input.xPx) : undefined;
+    const yPx = hasPixelPoint ? optionalCoordinate(action.input.yPx) : undefined;
     if (operation === 'click_relative' && (
       !targetSpec.ref || hasRatioPoint === hasPixelPoint
       || (hasRatioPoint && (!Number.isFinite(xRatio) || !Number.isFinite(yRatio) || xRatio! < 0 || xRatio! > 1 || yRatio! < 0 || yRatio! > 1))
