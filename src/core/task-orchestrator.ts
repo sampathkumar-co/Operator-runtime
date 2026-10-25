@@ -118,6 +118,7 @@ export class TaskOrchestrator {
   #planners: Map<string, TaskPlanner>;
   #active = new Map<string, Promise<TaskCapsule>>();
   #controllers = new Map<string, AbortController>();
+  #planningControllers = new Map<string, AbortController>();
   #controlRequests = new Map<string, 'PAUSED' | 'CANCELLED'>();
   #stateWriteTails = new Map<string, Promise<void>>();
   #executeAction: (action: ActionRequest, permissions: PermissionProfile, context?: CapabilityExecutionContext) => Promise<ActionResult>;
@@ -394,39 +395,84 @@ export class TaskOrchestrator {
           return await this.#fail(task, 'TASK_INTELLIGENCE_RETRIEVAL_FAILED', error instanceof Error ? error.message : String(error), assertLease);
         }
       }
+      const planningController = new AbortController();
+      this.#planningControllers.set(task.id, planningController);
+      const planningSignal = AbortSignal.any([signal, planningController.signal]);
+      const reserveModelBudget = async (maxTokens: number): Promise<void> => {
+        if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 100_000) {
+          throw new OperatorError('TASK_MODEL_BUDGET_INVALID', 'Model token reservation must be a positive bounded integer.');
+        }
+        if (planningSignal.aborted) {
+          throw new OperatorError('TASK_PLANNER_ABORTED', 'Stopped planner cannot reserve another model call.');
+        }
+        const available = taskDecisionBudget(current, this.#wallNow());
+        if (available.modelCalls.remaining < 1 || available.tokens.remaining < maxTokens ||
+            available.elapsedMs.remaining < 1) {
+          throw new OperatorError('TASK_MODEL_BUDGET_EXHAUSTED', 'Durable task model budget is exhausted.');
+        }
+        // Charge before transmitting the model prompt. Timeouts, provider
+        // refusal and crashes never silently refund an uncertain call.
+        current.modelCallCount = (current.modelCallCount ?? 0) + 1;
+        current.modelReservedTokens = (current.modelReservedTokens ?? 0) + maxTokens;
+        const control = await this.#persistRunState(task, assertLease);
+        if (control || planningSignal.aborted) {
+          throw new OperatorError('TASK_PLANNER_ABORTED', 'Model budget reserved but execution was stopped before model dispatch.');
+        }
+      };
       const context: TaskPlannerContext = {
         task,
         goal,
         recentEvents,
         intelligence,
         budget,
-        decisionBudget
+        decisionBudget,
+        signal: planningSignal,
+        reserveModelBudget
       };
       let decision: PlannerDecision;
       let rawDecision: unknown;
       try {
-        rawDecision = planner.next(context);
+        rawDecision = await boundedPlannerCall(() => planner.next(context), budget.activeDeadlineMsRemaining, planningSignal);
         decision = validatePlannerDecision(rawDecision);
       } catch (error) {
+        if (planningSignal.aborted) {
+          const requested = this.#controlRequests.get(task.id);
+          if (requested) return await this.#setControlState(task.id, requested);
+          const controlled = await this.#store.get(task.id);
+          if (controlled.state === 'PAUSED' || controlled.state === 'CANCELLED') return controlled;
+        }
         const issue = error instanceof Error ? error.message : String(error);
+        const canRepair = Boolean(planner.repair) && !(error instanceof OperatorError &&
+          ['TASK_PLANNER_TIMEOUT', 'TASK_PLANNER_ABORTED'].includes(error.code));
         await this.#recordRejectedDecision(task, rawDecision, 'TASK_PLANNER_FAILED', issue, {
-          retryAllowed: Boolean(planner.repair), reobserveAllowed: false, replanAllowed: Boolean(planner.repair)
+          retryAllowed: canRepair, reobserveAllowed: false, replanAllowed: canRepair
         }, assertLease);
-        if (!planner.repair) return await this.#fail(task, 'TASK_PLANNER_FAILED', issue, assertLease);
+        if (!canRepair || !planner.repair) return await this.#fail(task, 'TASK_PLANNER_FAILED', issue, assertLease);
         try {
-          decision = validatePlannerDecision(planner.repair(context, rawDecision, issue));
+          const repaired = await boundedPlannerCall(
+            () => planner.repair!(context, rawDecision, issue),
+            Math.max(1, activeDeadline - this.#monotonicNow()), planningSignal
+          );
+          decision = validatePlannerDecision(repaired);
           task.evidence.push(evidence('planner_repair', 'info', 'Planner repaired one malformed typed decision before execution.', {
-            plannerId: planner.id,
-            issue,
-            remainingSteps: context.budget.remainingSteps
+            plannerId: planner.id, issue, remainingSteps: context.budget.remainingSteps
           }));
         } catch (repairError) {
-          const issue = repairError instanceof Error ? repairError.message : String(repairError);
-          await this.#recordRejectedDecision(task, rawDecision, 'TASK_PLANNER_FAILED', issue, {
+          if (planningSignal.aborted) {
+            const requested = this.#controlRequests.get(task.id);
+            if (requested) return await this.#setControlState(task.id, requested);
+          }
+          const reason = repairError instanceof Error ? repairError.message : String(repairError);
+          await this.#recordRejectedDecision(task, rawDecision, 'TASK_PLANNER_FAILED', reason, {
             retryAllowed: false, reobserveAllowed: false, replanAllowed: false
           }, assertLease);
-          return await this.#fail(task, 'TASK_PLANNER_FAILED', issue, assertLease);
+          return await this.#fail(task, 'TASK_PLANNER_FAILED', reason, assertLease);
         }
+      } finally {
+        // A provider which ignores cancellation may retain the callback.
+        // Revoke reservation access after ANY terminal planner decision.
+        planningController.abort('TASK_PLANNER_SETTLED');
+        this.#planningControllers.delete(task.id);
       }
       if (decision.type === 'complete') {
         const verification = verifyTaskCompletion(task);
@@ -1164,6 +1210,7 @@ export class TaskOrchestrator {
     for (const taskId of taskIds) {
       this.#controlRequests.set(taskId, 'CANCELLED');
       this.#controllers.get(taskId)?.abort('EMERGENCY_STOPPED');
+      this.#planningControllers.get(taskId)?.abort('EMERGENCY_STOPPED');
     }
     return taskIds;
   }
@@ -1219,6 +1266,8 @@ export class TaskOrchestrator {
     const previous = this.#controlRequests.get(taskId);
     this.#controlRequests.set(taskId, state);
     if (state === 'CANCELLED') this.#controllers.get(taskId)?.abort();
+    // Pause is non-destructive: abort pending model planning, not a dispatched action.
+    this.#planningControllers.get(taskId)?.abort(state === 'PAUSED' ? 'TASK_PAUSED' : 'TASK_CANCELLED');
     try {
       // A terminal/paused state is not returned until the active provider has
       // settled and the runner has durably recorded its side-effect truth.
@@ -2743,6 +2792,31 @@ function sameTaskSubmission(
 function deterministicActionId(taskId: string, stepKey: string, attempt: number, inputHash: string): string {
   return `task-${sha256(`${taskId}\0${stepKey}\0${attempt}\0${inputHash}`)}`;
 }
+async function boundedPlannerCall<T>(
+  invoke: () => T | Promise<T>, remainingMs: number, signal: AbortSignal
+): Promise<T> {
+  if (signal.aborted) throw new OperatorError('TASK_PLANNER_ABORTED', 'Planner decision was cancelled.');
+  const timeoutMs = Math.max(1, Math.min(30_000, Math.floor(remainingMs)));
+  return await new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (settle: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      settle();
+    };
+    const onAbort = () => finish(() => reject(new OperatorError('TASK_PLANNER_ABORTED', 'Planner decision was cancelled.')));
+    const timer = setTimeout(() => finish(() => reject(new OperatorError('TASK_PLANNER_TIMEOUT', 'Planner decision exceeded its bounded deadline.'))), timeoutMs);
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    if (!settled) void Promise.resolve().then(invoke).then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error))
+    );
+  });
+}
+
 function validatePlannerDecision(value: unknown): PlannerDecision {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new OperatorError('TASK_PLANNER_OUTPUT_INVALID', 'Planner decision must be a structured object.');
   const record = value as Record<string, unknown>;
