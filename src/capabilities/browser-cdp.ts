@@ -137,7 +137,7 @@ const MAX_CDP_DISCOVERY_BYTES = 1024 * 1024;
 /** Never let an oversized or malformed loopback DevTools endpoint allocate an
  * unbounded discovery response. This is independent of the inspect output cap.
  */
-async function boundedDiscoveryJson(response: Response): Promise<unknown> {
+export async function boundedDiscoveryJson(response: Response): Promise<unknown> {
   const declared = response.headers.get('content-length');
   if (declared && /^\d+$/.test(declared) && Number(declared) > MAX_CDP_DISCOVERY_BYTES) {
     throw new OperatorError('CDP_DISCOVERY_TOO_LARGE', 'Browser target discovery exceeds the permitted byte limit.');
@@ -146,11 +146,26 @@ async function boundedDiscoveryJson(response: Response): Promise<unknown> {
   const reader = response.body.getReader();
   const chunks: Buffer[] = [];
   let bytes = 0;
+  let reads = 0;
+  let consecutiveEmpty = 0;
   try {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      if (!value) continue;
+      // Bounded bytes alone cannot stop a malicious endpoint that streams
+      // empty chunks forever. Reject type confusion and stalled progress.
+      if (++reads > 65_536 || !(value instanceof Uint8Array)) {
+        await reader.cancel();
+        throw new OperatorError('CDP_DISCOVERY_INVALID', 'Browser discovery stream has invalid or unbounded chunks.');
+      }
+      if (value.byteLength === 0) {
+        if (++consecutiveEmpty > 4) {
+          await reader.cancel();
+          throw new OperatorError('CDP_DISCOVERY_STALLED', 'Browser discovery stream made no progress.');
+        }
+        continue;
+      }
+      consecutiveEmpty = 0;
       bytes += value.byteLength;
       if (bytes > MAX_CDP_DISCOVERY_BYTES) {
         await reader.cancel();
