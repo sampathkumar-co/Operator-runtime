@@ -35,6 +35,7 @@ export class PerceptionProvider implements CapabilityProvider {
   async execute(action: ActionRequest, _context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
+      if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Perception provider does not support this capability.');
       if (action.capability === 'perception.observe') {
         const observations = normalizeObservations(action.input);
         const published: Array<{ nodeId: string; sceneKey: string; semanticId?: string; claimCount: number }> = [];

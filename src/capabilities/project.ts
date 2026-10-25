@@ -30,6 +30,7 @@ export class ProjectInspectProvider implements CapabilityProvider {
 
   async execute(action: ActionRequest): Promise<ActionResult> {
     const started = performance.now();
+    if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Project inspect provider does not support this capability.');
     const root = await this.#scope.resolveExisting(String(action.input.path ?? ''));
     const names = await fs.readdir(root);
     const has = (name: string) => names.includes(name);

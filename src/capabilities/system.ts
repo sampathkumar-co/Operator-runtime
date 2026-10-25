@@ -1,6 +1,7 @@
 import os from 'node:os';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
+import { OperatorError } from '../core/errors.ts';
 
 const SCORE: CapabilityScore = {
   reliability: 1,
@@ -19,6 +20,7 @@ export class SystemInspectProvider implements CapabilityProvider {
 
   async execute(action: ActionRequest): Promise<ActionResult> {
     const started = performance.now();
+    if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Computer inspect provider does not support this capability.');
     const output = {
       hostname: os.hostname(),
       platform: os.platform(),

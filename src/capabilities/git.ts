@@ -54,6 +54,7 @@ export class GitProvider implements CapabilityProvider {
   score(): CapabilityScore { return SCORE; }
 
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
+    if (!this.supports(action)) return gitFailure(action, 'UNSUPPORTED_ACTION', 'Git read provider does not support this capability.');
     try { resolveSupportedGitExecutable(process.env); } catch (error) {
       const op = error instanceof OperatorError
         ? error

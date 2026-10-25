@@ -227,6 +227,7 @@ export class ProcessProvider implements CapabilityProvider {
 
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
+    if (!this.supports(action)) return failure(action, this.name, started, 'UNSUPPORTED_ACTION', 'Process provider does not support this capability.');
     if (action.capability === 'terminal.session') return await this.#withSessionLock(async () => {
       await this.#ensureInitialized();
       return await this.#session(action, started, context);

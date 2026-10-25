@@ -59,6 +59,7 @@ export class GitWriteProvider implements CapabilityProvider {
   async execute(action: ActionRequest): Promise<ActionResult> {
     const started = performance.now();
     try {
+      if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Git write provider does not support this capability.');
       resolveSupportedGitExecutable(gitEnvironment({}));
       const operation = String(action.input.operation ?? '');
       if (!['stage', 'unstage', 'commit'].includes(operation)) {
