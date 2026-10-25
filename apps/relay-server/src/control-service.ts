@@ -96,7 +96,7 @@ export class RelayControlService {
             send(response, 200, { ok: true, devices });
             return;
           }
-          const deviceId = validUuid(String(body.deviceId ?? ''), 'deviceId');
+          const deviceId = validUuid(body.deviceId, 'deviceId');
           await this.#accounts.removeDevice(accountId, deviceId, 'account-owner-request');
           send(response, 200, { ok: true, status: 'removed', deviceId });
           return;
@@ -104,10 +104,10 @@ export class RelayControlService {
         if (request.url === '/v1/account/default-device') {
           const defaultBody = await readJson(request) as { principal?: unknown; accountId?: unknown; deviceId?: unknown };
           const principal = defaultBody.principal === undefined ? undefined : validPrincipal(defaultBody.principal);
-          const explicitAccountId = defaultBody.accountId === undefined ? undefined : validUuid(String(defaultBody.accountId), 'accountId');
+          const explicitAccountId = defaultBody.accountId === undefined ? undefined : validUuid(defaultBody.accountId, 'accountId');
           if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required.');
           const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
-          const deviceId = validUuid(String(defaultBody.deviceId ?? ''), 'deviceId');
+          const deviceId = validUuid(defaultBody.deviceId, 'deviceId');
           await this.#hub.setDefaultDevice(accountId, deviceId);
           send(response, 200, { ok: true, defaultDevice: { status: 'selected' } });
           return;
@@ -115,11 +115,11 @@ export class RelayControlService {
         if (request.url === '/v1/device-enrollment/claim') {
           const claimBody = await readJson(request) as { principal?: unknown; accountId?: unknown; userCode?: unknown; makeDefault?: unknown };
           const principal = claimBody.principal === undefined ? undefined : validPrincipal(claimBody.principal);
-          const explicitAccountId = claimBody.accountId === undefined ? undefined : validUuid(String(claimBody.accountId), 'accountId');
+          const explicitAccountId = claimBody.accountId === undefined ? undefined : validUuid(claimBody.accountId, 'accountId');
           if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required for device enrollment claim.');
           const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
           if (!this.#enrollments || !this.#devices) throw new OperatorError('DEVICE_ENROLLMENT_UNAVAILABLE', 'Device enrollment authority is not configured.');
-          const userCode = boundedText(String(claimBody.userCode ?? ''), 32, 'device enrollment code');
+          const userCode = boundedText(claimBody.userCode, 32, 'device enrollment code');
           const reserved = await this.#enrollments.reserve(userCode, accountId);
           const peer = await this.#enrollments.peerForClaim(reserved.enrollmentId, accountId);
           await this.#accounts.assertCanBindDevice(accountId, reserved.deviceId);
@@ -161,15 +161,15 @@ export class RelayControlService {
           waitMs?: unknown;
         };
         const principal = body.principal === undefined ? undefined : validPrincipal(body.principal);
-        const explicitAccountId = body.accountId === undefined ? undefined : validUuid(String(body.accountId), 'accountId');
+        const explicitAccountId = body.accountId === undefined ? undefined : validUuid(body.accountId, 'accountId');
         if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required.');
         const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
         const developerBoundary = body.developerBoundary === true;
         if (developerBoundary && !this.#developerAccounts.has(accountId)) {
           throw new OperatorError('DEVELOPER_ACCOUNT_REQUIRED', 'This relay request requires an explicitly entitled Mecord developer account.');
         }
-        const deviceId = body.deviceId === undefined ? undefined : validUuid(String(body.deviceId), 'deviceId');
-        const projectKey = body.projectKey === undefined ? undefined : validProjectKey(String(body.projectKey));
+        const deviceId = body.deviceId === undefined ? undefined : validUuid(body.deviceId, 'deviceId');
+        const projectKey = body.projectKey === undefined ? undefined : validProjectKey(body.projectKey);
         const action = validAction(body.action);
         const publicBoundary = body.publicBoundary === true;
         const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
@@ -313,15 +313,15 @@ export class RelayControlService {
       accountId?: unknown; principal?: unknown; deviceId?: unknown; projectKey?: unknown; task?: unknown; developerBoundary?: unknown; waitMs?: unknown;
     };
     const principal = body.principal === undefined ? undefined : validPrincipal(body.principal);
-    const explicitAccountId = body.accountId === undefined ? undefined : validUuid(String(body.accountId), 'accountId');
+    const explicitAccountId = body.accountId === undefined ? undefined : validUuid(body.accountId, 'accountId');
     if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required.');
     const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
     const developerBoundary = body.developerBoundary === true;
     if (developerBoundary && !this.#developerAccounts.has(accountId)) {
       throw new OperatorError('DEVELOPER_ACCOUNT_REQUIRED', 'This task request requires an explicitly entitled Mecord developer account.');
     }
-    const requestedDeviceId = body.deviceId === undefined ? undefined : validUuid(String(body.deviceId), 'deviceId');
-    const requestedProjectKey = body.projectKey === undefined ? undefined : validProjectKey(String(body.projectKey));
+    const requestedDeviceId = body.deviceId === undefined ? undefined : validUuid(body.deviceId, 'deviceId');
+    const requestedProjectKey = body.projectKey === undefined ? undefined : validProjectKey(body.projectKey);
     const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
     const task = validTaskRelayRequest(body.task);
     const bindingKey = taskBindingKey(task.taskId);
@@ -373,12 +373,12 @@ export class RelayControlService {
       accountId?: unknown; principal?: unknown; deviceId?: unknown; projectKey?: unknown; query?: unknown; waitMs?: unknown;
     };
     const principal = body.principal === undefined ? undefined : validPrincipal(body.principal);
-    const explicitAccountId = body.accountId === undefined ? undefined : validUuid(String(body.accountId), 'accountId');
+    const explicitAccountId = body.accountId === undefined ? undefined : validUuid(body.accountId, 'accountId');
     if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required.');
     const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
     if (!this.#developerAccounts.has(accountId)) throw new OperatorError('DEVELOPER_ACCOUNT_REQUIRED', 'Knowledge inspection requires an explicitly entitled Mecord developer account.');
-    const deviceId = body.deviceId === undefined ? undefined : validUuid(String(body.deviceId), 'deviceId');
-    const projectKey = body.projectKey === undefined ? undefined : validProjectKey(String(body.projectKey));
+    const deviceId = body.deviceId === undefined ? undefined : validUuid(body.deviceId, 'deviceId');
+    const projectKey = body.projectKey === undefined ? undefined : validProjectKey(body.projectKey);
     const query = validKnowledgeRelayQuery(body.query);
     const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
     const dispatched = await this.#dispatchWithRecovery({
@@ -415,12 +415,12 @@ export class RelayControlService {
       operation?: unknown; resourceRequirements?: unknown; waitMs?: unknown;
     };
     const principal = body.principal === undefined ? undefined : validPrincipal(body.principal);
-    const explicitAccountId = body.accountId === undefined ? undefined : validUuid(String(body.accountId), 'accountId');
+    const explicitAccountId = body.accountId === undefined ? undefined : validUuid(body.accountId, 'accountId');
     if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required.');
     const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
     if (!this.#developerAccounts.has(accountId)) throw new OperatorError('DEVELOPER_ACCOUNT_REQUIRED', 'Digital operations require an explicitly entitled Mecord developer account.');
-    const requestedDeviceId = body.deviceId === undefined ? undefined : validUuid(String(body.deviceId), 'deviceId');
-    const projectKey = body.projectKey === undefined ? undefined : validProjectKey(String(body.projectKey));
+    const requestedDeviceId = body.deviceId === undefined ? undefined : validUuid(body.deviceId, 'deviceId');
+    const projectKey = body.projectKey === undefined ? undefined : validProjectKey(body.projectKey);
     const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
     const operation = validOperationRelayRequest(body.operation);
     const bindingKey = operationBindingKey(operation.operationId);
@@ -753,11 +753,11 @@ type ValidatedTaskRelayRequest = {
 function validTaskRelayRequest(input: unknown): ValidatedTaskRelayRequest {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task request is required.');
   const raw = input as Record<string, unknown>;
-  const operation = String(raw.operation ?? '');
+  const operation = (typeof raw.operation === 'string' ? raw.operation : '');
   if (operation === 'submit') {
     if (!raw.request || typeof raw.request !== 'object' || Array.isArray(raw.request)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task submit request is required.');
     const request = structuredClone(raw.request as Record<string, unknown>);
-    const taskId = validUuid(String(request.requestId ?? ''), 'task requestId');
+    const taskId = validUuid(request.requestId, 'task requestId');
     if (!request.goal || typeof request.goal !== 'object' || Array.isArray(request.goal)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task goal is required.');
     const encoded = canonicalJson(request);
     if (Buffer.byteLength(encoded, 'utf8') > 256 * 1024) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task request exceeds the bounded size.');
@@ -770,7 +770,7 @@ function validTaskRelayRequest(input: unknown): ValidatedTaskRelayRequest {
   }
   if (!['inspect', 'run', 'pause', 'resume', 'cancel'].includes(operation)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task operation is invalid.');
   if (raw.approvedActionId !== undefined) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Remote task control cannot carry local approval authority.');
-  const taskId = validUuid(String(raw.taskId ?? ''), 'taskId');
+  const taskId = validUuid(raw.taskId, 'taskId');
   return {
     operation: operation as ValidatedTaskRelayRequest['operation'],
     taskId,
@@ -784,7 +784,7 @@ function taskRequiredCapabilities(goalInput: unknown, allowWorkflow = true): str
     throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task goal is invalid.');
   }
   const goal = goalInput as Record<string, unknown>;
-  switch (String(goal.kind ?? '')) {
+  switch ((typeof goal.kind === 'string' ? goal.kind : '')) {
     case 'controlled-file-change': return ['file.list', 'file.create', 'file.read', 'file.replace', 'git.status'];
     case 'trusted-project-command': return ['project.inspect', 'project.command.inspect', 'project.command.run'];
     case 'project-quality-gate': return ['project.inspect', 'project.command.inspect', 'project.command.run', 'project.transaction.run'];
@@ -807,7 +807,7 @@ function taskRequiredCapabilities(goalInput: unknown, allowWorkflow = true): str
 function validKnowledgeRelayQuery(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'knowledge query must be an object.');
   const raw = structuredClone(input as Record<string, unknown>);
-  const kind = String(raw.kind ?? '');
+  const kind = (typeof raw.kind === 'string' ? raw.kind : '');
   if (!['procedures', 'procedure-query', 'world-entity', 'world-fact', 'world-trace', 'world-list', 'optimizer'].includes(kind)) {
     throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'knowledge query kind is invalid.');
   }
@@ -837,11 +837,11 @@ type ValidatedOperationRelayRequest = {
 function validOperationRelayRequest(input: unknown): ValidatedOperationRelayRequest {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation request is required.');
   const raw = input as Record<string, unknown>;
-  const operation = String(raw.operation ?? '');
+  const operation = (typeof raw.operation === 'string' ? raw.operation : '');
   if (operation === 'submit') {
     if (!raw.request || typeof raw.request !== 'object' || Array.isArray(raw.request)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation submit request is required.');
     const request = structuredClone(raw.request as Record<string, unknown>);
-    const operationId = validUuid(String(request.requestId ?? ''), 'operation requestId');
+    const operationId = validUuid(request.requestId, 'operation requestId');
     request.requestId = operationId;
     if (request.device !== undefined) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Operation request cannot provide device advertisements.');
     const encoded = canonicalJson(request);
@@ -849,9 +849,9 @@ function validOperationRelayRequest(input: unknown): ValidatedOperationRelayRequ
     return { operation: 'submit', operationId, request, payload: { operation: 'submit', request } };
   }
   if (!['inspect', 'start', 'refresh', 'pause', 'cancel', 'promote'].includes(operation)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation control action is invalid.');
-  const operationId = validUuid(String(raw.operationId ?? ''), 'operationId');
+  const operationId = validUuid(raw.operationId, 'operationId');
   if (operation === 'promote') {
-    const verificationDigest = String(raw.verificationDigest ?? '').toLowerCase();
+    const verificationDigest = (typeof raw.verificationDigest === 'string' ? raw.verificationDigest.toLowerCase() : '');
     if (!/^[0-9a-f]{64}$/.test(verificationDigest)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation promotion requires SHA-256 verificationDigest.');
     return { operation: 'promote', operationId, payload: { operation, operationId, verificationDigest } };
   }
@@ -867,7 +867,7 @@ function operationRequiredCapabilities(request: Record<string, unknown>): string
       if (!authority || typeof authority !== 'object' || Array.isArray(authority)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation authority is invalid.');
       const capabilities = (authority as Record<string, unknown>).capabilities;
       if (!Array.isArray(capabilities) || capabilities.length < 1 || capabilities.length > 500) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation authority capabilities are invalid.');
-      for (const value of capabilities) requested.add(validName(String(value), 'operation authority capability'));
+      for (const value of capabilities) requested.add(validName(value, 'operation authority capability'));
     }
     const procedure = request.procedure;
     if (procedure !== undefined) {
@@ -875,7 +875,7 @@ function operationRequiredCapabilities(request: Record<string, unknown>): string
       const required = (procedure as Record<string, unknown>).requiredCapabilities;
       if (required !== undefined) {
         if (!Array.isArray(required) || required.length > 200) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'procedure requiredCapabilities are invalid.');
-        for (const value of required) requested.add(validName(String(value), 'procedure required capability'));
+        for (const value of required) requested.add(validName(value, 'procedure required capability'));
       }
     }
     return [...requested].sort();
@@ -890,7 +890,7 @@ function operationRequiredCapabilities(request: Record<string, unknown>): string
       const allowed = (item as Record<string, unknown>).allowedCapabilities;
       if (allowed === undefined) continue;
       if (!Array.isArray(allowed) || allowed.length > 200) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation allowedCapabilities are invalid.');
-      for (const value of allowed) capabilities.add(validName(String(value), 'allowed capability'));
+      for (const value of allowed) capabilities.add(validName(value, 'allowed capability'));
     }
   };
   if (raw.kind === 'team') collect(raw.workItems);
@@ -910,7 +910,7 @@ function validOperationResourceRequirements(input: unknown): { requiredTags: str
   const raw = input as Record<string, unknown>;
   const requiredTags = raw.requiredTags === undefined ? [] : Array.isArray(raw.requiredTags)
     ? raw.requiredTags.map((value) => {
-        const tag = String(value ?? '');
+        const tag = (typeof value === 'string' ? value : '');
         if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tag)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'resource tag is invalid.');
         return tag;
       })
@@ -1009,9 +1009,9 @@ function isTaskTransportResult(input: unknown): input is { ok: boolean; task?: R
 function validAction(input: unknown): ActionRequest {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'action is required.');
   const raw = input as Record<string, unknown>;
-  const id = validName(String(raw.id ?? ''), 'action id');
-  const capability = validName(String(raw.capability ?? ''), 'capability');
-  const risk = String(raw.risk ?? '');
+  const id = validName(raw.id, 'action id');
+  const capability = validName(raw.capability, 'capability');
+  const risk = (typeof raw.risk === 'string' ? raw.risk : '');
   if (!['read', 'write', 'external', 'system', 'destructive'].includes(risk)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Action risk is invalid.');
   if (!raw.input || typeof raw.input !== 'object' || Array.isArray(raw.input)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Action input must be an object.');
   const inputText = JSON.stringify(raw.input);
@@ -1019,8 +1019,8 @@ function validAction(input: unknown): ActionRequest {
   if (!raw.provenance || typeof raw.provenance !== 'object' || Array.isArray(raw.provenance) || (raw.provenance as any).kind !== 'chatgpt') {
     throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Relay control accepts only ChatGPT-provenance actions.');
   }
-  const target = raw.target === undefined ? undefined : boundedText(String(raw.target), 2048, 'target');
-  const taskId = raw.taskId === undefined ? undefined : validName(String(raw.taskId), 'taskId');
+  const target = raw.target === undefined ? undefined : boundedText(raw.target, 2048, 'target');
+  const taskId = raw.taskId === undefined ? undefined : validName(raw.taskId, 'taskId');
   return {
     id,
     capability,
@@ -1089,37 +1089,37 @@ function relayRecoveryDelayMs(attempt: number): number {
 }
 
 function boundedWait(input: unknown): number {
-  const value = Number(input);
-  if (!Number.isInteger(value) || value < 1_000 || value > MAX_WAIT_MS) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', `waitMs must be between 1000 and ${MAX_WAIT_MS}.`);
+  const value = input;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1_000 || value > MAX_WAIT_MS) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', `waitMs must be between 1000 and ${MAX_WAIT_MS}.`);
   return value;
 }
 
 function validPrincipal(input: unknown): AccountPrincipal {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'principal must be an object.');
   const raw = input as Record<string, unknown>;
-  const issuer = boundedText(String(raw.issuer ?? ''), 1024, 'principal issuer').trim();
-  const subject = boundedText(String(raw.subject ?? ''), 1024, 'principal subject').trim();
+  const issuer = boundedText(raw.issuer, 1024, 'principal issuer').trim();
+  const subject = boundedText(raw.subject, 1024, 'principal subject').trim();
   if (!issuer || !subject || /[\0\r\n]/.test(issuer) || /[\0\r\n]/.test(subject)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'principal is invalid.');
   return { issuer, subject };
 }
 
-function validUuid(value: string, label: string): string {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', `${label} must be a UUID.`);
+function validUuid(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', `${label} must be a UUID.`);
   return value.toLowerCase();
 }
 
-function validProjectKey(value: string): string {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'projectKey is invalid.');
+function validProjectKey(value: unknown): string {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'projectKey is invalid.');
   return value;
 }
 
-function validName(value: string, label: string): string {
-  if (!value || value.length > 256 || !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', `${label} is invalid.`);
+function validName(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !value || value.length > 256 || !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', `${label} is invalid.`);
   return value;
 }
 
-function boundedText(value: string, max: number, label: string): string {
-  if (!value || Buffer.byteLength(value, 'utf8') > max) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', `${label} is invalid.`);
+function boundedText(value: unknown, max: number, label: string): string {
+  if (typeof value !== 'string' || !value || Buffer.byteLength(value, 'utf8') > max) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', `${label} is invalid.`);
   return value;
 }
 
