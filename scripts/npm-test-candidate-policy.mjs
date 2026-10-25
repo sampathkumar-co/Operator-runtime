@@ -1,4 +1,6 @@
 import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const EXPECTED_REPOSITORY = 'sampathkumar-co/Operator-runtime';
 const SHA = /^[0-9a-f]{40}$/;
@@ -32,7 +34,7 @@ export function validateTestCandidateRequest({
   });
 }
 
-if (process.argv[1] && import.meta.url === new URL('file://' + process.argv[1]).href) {
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
   const pkg = JSON.parse(await fs.readFile(new URL('../packages/mecord-connect/package.json', import.meta.url), 'utf8'));
   const report = validateTestCandidateRequest({
     repository: process.env.GITHUB_REPOSITORY,
