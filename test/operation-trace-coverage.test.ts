@@ -112,3 +112,32 @@ test('C09 a failed terminal outcome must not be counted as verified task success
   assert.equal(report.falseCompletionCount,0);
   assert.equal(report.failed,1);
 });
+
+test('C09 stale verifier before the latest dispatch never grants terminal SLO success', () => {
+  const trace = [
+    e('REQUEST','2026-10-07T00:00:00.000Z'),
+    e('DISPATCH','2026-10-07T00:00:00.100Z'),
+    e('VERIFY','2026-10-07T00:00:00.200Z'),
+    e('DISPATCH','2026-10-07T00:00:00.300Z'),
+    e('COMPLETE','2026-10-07T00:00:00.400Z')
+  ];
+  const stale = summarizeOperationSlo(trace);
+  assert.equal(stale.completed, 1);
+  assert.equal(stale.verified, 0);
+  assert.equal(stale.falseCompletionCount, 1);
+  trace.splice(4, 0, e('VERIFY','2026-10-07T00:00:00.350Z'));
+  const fresh = summarizeOperationSlo(trace);
+  assert.equal(fresh.verified, 1);
+  assert.equal(fresh.falseCompletionCount, 0);
+});
+
+test('C09 identical-timestamp dispatch and verification cannot prove causal ordering', () => {
+  const report = summarizeOperationSlo([
+    e('REQUEST','2026-10-07T00:00:00.000Z'),
+    e('DISPATCH','2026-10-07T00:00:00.100Z'),
+    e('VERIFY','2026-10-07T00:00:00.100Z'),
+    e('COMPLETE','2026-10-07T00:00:00.200Z')
+  ]);
+  assert.equal(report.verified, 0);
+  assert.equal(report.falseCompletionCount, 1);
+});
