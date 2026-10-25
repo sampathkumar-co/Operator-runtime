@@ -52,9 +52,10 @@ export class VsCodeProvider implements CapabilityProvider {
     const started = performance.now();
     try {
       if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'VS Code provider does not support this capability.');
+      assertTypedVsCodeRequest(action);
       await this.#assertDataDirOutsideProjects();
       if (action.capability === 'vscode.inspect') {
-        const operation = String(action.input.operation ?? 'status');
+        const operation = action.input.operation ?? 'status';
         if (operation === 'version') {
           const result = await this.#run(['--version'], process.cwd(), 10_000);
           return ok(action, started, { operation, version: result.stdout.trim().split(/\r?\n/)[0] ?? '' }, [
@@ -80,7 +81,7 @@ export class VsCodeProvider implements CapabilityProvider {
         throw new OperatorError('INVALID_VSCODE_INSPECT_OPERATION', 'operation must be version, extensions, or status.');
       }
 
-      const mode = String(action.input.mode ?? 'folder');
+      const mode = action.input.mode ?? 'folder';
       const timeoutMs = boundedInteger(action.input.timeoutMs, 15_000, 1_000, 60_000);
       await fs.mkdir(this.#dataDir, { recursive: true, mode: 0o700 });
       const args = ['--new-window', '--disable-extensions', `--user-data-dir=${this.#dataDir}`];
@@ -88,14 +89,14 @@ export class VsCodeProvider implements CapabilityProvider {
       let cwd: string;
 
       if (mode === 'folder') {
-        const folder = await this.#scope.resolveExisting(String(action.input.path ?? ''));
+        const folder = await this.#scope.resolveExisting(action.input.path as string);
         const stat = await fs.stat(folder);
         if (!stat.isDirectory()) throw new OperatorError('VSCODE_FOLDER_REQUIRED', 'folder mode requires an authorized directory.');
         args.push(folder);
         cwd = folder;
         targetSummary = { mode, path: folder };
       } else if (mode === 'file' || mode === 'goto') {
-        const file = await this.#scope.resolveExisting(String(action.input.path ?? ''));
+        const file = await this.#scope.resolveExisting(action.input.path as string);
         const stat = await fs.stat(file);
         if (!stat.isFile()) throw new OperatorError('VSCODE_FILE_REQUIRED', `${mode} mode requires an authorized regular file.`);
         cwd = path.dirname(file);
@@ -109,8 +110,8 @@ export class VsCodeProvider implements CapabilityProvider {
           targetSummary = { mode, path: file };
         }
       } else if (mode === 'diff') {
-        const left = await this.#scope.resolveExisting(String(action.input.leftPath ?? ''));
-        const right = await this.#scope.resolveExisting(String(action.input.rightPath ?? ''));
+        const left = await this.#scope.resolveExisting(action.input.leftPath as string);
+        const right = await this.#scope.resolveExisting(action.input.rightPath as string);
         const [leftStat, rightStat] = await Promise.all([fs.stat(left), fs.stat(right)]);
         if (!leftStat.isFile() || !rightStat.isFile()) throw new OperatorError('VSCODE_DIFF_FILES_REQUIRED', 'diff mode requires two authorized regular files.');
         args.push('--diff', left, right);
@@ -177,15 +178,49 @@ export class VsCodeProvider implements CapabilityProvider {
   }
 }
 
+function exactVsCodePath(value: unknown, label: string): void {
+  if (typeof value !== 'string' || !value || value.length > 4096 ||
+      [...value].some(char => [0, 10, 13].includes(char.charCodeAt(0)))) {
+    throw new OperatorError('VSCODE_TARGET_INVALID', label + ' must be an exact bounded authorized path.');
+  }
+}
+function assertTypedVsCodeRequest(action: ActionRequest): void {
+  const input = action.input;
+  if (action.capability === 'vscode.inspect') {
+    if (input.operation !== undefined && (
+      typeof input.operation !== 'string' ||
+      !['version', 'extensions', 'status'].includes(input.operation)
+    )) throw new OperatorError('INVALID_VSCODE_INSPECT_OPERATION', 'VS Code inspect operation is not supported.');
+    return;
+  }
+  const mode = input.mode ?? 'folder';
+  if (typeof mode !== 'string' || !['folder', 'file', 'goto', 'diff'].includes(mode)) {
+    throw new OperatorError('INVALID_VSCODE_OPEN_MODE', 'VS Code mode must be a supported literal string.');
+  }
+  if (input.timeoutMs !== undefined && (
+    typeof input.timeoutMs !== 'number' || !Number.isSafeInteger(input.timeoutMs)
+  )) throw new OperatorError('VSCODE_TIMEOUT_INVALID', 'VS Code launch timeout requires an exact integer.');
+  if (mode === 'diff') {
+    exactVsCodePath(input.leftPath, 'leftPath');
+    exactVsCodePath(input.rightPath, 'rightPath');
+  } else {
+    exactVsCodePath(input.path, 'path');
+  }
+  if (mode === 'goto') {
+    boundedPositiveInt(input.line, 1, 1_000_000, 'line');
+    boundedPositiveInt(input.column ?? 1, 1, 1_000_000, 'column');
+  }
+}
+
 function boundedInteger(input: unknown, fallback: number, min: number, max: number): number {
-  const value = Number(input ?? fallback);
-  if (!Number.isFinite(value)) return fallback;
+  if (input !== undefined && (typeof input !== 'number' || !Number.isSafeInteger(input))) throw new OperatorError('VSCODE_TIMEOUT_INVALID', 'VS Code timeout must be an exact bounded integer.');
+  const value = input === undefined ? fallback : input;
   return Math.min(Math.max(Math.trunc(value), min), max);
 }
 
 function boundedPositiveInt(input: unknown, min: number, max: number, label: string): number {
-  const value = Number(input);
-  if (!Number.isInteger(value) || value < min || value > max) throw new OperatorError('VSCODE_POSITION_INVALID', `${label} must be an integer between ${min} and ${max}.`);
+  const value = input;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) throw new OperatorError('VSCODE_POSITION_INVALID', `${label} must be an integer between ${min} and ${max}.`);
   return value;
 }
 
