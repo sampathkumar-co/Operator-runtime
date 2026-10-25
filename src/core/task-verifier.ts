@@ -345,6 +345,14 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
   if (kind === 'app-operation') {
     const physical = lastSucceeded(records, `${prefix}operate-app-physical-fallback`);
     if (physical) {
+      // Do not resurrect an earlier completed visual fallback after a newer
+      // semantic/physical mutation or verification attempt supersedes its proof.
+      const laterGoalAttempt = records.slice(records.indexOf(physical) + 1).some((record) =>
+        record.stepKey === `${prefix}operate-app-physical-fallback` ||
+        record.stepKey === `${prefix}operate-app-target` ||
+        record.stepKey === `${prefix}verify-app-target`);
+      if (laterGoalAttempt) return outcome(true, false,
+        'Physical fallback outcome was superseded by a later operation or verification attempt.', versions(physical));
       const postcondition = asRecord(observationState(physical).postcondition);
       const ok = postcondition.dispatched === true
         && postcondition.captureLeaseConsumed === true
