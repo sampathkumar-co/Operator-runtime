@@ -111,3 +111,18 @@ test('C06 successful Git diff pagination must not copy secret-bearing subprocess
   assert.equal(output.stdout, 'diff --git a/public.txt b/public.txt');
   assert.equal(JSON.stringify(answer).includes(secret), false);
 });
+
+test('C06 a forged offset beyond available Git source cannot certify an empty terminal page', () => {
+  assert.throws(
+    () => boundedGitDiff(result('modified'), { offset: 20, maxBytes: 1024 }),
+    (error: any) => error?.code === 'GIT_INPUT_INVALID'
+  );
+  const status = { ...result(''), capability: 'git.status', output: {
+    stdout: '## main\\0?? file.txt\\0', truncated: false
+  } };
+  assert.throws(
+    () => structuredGitStatus(status, { offset: 2 }),
+    (error: any) => error?.code === 'GIT_INPUT_INVALID'
+  );
+  assert.equal((structuredGitStatus(status, { offset: 1 }).output as any).truncated, false);
+});
