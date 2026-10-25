@@ -1,0 +1,33 @@
+name: C05 Loopback Model Transport Boundaries
+
+on:
+  pull_request:
+    paths:
+      - 'src/core/loopback-chat-model-goal-generator.ts'
+      - 'test/loopback-chat-model-goal-generator.test.ts'
+      - '.github/workflows/c05-local-model-transport.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/core/loopback-chat-model-goal-generator.ts'
+      - 'test/loopback-chat-model-goal-generator.test.ts'
+      - '.github/workflows/c05-local-model-transport.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  secure-loopback-chat-transport:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - run: node --experimental-strip-types --test test/loopback-chat-model-goal-generator.test.ts test/bounded-model-goal-inference.test.ts
+      - name: Explicit non-release note
+        run: echo 'REAL_MODEL=NOT_RUN;PUBLIC_TRANSPORT=DISABLED;AUTHORITY=NOT_GRANTED;NPM=UNCHANGED'
