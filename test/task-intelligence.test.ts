@@ -29,11 +29,12 @@ test('Task intelligence retrieval is bounded, relevant, and omits raw world valu
     source: 'test', domain: 'project', evidenceDigest: digest,
     facts: { status: 'private-project-value' }, confidence: 0.9
   });
-  await procedures.recordVerified({
+  const procedure = await procedures.recordVerified({
     key: 'verified-build', title: 'Verified build', objectiveKind: 'controlled-file-change', scopeKey: root,
     steps: [{ capability: 'filesystem.write', risk: 'write', summary: 'Write the authorized file.' }],
     assumptions: [], verificationDigest: 'a'.repeat(64), verifierEvidenceDigest: 'b'.repeat(64)
   });
+  await procedures.recordOutcome(procedure.id, 'verified', 'c'.repeat(64));
   await optimizer.record('task:controlled-file-change', 'fresh-plan', { verified: true, durationMs: 10 });
   const goal = { kind: 'controlled-file-change' as const, root, path: 'a.txt', content: 'ok' };
   const task = createTask({

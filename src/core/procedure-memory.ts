@@ -10,6 +10,7 @@ const MAX_STEPS = 200;
 const MAX_ASSUMPTIONS = 100;
 const MAX_RESOURCES = 200;
 const MAX_OUTCOME_RECEIPTS = 256;
+const MIN_VERIFIED_RUNS_FOR_REUSE = 2;
 const MAX_STATE_BYTES = 8 * 1024 * 1024;
 const MAX_TTL_MS = 365 * 24 * 60 * 60_000;
 const MIN_TTL_MS = 60_000;
@@ -173,6 +174,10 @@ export class ProcedureMemoryStore {
 
     return state.procedures
       .filter((procedure) => procedure.status === 'ACTIVE')
+      // A single successful capture is only a candidate. Reuse can influence
+      // future planning, so require a second independently verified outcome
+      // before this memory is allowed to rank or select a strategy.
+      .filter((procedure) => hasIndependentRepeat(procedure))
       .filter((procedure) => Date.parse(procedure.expiresAt) > now)
       .filter((procedure) => procedure.objectiveKind === objectiveKind && procedure.scopeKey === scopeKey)
       .filter((procedure) => procedure.assumptions.every((item) => current.get(item.key) === item.fingerprint))
@@ -349,6 +354,15 @@ function procedureConfidence(procedure: VerifiedProcedure): number {
   const posterior = (procedure.verifiedRuns + 2) / (total + 4);
   const evidenceConfidence = Math.min(1, total / 10);
   return Math.round((0.5 + (posterior - 0.5) * evidenceConfidence) * 1000) / 1000;
+}
+
+function hasIndependentRepeat(procedure: VerifiedProcedure): boolean {
+  if (procedure.verifiedRuns < MIN_VERIFIED_RUNS_FOR_REUSE) return false;
+  // A changed, independently verified capture advances the procedure version.
+  // A successful reuse is independent only when its durable outcome receipt is
+  // retained. Legacy unreceipted counters alone cannot unlock future reuse.
+  return procedure.version >= MIN_VERIFIED_RUNS_FOR_REUSE
+    || (procedure.outcomeReceipts?.length ?? 0) >= 1;
 }
 
 function procedureIdentity(item: Pick<VerifiedProcedure, 'key' | 'scopeKey'>): string { return `${item.key}\0${item.scopeKey}`; }
