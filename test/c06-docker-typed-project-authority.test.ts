@@ -52,3 +52,21 @@ test('C06 Docker reconciliation of a malformed mutation returns UNCERTAIN withou
   assert.equal(result.status,'uncertain');
   assert.equal(result.result,undefined);
 });
+
+test('C06 Docker reconciliation never interprets object-coercible operation as a completed lifecycle',async()=>{
+  const provider=new DockerProvider({allowedRoots:[path.resolve('.')],
+    dockerExecutable:'/missing/docker/should/not/run'});
+  let conversions=0;
+  const imitatingOperation={toString(){conversions++;return 'start';}};
+  for(const operation of [
+    ['start'], ['stop'], imitatingOperation, 42, null, true
+  ]) {
+    const action:any={id:'forged-docker-reconcile',capability:'docker.manage',
+      risk:'system',input:{path:path.resolve('.'),operation,services:['web'],
+        expectedCurrentFingerprint:'a'.repeat(64)},provenance:{kind:'runtime'}};
+    const result=await provider.reconcile({action});
+    assert.equal(result.status,'uncertain');
+    assert.equal(result.result,undefined);
+  }
+  assert.equal(conversions,0,'Reconciliation must never execute attacker-owned coercion.');
+});
