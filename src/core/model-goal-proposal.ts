@@ -80,6 +80,7 @@ function scopes(input: ModelGoalProposalRequest) {
 type Scope = ReturnType<typeof scopes>;
 function atomic(value: unknown, scope: Scope): AtomicProposal {
   const source = object(value, 'Model atomic goal');
+  if (!Object.hasOwn(source, 'kind')) invalid('Model atomic goal must declare its own kind.');
   if (source.kind === 'browser-navigation') {
     onlyKeys(source, ['kind', 'url'], 'browser-navigation');
     const target = boundedText(source.url, 4096, 'browser target');
@@ -118,7 +119,11 @@ export function validateModelGoalProposal(
   const scope = scopes(request);
   const response = object(value, 'Model proposal');
   onlyKeys(response, ['goal', 'successConditions'], 'Model proposal');
+  if (!Object.hasOwn(response, 'goal') || !Object.hasOwn(response, 'successConditions')) {
+    invalid('Model proposal must own goal and successConditions fields.');
+  }
   const source = object(response.goal, 'Model goal');
+  if (!Object.hasOwn(source, 'kind')) invalid('Model goal must declare its own kind.');
   let goal: ValidatedModelGoal;
   if (source.kind === 'semantic-workflow') {
     onlyKeys(source, ['kind', 'steps'], 'semantic-workflow');
