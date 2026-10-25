@@ -44,6 +44,14 @@ function requiredTargetId(value: unknown): string {
   if (!id) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
   return id;
 }
+/** The source and destination of a drag must come from one current,
+ * generation-tagged semantic observation, not two different page snapshots. */
+function dragRefsShareGeneration(source: string, destination: string): boolean {
+  const pattern = /^b-([a-z0-9]+)-([a-z0-9]+)-([a-z0-9]+)$/;
+  const a = pattern.exec(source);
+  const b = pattern.exec(destination);
+  return Boolean(a && b && a[1] === b[1] && a[2] === b[2] && source !== destination);
+}
 function exactDelta(value: unknown): number | undefined {
   return value === undefined ? 0 : typeof value === 'number' ? value : undefined;
 }
@@ -487,8 +495,9 @@ export class BrowserCdpProvider implements CapabilityProvider {
       throw new OperatorError('INVALID_BROWSER_TARGET', 'Provide an observed ref, css, text, renderedColor, or role+name for semantic targeting.');
     }
     const toTargetSpec = operation === 'drag_between' ? normalizeTargetSpec(action.input.toTarget) : undefined;
-    if (operation === 'drag_between' && (!targetSpec.ref || !toTargetSpec?.ref)) {
-      throw new OperatorError('INVALID_BROWSER_TARGET', 'drag_between requires observed source and destination refs from the same current observation context.');
+    if (operation === 'drag_between' && (!targetSpec.ref || !toTargetSpec?.ref ||
+        !dragRefsShareGeneration(targetSpec.ref, toTargetSpec.ref))) {
+      throw new OperatorError('INVALID_BROWSER_TARGET', 'drag_between requires distinct source/destination refs from one current observation generation.');
     }
     const deltaOperation = ['drag', 'drag_by', 'resize', 'scroll'].includes(operation);
     const deltaX = deltaOperation ? exactDelta(action.input.deltaX) : undefined;
