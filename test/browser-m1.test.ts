@@ -648,7 +648,8 @@ test('drag verification fails on the first dispatched attempt when source and ob
     assert.equal(first.ok, false);
     assert.equal(first.error?.code, 'BROWSER_NO_PROGRESS');
     assert.equal(first.error?.executionPhase, 'effect_observed');
-    assert.equal(first.error?.sideEffectState, 'none');
+    assert.equal(first.error?.sideEffectState, 'uncertain');
+    assert.equal(first.error?.retryable, false, 'Dispatched drag must never be retried blindly after missing observable progress.');
   });
 });
 
