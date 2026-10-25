@@ -29,6 +29,7 @@ on:
 permissions:
   actions: read
   contents: write
+  issues: read
   pull-requests: read
 
 concurrency:
@@ -61,6 +62,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/verify-release-source.mjs
+
+      - name: Require signed Wave 0-4 certification and owner release approval
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          OPERATOR_WAVE4_RELEASE_ATTESTATION_B64: ${{ secrets.OPERATOR_WAVE4_RELEASE_ATTESTATION_B64 }}
+          OPERATOR_WAVE4_RELEASE_SIGNATURE_B64: ${{ secrets.OPERATOR_WAVE4_RELEASE_SIGNATURE_B64 }}
+          OPERATOR_WAVE4_RELEASE_PUBLIC_KEY_PEM: ${{ secrets.OPERATOR_WAVE4_RELEASE_PUBLIC_KEY_PEM }}
+        run: node scripts/wave4-publication-gate.mjs
 
       - name: Rust toolchain
         shell: pwsh
