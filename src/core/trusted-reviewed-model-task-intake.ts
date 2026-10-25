@@ -135,12 +135,15 @@ export class TrustedReviewedModelTaskIntake {
       denied('TASK_MODEL_REVIEW_INVALID', 'An exact pending review challenge and trusted review proof are required.');
     }
     if (input.signal?.aborted) denied('TASK_MODEL_REVIEW_DENIED', 'Model task review was stopped.');
-    if (!(await this.#authority.verifyTrustedReview({
+    const nativeApproved = await this.#authority.verifyTrustedReview({
       principal: input.principal,
       proposalId: input.proposalId,
       proposalDigest: input.proposalDigest,
       reviewProof: input.reviewProof
-    }))) {
+    });
+    // A provider returning "true", 1 or an object has NOT approved a
+    // protected operation. Only a literal independent boolean true qualifies.
+    if (nativeApproved !== true) {
       denied('TASK_MODEL_REVIEW_DENIED', 'Independent native owner/session review was denied or expired.');
     }
     // An asynchronous native reviewer can return after Stop. It must not
