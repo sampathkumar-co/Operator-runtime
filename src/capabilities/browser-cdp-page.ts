@@ -318,8 +318,21 @@ export async function collectDiagnostics(session: CdpConnection): Promise<{
   // CDP error strings and failed URLs originate in arbitrary websites. A page
   // can deliberately place OAuth codes, passwords or private document names in
   // them. Preserve actionable failure *classes*, never raw page-owned text.
+  // A shape-only expression would accept attacker-chosen values such as
+  // net::ERR_PRIVATE_API_KEY_123. Use closed browser-defined error categories.
+  const NETWORK_ERRORS = new Set([
+    'net::ERR_ABORTED', 'net::ERR_FAILED', 'net::ERR_CONNECTION_RESET',
+    'net::ERR_CONNECTION_REFUSED', 'net::ERR_CONNECTION_CLOSED',
+    'net::ERR_CONNECTION_TIMED_OUT', 'net::ERR_TIMED_OUT',
+    'net::ERR_NAME_NOT_RESOLVED', 'net::ERR_INTERNET_DISCONNECTED',
+    'net::ERR_NETWORK_CHANGED', 'net::ERR_BLOCKED_BY_CLIENT',
+    'net::ERR_BLOCKED_BY_RESPONSE', 'net::ERR_CERT_AUTHORITY_INVALID',
+    'net::ERR_CERT_DATE_INVALID', 'net::ERR_SSL_PROTOCOL_ERROR',
+    'net::ERR_EMPTY_RESPONSE', 'net::ERR_TOO_MANY_REDIRECTS',
+    'net::ERR_HTTP_RESPONSE_CODE_FAILURE', 'net::ERR_CACHE_MISS'
+  ]);
   const safeNetworkCode = (value: unknown): string => (
-    typeof value === 'string' && /^net::ERR_[A-Z0-9_]{1,80}$/.test(value)
+    typeof value === 'string' && NETWORK_ERRORS.has(value)
       ? value : 'NETWORK_ERROR_DETAILS_REDACTED'
   );
   const safeBlockedReason = (value: unknown): string | undefined => (
