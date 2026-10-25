@@ -1,0 +1,79 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { WindowsUiaProvider } from '../src/capabilities/windows-uia.ts';
+
+function nativeCapture(bytes: Buffer, source = 'region', windowId = '0xABC') {
+  return {
+    source,
+    png_base64: bytes.toString('base64'),
+    origin_x: 0, origin_y: 0,
+    source_width: 400, source_height: 300,
+    returned_width: 400, returned_height: 300,
+    scale_x: 1, scale_y: 1,
+    window_id: windowId
+  };
+}
+
+test('C04 post-input native scope/window mismatch never persists foreign screenshot or permits replay', async () => {
+  const before = Buffer.alloc(128, 1);
+  const after = Buffer.alloc(160 * 1024, 2);
+  const variants = [
+    { source: 'screen', windowId: '0xABC', code: 'INPUT_AFTER_SOURCE_CHANGED' },
+    { source: 'region', windowId: '0xFOREIGN', code: 'INPUT_AFTER_WINDOW_CHANGED' }
+  ];
+
+  for (const variant of variants) {
+    let captureCalls = 0;
+    let inputCalls = 0;
+    let artifactWrites = 0;
+    const provider = new WindowsUiaProvider({
+      platform: 'win32',
+      artifactStore: {
+        async put() {
+          artifactWrites++;
+          throw new Error('Foreign screenshot must never be stored.');
+        }
+      } as any,
+      client: {
+        async call(method: string) {
+          if (method === 'input') { inputCalls++; return { dispatched: true }; }
+          assert.equal(method, 'capture');
+          captureCalls++;
+          return captureCalls <= 2
+            ? nativeCapture(before)
+            : nativeCapture(after, variant.source, variant.windowId);
+        },
+        close() {}
+      }
+    });
+
+    try {
+      const observation = await provider.execute({
+        id: 'pre-' + variant.code, capability: 'visual.capture', risk: 'read',
+        provenance: { kind: 'runtime' },
+        input: { source: 'region', region: { x: 0, y: 0, width: 400, height: 300 } }
+      } as any);
+      assert.equal(observation.ok, true);
+      const observed = observation.output as { captureId: string; sha256: string };
+      const result = await provider.execute({
+        id: 'post-' + variant.code, capability: 'input.operate', risk: 'external',
+        provenance: { kind: 'runtime' },
+        input: {
+          operation: 'click', captureId: observed.captureId,
+          expectedSha256: observed.sha256, x: 50, y: 50
+        }
+      } as any);
+      assert.equal(inputCalls, 1, 'One physical mutation has already happened.');
+      assert.equal(captureCalls, 3, 'Post-input state is independently recaptured.');
+      assert.equal(result.ok, false, 'Changed observation identity cannot prove success.');
+      assert.equal(result.error?.code, variant.code);
+      assert.equal(result.error?.retryable, false);
+      assert.equal(result.error?.sideEffectState, 'uncertain');
+      assert.equal(result.output, undefined);
+      assert.equal(artifactWrites, 0, 'Captured foreign pixels must not be persisted.');
+      assert.equal(JSON.stringify(result).includes(after.toString('base64').slice(0,90)), false);
+    } finally {
+      await provider.close();
+    }
+  }
+});
