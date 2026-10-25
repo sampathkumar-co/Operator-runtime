@@ -402,3 +402,36 @@ test('C04 unrecognized native mutation failures are uncertain, while input valid
   assert.equal(invalid.error?.sideEffectState, undefined);
   await unknown.close();
 });
+
+test('C04 exact UIA mutation identity rejects leading/trailing whitespace instead of trimming it', async () => {
+  let sidecarCalls = 0;
+  const provider = new WindowsUiaProvider({
+    platform: 'win32',
+    client: {
+      async call() { sidecarCalls++; return { postcondition: { verified: true } }; },
+      close() {}
+    }
+  });
+  for (const selector of [
+    { automationId: ' Save' },
+    { automationId: 'Save ' },
+    { name: '\tSave\n' },
+    { className: ' Editor ' },
+    { controlType: '\nButton' }
+  ]) {
+    const result = await provider.execute({
+      id: 'uia-exact-whitespace-' + sidecarCalls, capability: 'app.operate',
+      risk: 'external', provenance, input: { operation: 'invoke', selector }
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, 'INVALID_UIA_SELECTOR');
+  }
+  assert.equal(sidecarCalls, 0, 'whitespace-ambiguous targets must not dispatch');
+  const exact = await provider.execute({
+    id: 'uia-exact-valid', capability: 'app.operate', risk: 'external', provenance,
+    input: { operation: 'invoke', selector: { automationId: 'Save' } }
+  });
+  assert.equal(exact.ok, true);
+  assert.equal(sidecarCalls, 1);
+  await provider.close();
+});
