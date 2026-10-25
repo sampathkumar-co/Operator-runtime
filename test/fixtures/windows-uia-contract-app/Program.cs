@@ -71,6 +71,17 @@ internal sealed class ContractHarnessForm : Form
             Visible = false
         };
 
+        _name = new TextBox
+        {
+            Name = "name-field", AccessibleName = "Name",
+            Width = 310, Text = "Fixture item", PlaceholderText = "Enter name"
+        };
+        _password = new TextBox
+        {
+            Name = "password-field", AccessibleName = "Private entry",
+            Width = 310, UseSystemPasswordChar = true
+        };
+
         var menu = new MenuStrip { Name = "main-menu", Dock = DockStyle.Top };
         var fileMenu = new ToolStripMenuItem("File") { Name = "file-menu" };
         fileMenu.DropDownItems.Add("Open file...", null, (_, _) => ChooseFile());
@@ -94,16 +105,6 @@ internal sealed class ContractHarnessForm : Form
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
             Padding = new Padding(20)
-        };
-        _name = new TextBox
-        {
-            Name = "name-field", AccessibleName = "Name",
-            Width = 310, Text = "Fixture item", PlaceholderText = "Enter name"
-        };
-        _password = new TextBox
-        {
-            Name = "password-field", AccessibleName = "Private entry",
-            Width = 310, UseSystemPasswordChar = true
         };
         formContent.Controls.Add(new Label { Text = "Name", AutoSize = true });
         formContent.Controls.Add(_name);
