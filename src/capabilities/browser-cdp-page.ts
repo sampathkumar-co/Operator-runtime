@@ -108,8 +108,11 @@ export function sameDestination(actualRaw: string, expectedRaw: string): boolean
   try {
     const actual = new URL(actualRaw);
     const expected = new URL(expectedRaw);
-    actual.hash = '';
-    expected.hash = '';
+    // Hash routes are real SPA destinations. Ignoring a requested fragment
+    // could report a successful navigation while the browser remains on a
+    // different client-side route, and can hide a missing server-side effect.
+    // A URL without a requested fragment remains a document-level match.
+    if (expected.hash && actual.hash !== expected.hash) return false;
     return actual.origin === expected.origin && actual.search === expected.search && (actual.pathname === expected.pathname || actual.pathname.replace(/\/$/, '') === expected.pathname.replace(/\/$/, ''));
   } catch { return false; }
 }
