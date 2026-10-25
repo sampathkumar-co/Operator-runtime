@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { GitProvider } from '../src/capabilities/git.ts';
 import test from 'node:test';
 import { OperatorRuntime } from '../src/core/runtime.ts';
 import { FilesystemProvider } from '../src/capabilities/filesystem.ts';
@@ -15,15 +17,18 @@ async function fixture(t: test.TestContext) {
     await fs.rm(root, { recursive: true, force: true });
     await fs.rm(state, { recursive: true, force: true });
   });
+  await new Promise<void>((resolve, reject) =>
+    execFile('git', ['init', '--quiet'], { cwd: root }, error => error ? reject(error) : resolve())
+  );
   const runtime = new OperatorRuntime().register(new FilesystemProvider({
     allowedRoots: [root],
     windowsPathLeaseExecutable: process.platform === 'win32'
       ? path.resolve('native/windows-path-lease/target/release/operator-windows-path-lease.exe')
       : undefined
-  }));
+  })).register(new GitProvider({ allowedRoots: [root] }));
   const store = new TaskStore(state);
   const permissions = {
-    allowedRoots: [root], allowedCapabilities: ['file.list','file.create','file.read'],
+    allowedRoots: [root], allowedCapabilities: ['file.list','file.create','file.read','git.status'],
     allowExternalWrites: false, allowSystemChanges: false, allowDestructive: false
   };
   const goal = { kind: 'controlled-file-change' as const, root, path: 'verified.txt', content: 'trusted\n' };
