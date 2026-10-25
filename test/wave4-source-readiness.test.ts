@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { WORKSTREAM_TASK_COUNTS, evaluateWave4Readiness } from '../scripts/wave4-source-readiness.mjs';
+import { WORKSTREAM_TASK_COUNTS, evaluateWave4Readiness, checkpointCurrentCheckout } from '../scripts/wave4-source-readiness.mjs';
 
 const candidateSha = 'a'.repeat(40);
 function makeIssues(all = false) {
@@ -73,4 +73,22 @@ test('C11 requires an exact candidate SHA and an open canonical parent issue', (
     /open parent/);
   const output = evaluateWave4Readiness({ candidateSha, issues: makeIssues() });
   assert.equal(output.reportSha256, evaluateWave4Readiness({ candidateSha, issues: makeIssues() }).reportSha256);
+});
+
+test('C11 source-readiness workboard cannot be replaced with an attacker-controlled repository', async () => {
+  for (const repository of [
+    'attacker/Operator-runtime',
+    'sampathkumar-co/Operator-runtime-fork',
+    'sampathkumar-co/Operator-runtime/extra',
+    '../sampathkumar-co/Operator-runtime',
+    'SAMPATHKUMAR-CO/Operator-runtime',
+    null,
+    { toString: () => 'sampathkumar-co/Operator-runtime' }
+  ]) {
+    await assert.rejects(
+      checkpointCurrentCheckout({ repository: repository as string, token: 'fake-no-network-token' }),
+      /canonical read-only repository/,
+      String(repository)
+    );
+  }
 });
