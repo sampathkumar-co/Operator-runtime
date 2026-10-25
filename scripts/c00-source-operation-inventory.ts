@@ -42,6 +42,12 @@ async function sourceTestReferences() {
 export async function buildC00SourceInventory() {
   const census = await censusCurrentGitCheckout();
   const { references, omittedOversize } = await sourceTestReferences();
+  // The minimal runtime factory intentionally omits configured optional providers.
+  // Capture all source registrations without constructing privileged instances.
+  const factorySource = await fs.readFile(new URL('../apps/local-agent/src/runtime-factory.ts', import.meta.url), 'utf8');
+  const declaredClasses = [...new Set([...factorySource.matchAll(/\.register\(new\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)]
+    .map(match => match[1]!))].sort();
+  const activeClasses = new Set(census.providers.map(provider => provider.class));
   const operations = Object.entries(CAPABILITY_RISK_RULES)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([capability, risk]) => {
@@ -80,6 +86,12 @@ export async function buildC00SourceInventory() {
     })),
     declaredCanonicalCapabilityCount: operations.length,
     providerRegistrationCount: census.providers.length,
+    sourceDeclaredProviderClasses: declaredClasses.map(className => ({
+      className,
+      presenceInMinimalRuntime: activeClasses.has(className)
+        ? 'REGISTERED_WITH_MINIMAL_CONFIG'
+        : 'SOURCE_DECLARED_BUT_NOT_REGISTERED_WITH_MINIMAL_CONFIG'
+    })),
     scannedTestFileCount: references.length,
     oversizedTestFilesNotScanned: omittedOversize,
     operations,
