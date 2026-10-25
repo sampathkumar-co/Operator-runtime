@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { buildWave0EvaluationReport } from '../scripts/wave0-evaluation.mjs';
 
 const sourceCommit = 'a'.repeat(40);
@@ -129,4 +133,42 @@ test('invalid preregistered scenario names are rejected instead of being treated
   assert.throws(() => buildWave0EvaluationReport({
     sourceCommit, preregistered: { suiteDigest: d('a'), expectedScenarioIds: invalid }
   }), /preregistered suite/);
+});
+
+test('C01 refuses fractional or precision-losing single-run cost counters', () => {
+  for (const amount of [0.25, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => buildWave0EvaluationReport({ sourceCommit,
+      records: [record('B', 'mecord_scripted', { model: 'scripted', costMicros: amount })]
+    }), /costMicros invalid or precision-losing/);
+  }
+});
+test('C01 rejects campaign aggregate cost and unauthorized effect counter overflow', () => {
+  const expensive = record('B', 'mecord_scripted', {
+    model: 'scripted', costMicros: Number.MAX_SAFE_INTEGER,
+    id: 'first', scenarioId: 'first'
+  });
+  const second = record('B', 'mecord_scripted', {
+    model: 'scripted', costMicros: 1,
+    id: 'second', scenarioId: 'second'
+  });
+  assert.throws(() => buildWave0EvaluationReport({
+    sourceCommit, records: [expensive, second]
+  }), /costMicros aggregate exceeds exact-integer range/);
+  assert.throws(() => buildWave0EvaluationReport({ sourceCommit, records: [
+    { ...expensive, costMicros: 0, unauthorizedEffects: Number.MAX_SAFE_INTEGER },
+    { ...second, costMicros: 0, unauthorizedEffects: 1 }
+  ] }), /unauthorizedEffects aggregate exceeds exact-integer range/);
+});
+test('C01 CLI bounds untrusted evidence files before parsing campaign data', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'c01-eval-input-'));
+  t.after(async () => fs.rm(dir, { recursive: true, force: true }));
+  const tooLarge = path.join(dir, 'too-large.json');
+  const handle = await fs.open(tooLarge, 'w');
+  try { await handle.truncate(32 * 1024 * 1024 + 1); } finally { await handle.close(); }
+  const run = spawnSync(process.execPath,
+    ['scripts/wave0-evaluation-report.mjs', '--input', tooLarge],
+    { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(run.error, undefined);
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /input evidence size invalid/);
 });

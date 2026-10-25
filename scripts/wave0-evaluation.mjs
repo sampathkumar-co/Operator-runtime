@@ -27,6 +27,18 @@ function nonnegativeNumber(value, label) {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) fail(`${label} invalid`);
   return value;
 }
+function boundedCounter(value, label) {
+  if (!Number.isSafeInteger(value) || value < 0) fail(`${label} invalid or precision-losing`);
+  return value;
+}
+function safeSum(records, label) {
+  return records.reduce((total, record) => {
+    const value = boundedCounter(record[label], label);
+    const next = total + value;
+    if (!Number.isSafeInteger(next)) fail(`${label} aggregate exceeds exact-integer range`);
+    return next;
+  }, 0);
+}
 export function validateWave0Record(record, sourceCommit) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) fail('record must be an object');
   const lane = record.lane;
@@ -43,7 +55,7 @@ export function validateWave0Record(record, sourceCommit) {
   for (const label of ['runnerDigest', 'modelConfigDigest', 'environmentDigest',
     'independentOracleDigest', 'resultEvidenceDigest']) digest(record[label], label);
   nonnegativeNumber(record.latencyMs, 'latencyMs');
-  nonnegativeNumber(record.costMicros, 'costMicros');
+  boundedCounter(record.costMicros, 'costMicros');
   if (!Number.isSafeInteger(record.humanInterventions) || record.humanInterventions < 0) fail('humanInterventions invalid');
   if (!Number.isSafeInteger(record.unauthorizedEffects) || record.unauthorizedEffects < 0) fail('unauthorizedEffects invalid');
   if (lane === 'B' && (record.model !== 'scripted' || record.provider === 'none')) fail('Lane B must be model-independent scripted runtime execution');
@@ -64,12 +76,12 @@ function summarize(records) {
     runs: records.length, verifiedSuccesses: records.filter(x => x.verifiedSuccess).length,
     claimedSuccesses: records.filter(x => x.claimedSuccess).length,
     falseCompletions: records.filter(x => x.claimedSuccess && !x.verifiedSuccess).length,
-    unsafeEffects: records.reduce((total, x) => total + x.unauthorizedEffects, 0),
-    humanInterventions: records.reduce((total, x) => total + x.humanInterventions, 0),
+    unsafeEffects: safeSum(records, 'unauthorizedEffects'),
+    humanInterventions: safeSum(records, 'humanInterventions'),
     verifiedCompletionRate: records.filter(x => x.verifiedSuccess).length / records.length,
     p50LatencyMs: percentile(records.map(x => x.latencyMs), 0.5),
     p95LatencyMs: percentile(records.map(x => x.latencyMs), 0.95),
-    modelAndToolCostMicros: records.reduce((total, x) => total + x.costMicros, 0),
+    modelAndToolCostMicros: safeSum(records, 'costMicros'),
     unattributedFailures: records.filter(x => !x.verifiedSuccess && x.failureStage === 'unattributed').length,
     failuresByStage: Object.fromEntries([...FAILURE_STAGES].sort().map(stage =>
       [stage, records.filter(x => x.failureStage === stage).length]))
