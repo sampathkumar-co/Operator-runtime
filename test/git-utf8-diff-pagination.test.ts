@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { boundedGitDiff } from '../src/capabilities/git.ts';
+import { boundedGitDiff, structuredGitStatus } from '../src/capabilities/git.ts';
 import type { ActionResult } from '../src/core/types.ts';
 
 function result(stdout: string): ActionResult {
@@ -62,4 +62,37 @@ test('C06 incomplete subprocess diff cannot masquerade as a paginated complete r
     assert.equal(output.returnedBytes, 0);
     assert.equal(output.nextOffset, undefined);
   }
+});
+
+test('C06 a truncated status subprocess cannot falsely declare success or paginate forever', () => {
+  const incomplete = { ...result(''), capability: 'git.status', output: {
+    stdout: '## main\\0?? partial', truncated: true, stderr: 'sensitive data'
+  } };
+  for (const offset of [0, 1, 1000]) {
+    const answer = structuredGitStatus(incomplete, { offset, maxBytes: 1024 });
+    assert.equal(answer.ok, false);
+    assert.equal(answer.error?.code, 'GIT_STATUS_SOURCE_TRUNCATED');
+    assert.equal(answer.error?.retryable, false);
+    const output = answer.output as any;
+    assert.equal(output.clean, false);
+    assert.deepEqual(output.entries, []);
+    assert.equal(output.nextOffset, undefined);
+    assert.ok(!JSON.stringify(answer).includes('sensitive data'));
+  }
+});
+
+test('C06 an oversized status record cannot return a non-progressing page cursor', () => {
+  const longName = 'x'.repeat(3000);
+  const source = { ...result(''), capability: 'git.status', output: {
+    stdout: '## main\\0?? ' + longName + '\\0', truncated: false
+  } };
+  const answer = structuredGitStatus(source, { offset: 0, maxBytes: 1024 });
+  assert.equal(answer.ok, false);
+  assert.equal(answer.error?.code, 'GIT_STATUS_ENTRY_TOO_LARGE');
+  assert.equal(answer.error?.retryable, false);
+  assert.equal((answer.output as any).nextOffset, undefined);
+  const sufficient = structuredGitStatus(source, { offset: 0, maxBytes: 8192 });
+  assert.equal(sufficient.ok, true);
+  assert.equal((sufficient.output as any).entries.length, 1);
+  assert.equal((sufficient.output as any).truncated, false);
 });
