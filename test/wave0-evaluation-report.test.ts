@@ -16,6 +16,7 @@ function record(lane, arm, overrides = {}) {
     provider: lane === 'A' ? 'none' : arm,
     runnerDigest: d(), modelConfigDigest: d('c'), environmentDigest: d('d'),
     independentOracleDigest: d('e'), resultEvidenceDigest: d('f'),
+    ...(lane === 'C' ? { promptDigest: d('1'), budgetDigest: d('2') } : {}),
     claimedSuccess: false, verifiedSuccess: false, failureStage: 'model',
     latencyMs: 100, costMicros: 0, humanInterventions: 0, unauthorizedEffects: 0,
     ...overrides
@@ -171,4 +172,23 @@ test('C01 CLI bounds untrusted evidence files before parsing campaign data', asy
   assert.equal(run.error, undefined);
   assert.notEqual(run.status, 0);
   assert.match(run.stderr, /input evidence size invalid/);
+});
+
+test('C01 Lane C rejects a mismatched prompt or spending/step budget despite equal model/seed',()=>{
+  const baseline=record('C','mecord');
+  const direct=record('C','direct',{id:'paired-direct'});
+  assert.equal(buildWave0EvaluationReport({
+    sourceCommit,records:[baseline,direct]
+  }).lanes.C.status,'PARTIAL');
+  for(const field of ['promptDigest','budgetDigest']) {
+    assert.throws(()=>buildWave0EvaluationReport({
+      sourceCommit,records:[baseline,{...direct,[field]:d('9')}]
+    }),/not paired/,'mismatched '+field);
+    assert.throws(()=>buildWave0EvaluationReport({
+      sourceCommit,records:[baseline,{...direct,[field]:undefined}]
+    }),/must be an immutable sha256/,'missing '+field);
+  }
+  assert.throws(()=>buildWave0EvaluationReport({
+    sourceCommit,records:[{...baseline,promptDigest:['1'.repeat(64)]},direct]
+  }),/must be an immutable sha256/);
 });
