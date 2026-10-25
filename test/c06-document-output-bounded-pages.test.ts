@@ -61,7 +61,7 @@ test('C06 cannot report success for oversized JSON output or a CSV row that cann
     (error:any)=>error?.code==='DOCUMENT_OUTPUT_TOO_LARGE');
   const csvFile=path.join(root,'oversized.csv');
   await fs.writeFile(csvFile,'key,value\nfirst,'+'q'.repeat(12000)+'\n');
-  await assert.rejects(()=>provider.execute(action(csvFile,{maxBytes:1024})),
+  await assert.rejects(()=>provider.execute(action(csvFile,{offset:1,maxBytes:1024})),
     (error:any)=>error?.code==='DOCUMENT_OUTPUT_TOO_LARGE');
 });
 
