@@ -448,15 +448,25 @@ function evaluateQualityGate(records: TaskActionRecord[], state: Record<string, 
 // Only the terminal attempt for an identity can attest an outcome. Never
 // resurrect an earlier successful receipt after a later failed, interrupted,
 // blocked or uncertain attempt for the same verification step.
+function independentlyObservedAfterAction(record: TaskActionRecord | undefined): record is TaskActionRecord {
+  if (!record || record.state !== 'SUCCEEDED') return false;
+  if (record.observation?.schemaVersion !== 2) return true;
+  const start = Date.parse(record.startedAt);
+  const observed = Date.parse(record.observation.observedAt);
+  // Typed machine-state proof cannot predate the very observation action
+  // whose receipt claims to provide it. Reject invalid source timestamps.
+  return Number.isFinite(start) && Number.isFinite(observed) && observed >= start;
+}
+
 function lastSucceeded(records: TaskActionRecord[], stepKey: string): TaskActionRecord | undefined {
   const latest = [...records].reverse().find((record) => record.stepKey === stepKey);
-  return latest?.state === 'SUCCEEDED' ? latest : undefined;
+  return independentlyObservedAfterAction(latest) ? latest : undefined;
 }
 
 function lastSucceededAny(records: TaskActionRecord[], stepKeys: string[]): TaskActionRecord | undefined {
   const allowed = new Set(stepKeys);
   const latest = [...records].reverse().find((record) => allowed.has(record.stepKey));
-  return latest?.state === 'SUCCEEDED' ? latest : undefined;
+  return independentlyObservedAfterAction(latest) ? latest : undefined;
 }
 
 function observationState(record: TaskActionRecord | undefined): Record<string, unknown> {
