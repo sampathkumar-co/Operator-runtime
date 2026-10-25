@@ -55,8 +55,9 @@ export class WorkspaceLspEditProvider implements CapabilityProvider {
         );
       }
 
-      const requestedRoot = String(action.input.workspaceRoot ?? '');
-      if (!requestedRoot || requestedRoot.includes('\0')) {
+      const requestedRoot = action.input.workspaceRoot;
+      if (typeof requestedRoot !== 'string' || !requestedRoot || requestedRoot.length > 4096 ||
+          [...requestedRoot].some(ch => [0, 10, 13].includes(ch.charCodeAt(0)))) {
         throw new OperatorError('LSP_EDIT_WORKSPACE_ROOT_REQUIRED', 'workspaceRoot is required.');
       }
 
@@ -89,15 +90,20 @@ export class WorkspaceLspEditProvider implements CapabilityProvider {
       const trustedCommandIds = action.input.trustedCommandIds === undefined
         ? []
         : action.input.trustedCommandIds;
-      if (!Array.isArray(trustedCommandIds)) {
-        throw new OperatorError('LSP_EDIT_VERIFICATION_INVALID', 'trustedCommandIds must be an array.');
+      if (!Array.isArray(trustedCommandIds) || trustedCommandIds.length > 32 ||
+          trustedCommandIds.some(item => typeof item !== 'string' ||
+            !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(item)) ||
+          new Set(trustedCommandIds).size !== trustedCommandIds.length ||
+          (action.input.includeImpactAnalysis !== undefined &&
+            typeof action.input.includeImpactAnalysis !== 'boolean')) {
+        throw new OperatorError('LSP_EDIT_VERIFICATION_INVALID', 'Verification commands and impact-analysis mode require exact bounded types.');
       }
 
       const resolved = await resolveLspWorkspaceEdit({
         workspaceRoot,
         edit: edit as LspWorkspaceEdit,
         expectedDocumentSha256: expectedDocumentSha256 as Record<string, string>,
-        trustedCommandIds: trustedCommandIds.map((item) => String(item)),
+        trustedCommandIds: trustedCommandIds as string[],
         includeImpactAnalysis: action.input.includeImpactAnalysis !== false
       });
 

@@ -48,10 +48,17 @@ export class ProjectTransactionProvider implements CapabilityProvider {
       if (action.risk !== 'destructive') {
         throw new OperatorError('TRANSACTION_DESTRUCTIVE_RISK_REQUIRED', 'Automatic rollback transactions must be authorized as destructive before execution.');
       }
-      const projectRoot = String(action.input.path ?? '');
-      const commandId = String(action.input.commandId ?? '');
-      const expectedRisk = String(action.input.expectedRisk ?? '');
-      if (!['read', 'write'].includes(expectedRisk)) {
+      const projectRoot = action.input.path;
+      const commandId = action.input.commandId;
+      const expectedRisk = action.input.expectedRisk;
+      if (typeof projectRoot !== 'string' || !projectRoot || projectRoot.length > 4096 ||
+          [...projectRoot].some(ch => [0, 10, 13].includes(ch.charCodeAt(0)))) {
+        throw new OperatorError('TRANSACTION_SCOPE_INVALID', 'Automatic transaction requires an exact bounded authorized project path.');
+      }
+      if (typeof commandId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(commandId)) {
+        throw new OperatorError('INVALID_COMMAND_ID', 'Automatic transaction requires a literal registered command identity.');
+      }
+      if (typeof expectedRisk !== 'string' || !['read', 'write'].includes(expectedRisk)) {
         throw new OperatorError('TRANSACTION_RISK_UNSUPPORTED', 'Automatic rollback supports only trusted read/write commands; external effects are not reversible.');
       }
 
