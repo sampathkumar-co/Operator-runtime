@@ -122,7 +122,7 @@ export function browserFocusActuallyProven(observed: unknown): boolean {
 }
 export function absentBrowserTargetChecks(expect: JsonMap):
   Array<{field:string;expected:unknown;actual:unknown;pass:boolean}> {
-  const checks=[{field:'exists',expected:expect.exists??true,actual:false,
+  const checks: Array<{field:string;expected:unknown;actual:unknown;pass:boolean}>=[{field:'exists',expected:expect.exists??true,actual:false,
     pass:expect.exists===false}];
   for(const field of ['value','checked','selected','expanded','current','active']) {
     if (expect[field] !== undefined) checks.push({
