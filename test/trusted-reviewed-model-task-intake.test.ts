@@ -41,7 +41,7 @@ function fixture() {
         assert.equal(options.goal.kind, 'browser-navigation');
         assert.deepEqual(options.successConditions, modelResponse.successConditions);
         if (submitError) throw submitError;
-        return { id: 'durable-task-' + submitted };
+        return { id: 'durable-task-' + submitted, executionStarted: false as const };
       }
     }
   });
@@ -151,4 +151,56 @@ test('C05 mandatory authority callbacks fail closed before model invocation',()=
   assert.throws(()=>new TrustedReviewedModelTaskIntake({
     model:undefined as never,authority:undefined as never
   }),(error:any)=>error.code==='TASK_MODEL_INTAKE_AUTH_INVALID');
+});
+
+
+test('C05 revoke during slow model request prevents issuing even a stale approval review',async()=>{
+  let release!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  let current = true, transmitted = 0;
+  const model = new BoundedModelGoalInference({
+    modelId:'test-local-model',maxOutputTokens:256,maxCostMicros:0,timeoutMs:1000,
+    ledger:{
+      async reserve(){return {reservationId:'reserved'};},
+      async finalize(){}
+    },generator:{async generate(){
+      transmitted++;
+      await gate;
+      return {text:JSON.stringify(modelResponse)};
+    }}
+  });
+  const intake=new TrustedReviewedModelTaskIntake({model,authority:{
+    async currentApprovedScope(){return current?scope:null;},
+    async verifyTrustedReview(){return true;},
+    async submitReviewedTask(){throw Error('must never submit');}
+  }});
+  const attempt=intake.propose({
+    principal:'auth-owner',request:scope,allowModelTransmission:true
+  });
+  await new Promise(resolve=>setImmediate(resolve));
+  current=false;
+  release();
+  await assert.rejects(attempt,(error:any)=>error.code==='TASK_MODEL_INTAKE_SCOPE_DENIED');
+  assert.equal(transmitted,1);
+});
+test('C05 queued-only callback rejects a task that was already started', async()=>{
+  const f=fixture();
+  const p=await f.intake.propose({principal:f.principal,request:scope,allowModelTransmission:true});
+  const model=new BoundedModelGoalInference({
+    modelId:'test-model',maxOutputTokens:256,maxCostMicros:0,timeoutMs:1000,
+    ledger:{async reserve(){return {reservationId:'reserved'};},async finalize(){}},
+    generator:{async generate(){return {text:JSON.stringify(modelResponse)}}}
+  });
+  const intake=new TrustedReviewedModelTaskIntake({model,authority:{
+    async currentApprovedScope(){return scope;},
+    async verifyTrustedReview(){return true;},
+    async submitReviewedTask(){return {id:'started-task',executionStarted:true as never};}
+  }});
+  const review=await intake.propose({principal:f.principal,request:scope,allowModelTransmission:true});
+  const confirmation={principal:f.principal,proposalId:review.proposalId,
+    proposalDigest:review.proposalDigest,reviewProof:'test-owner-proof'};
+  await assert.rejects(intake.confirm(confirmation),
+    (error:any)=>error.code==='TASK_MODEL_SUBMIT_NOT_CONFIRMED');
+  await assert.rejects(intake.confirm(confirmation),
+    (error:any)=>error.code==='TASK_PROPOSAL_REVIEW_INVALID');
 });
