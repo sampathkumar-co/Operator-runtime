@@ -97,3 +97,16 @@ test('C01 rejects forged scripted-model evidence, duplicate suite identities and
       (error:any)=>error?.code==='C01_FROZEN_MODEL_LANE_INVALID');
   }
 });
+
+test('C01 malformed JSON, getters and cycles cannot masquerade as frozen observations', async () => {
+  const cycled: any = {ok:true}; cycled.loop=cycled;
+  const getter: any = Object.defineProperty({},'hidden',{enumerable:true,get(){throw Error('should never invoke getter');}});
+  for(const obs of [{ok:undefined},{value:Number.NaN},{f:()=>null},cycled,getter,new Date(),{inf:Infinity}]) {
+    let calls=0;
+    const fake = choice({observation:obs,observationSha256:'0'.repeat(64)});
+    await assert.rejects(()=>runFrozenModelDecisionLane(args({
+      choices:[fake],decide:async()=>{calls++;return 'inspect';}
+    })),(error:any)=>error?.code==='C01_FROZEN_MODEL_LANE_INVALID');
+    assert.equal(calls,0);
+  }
+});
