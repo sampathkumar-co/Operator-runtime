@@ -8,6 +8,7 @@ import {
   parseArgs,
   validatePairingRequestMessage,
   safeRuntimeEnvironment,
+  inspectOptionalBrowsers,
   validateRuntimeManifest
 } from '../packages/mecord-connect/src/cli.mjs';
 import {
@@ -566,4 +567,39 @@ test('C11 npm manifest refuses coerced path, length and source provenance identi
     assert.throws(()=>validateRuntimeManifest(manifest(field)),
       /source commit|version is invalid/);
   }
+});
+
+test('C10 doctor reports optional system browser candidates without claiming a working CDP session', async () => {
+  const chrome='C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+  const edge='C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+  const seen=[];
+  const found=await inspectOptionalBrowsers({
+    platform:'win32',
+    env:{PROGRAMFILES:'C:\\Program Files','PROGRAMFILES(X86)':'C:\\Program Files (x86)'},
+    fileExists:async file=>{seen.push(file);return file===chrome || file===edge;}
+  });
+  assert.equal(found.chrome,'DETECTED');
+  assert.equal(found.edge,'DETECTED');
+  assert.equal(found.managedChromium,'NOT_CHECKED');
+  assert.equal(found.liveCdpSession,'NOT_CHECKED');
+  assert.equal(found.authorizedRoots,'CHECKED_AT_REMOTE_START');
+  assert.ok(seen.length<=6);
+  const missing=await inspectOptionalBrowsers({
+    platform:'win32',env:{PROGRAMFILES:'C:\\Program Files'},
+    fileExists:async()=>false
+  });
+  assert.equal(missing.chrome,'NOT_DETECTED');
+  assert.equal(missing.edge,'NOT_DETECTED');
+});
+
+test('C10 optional doctor does not probe system files on unsupported platforms or expose paths', async () => {
+  let accesses=0;
+  const result=await inspectOptionalBrowsers({
+    platform:'linux',env:{PROGRAMFILES:'C:\\Program Files'},
+    fileExists:async()=>{accesses++;return true;}
+  });
+  assert.equal(accesses,0);
+  assert.equal(result.chrome,'NOT_CHECKED');
+  assert.equal(result.edge,'NOT_CHECKED');
+  assert.equal(Object.keys(result).some(key=>key.toLowerCase().includes('path')),false);
 });
