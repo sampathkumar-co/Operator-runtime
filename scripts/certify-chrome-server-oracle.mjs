@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync, spawn } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { BrowserCdpProvider } from '../src/capabilities/browser-cdp.ts';
+import { laneBPhysicalReceiptRecord, partialLaneBPhysicalReport } from './c01-physical-lane-b-records.mjs';
 
 export function validServerReceipts(expected, records) {
   if (!Array.isArray(expected) || expected.length !== 5 ||
@@ -137,7 +138,13 @@ export async function certifyPhysicalChromeOracle({
       return result;
     };
     const durations = [];
-    for (const item of expected) {
+    const laneBRecords = [];
+    const runnerSha256 = crypto.createHash('sha256').update(
+      await fs.readFile(fileURLToPath(import.meta.url))).digest('hex');
+    const environmentSha256 = crypto.createHash('sha256').update(JSON.stringify({
+      sourceCommit, platform, node: process.version, chromeExecutablePath: chromePath
+    })).digest('hex');
+    for (const [ordinal, item] of expected.entries()) {
       const start = performance.now();
       const opened = await action('browser.navigate', 'external', {
         url: origin + '/?id=' + encodeURIComponent(item.id), newTab: true
@@ -169,11 +176,19 @@ export async function certifyPhysicalChromeOracle({
       assert.deepEqual(records.find(r => r.id === item.id), {
         id: item.id, value: item.value, receipt: item.receipt, accepted: true
       }, 'server-side postcondition missing');
-      durations.push(performance.now() - start);
+      const elapsed = performance.now() - start;
+      durations.push(elapsed);
+      laneBRecords.push(laneBPhysicalReceiptRecord({
+        sourceCommit, ordinal, runNonce: nonce, runnerSha256, environmentSha256,
+        expected: item, server: records.find(r => r.id === item.id),
+        preState: before.output.status, observedPostState: 'VERIFIED',
+        latencyMs: elapsed, rejectedSubmissions: rejected
+      }));
     }
     assert.ok(validServerReceipts(expected, records), 'independent oracle mismatch');
     assert.equal(rejected, 0);
     const sorted = durations.sort((a,b) => a-b);
+    const laneB = partialLaneBPhysicalReport({sourceCommit, records: laneBRecords});
     return {
       schemaVersion: 1, sourceCommit, platform, node: process.version,
       suite: 'FIVE_FIXED_REAL_CHROME_PROVIDER_TASKS_WITH_INDEPENDENT_LOCAL_SERVER',
@@ -182,7 +197,13 @@ export async function certifyPhysicalChromeOracle({
       p95Ms: +sorted[4].toFixed(1),
       browserProfile: 'ISOLATED_DISPOSABLE', originalState: 'NOT_TOUCHED',
       modelScoring: 'NOT_RUN', officialMiniWob: 'NOT_RUN',
-      heldOut50: 'NOT_RUN', hostRecovery: 'NOT_RUN', release: 'NOT_ACCEPTED'
+      heldOut50: 'NOT_RUN', hostRecovery: 'NOT_RUN', release: 'NOT_ACCEPTED',
+      laneB: { status: laneB.lanes.B.status, sampleCount: 5,
+        reportDigest: laneB.reportDigest,
+        observedSuccessRate: laneB.lanes.B.evidence.verifiedCompletionRate,
+        physicalAcceptance: laneB.lanes.B.physicalAcceptance,
+        records: laneBRecords }
+
     };
   } finally {
     provider?.close();
