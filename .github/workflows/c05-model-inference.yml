@@ -5,12 +5,14 @@ on:
     paths:
       - 'src/core/bounded-model-goal-inference.ts'
       - 'test/bounded-model-goal-inference.test.ts'
+      - 'docs/C05_MODEL_VS_RUNTIME_AUTHORITY_2026-10-25.md'
       - '.github/workflows/c05-model-inference.yml'
   push:
     branches: [main]
     paths:
       - 'src/core/bounded-model-goal-inference.ts'
       - 'test/bounded-model-goal-inference.test.ts'
+      - 'docs/C05_MODEL_VS_RUNTIME_AUTHORITY_2026-10-25.md'
       - '.github/workflows/c05-model-inference.yml'
 
 permissions:
