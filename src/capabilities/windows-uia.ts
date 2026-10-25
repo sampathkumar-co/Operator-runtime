@@ -27,6 +27,29 @@ const DEFAULT_MAX_WINDOWS = 50;
 const MAX_WINDOWS = 200;
 const UIA_OPERATIONS = ['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll', 'activate_window'] as const;
 const PHYSICAL_INPUT_OPERATIONS = ['move', 'click', 'double_click', 'drag', 'scroll', 'type_text', 'key_press', 'hotkey'] as const;
+// Only runtime-defined or vetted native protocol error codes may cross the
+ // public boundary. A regex allows native/page-owned secret text in an error code.
+const PUBLIC_UIA_ERROR_CODES = new Set([
+  'EXECUTION_ABORTED', 'UIA_PROVIDER_FAILED', 'UIA_OPERATION_FAILED',
+  'UIA_SIDECAR_CLOSED', 'UIA_SIDECAR_EXITED', 'UIA_SIDECAR_TIMEOUT',
+  'UIA_SIDECAR_UNAVAILABLE', 'UIA_SIDECAR_WRITE_FAILED',
+  'UIA_SIDECAR_START_FAILED', 'UIA_SIDECAR_START_TIMEOUT',
+  'UIA_SIDECAR_TERMINATE_FAILED', 'UIA_REQUEST_TOO_LARGE',
+  'INVALID_UIA_OPERATION', 'INVALID_UIA_SCROLL_AMOUNT',
+  'INVALID_UIA_SELECTOR', 'INVALID_UIA_VALUE',
+  'INPUT_AFTER_CAPTURE_INVALID', 'INPUT_AFTER_CAPTURE_FAILED',
+  'INPUT_AFTER_WINDOW_CHANGED', 'INPUT_CAPTURE_INVALID',
+  'INPUT_CAPTURE_MISMATCH', 'INPUT_CAPTURE_REVALIDATION_FAILED',
+  'INPUT_CAPTURE_STALE', 'INPUT_KEYS_INVALID',
+  'INPUT_OPERATION_INVALID', 'INPUT_POINT_OUTSIDE_CAPTURE',
+  'VISUAL_CAPTURE_INVALID', 'VISUAL_INPUT_INVALID'
+]);
+const UNCERTAIN_UIA_MUTATION_ERRORS = new Set([
+  'UIA_SIDECAR_TIMEOUT', 'UIA_SIDECAR_CLOSED', 'UIA_SIDECAR_EXITED',
+  'UIA_SIDECAR_WRITE_FAILED', 'EXECUTION_ABORTED', 'UIA_OPERATION_FAILED',
+  'INPUT_AFTER_CAPTURE_FAILED', 'INPUT_AFTER_CAPTURE_INVALID',
+  'UIA_PROVIDER_FAILED'
+]);
 const CAPTURE_LEASE_MS = 90_000;
 const MAX_CAPTURE_LEASES = 32;
 const AFTER_CAPTURE_SETTLE_MS = 200;
@@ -169,8 +192,10 @@ class WindowsUiaSidecarClient {
 
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => {
-      for (const line of chunk.split(/\r?\n/).filter(Boolean)) {
-        this.#stderrTail.push(line.slice(0, 1000));
+      const emittedLines = Math.min(20, chunk.split(/\r?\n/).filter(Boolean).length);
+      for (let index = 0; index < emittedLines; index += 1) {
+        // Native stderr is not cleared for secrets; store bounded markers only.
+        this.#stderrTail.push('NATIVE_STDERR_REDACTED');
         if (this.#stderrTail.length > 20) this.#stderrTail.shift();
       }
     });
@@ -216,7 +241,7 @@ class WindowsUiaSidecarClient {
       });
       child.once('error', (error) => {
         clearTimeout(timer);
-        reject(new OperatorError('UIA_SIDECAR_START_FAILED', error.message, { retryable: false }));
+        reject(new OperatorError('UIA_SIDECAR_START_FAILED', 'Windows UIA sidecar could not start.', { retryable: false }));
       });
     });
 
@@ -263,8 +288,14 @@ export class WindowsUiaProvider implements CapabilityProvider {
           : action.capability === 'visual.capture'
             ? await this.#capture(action, context.signal)
             : await this.#physicalInput(action, context.signal);
+      const observedPostcondition = asRecord(asRecord(output).postcondition);
+      const semanticVerified = observedPostcondition.verified === true;
       const postcondition = action.capability === 'app.operate'
-        ? evidence('postcondition', 'pass', 'Windows UIA/Win32 operation returned verified semantic postcondition evidence.', { operation: action.input.operation, waitMs: normalizeWaitMs(action.input.waitMs) })
+        ? evidence('postcondition', semanticVerified ? 'pass' : 'info',
+            semanticVerified
+              ? 'Windows UIA/Win32 reported a verified semantic postcondition.'
+              : 'Native operation was dispatched; the requested application effect still needs independent verification.',
+            { operation: action.input.operation, waitMs: normalizeWaitMs(action.input.waitMs), verified: semanticVerified })
         : action.capability === 'visual.capture'
           ? evidence('visual_observation', 'pass', 'Captured bounded visual state with a short-lived SHA-bound interaction lease.', {
               captureId: asRecord(output).captureId,
@@ -289,7 +320,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
         provider: this.name,
         output,
         evidence: [
-          evidence('windows_uia', 'pass', action.capability === 'app.inspect' ? 'Inspected Windows controls through Microsoft UI Automation and optional bounded Win32 discovery.' : action.capability === 'visual.capture' ? 'Captured bounded Windows visual state through the signed native sidecar.' : action.capability === 'input.operate' ? 'Dispatched capture-bound physical input through the signed native sidecar.' : 'Operated Windows control through a verified UI Automation or semantic Win32 operation.', {}),
+          evidence('windows_uia', 'pass', action.capability === 'app.inspect' ? 'Inspected Windows controls through Microsoft UI Automation and optional bounded Win32 discovery.' : action.capability === 'visual.capture' ? 'Captured bounded Windows visual state through the signed native sidecar.' : action.capability === 'input.operate' ? 'Dispatched capture-bound physical input through the signed native sidecar.' : 'Dispatched Windows UI Automation or semantic Win32 operation; independent application outcome verification is still required.', {}),
           postcondition
         ],
         durationMs: Math.round(performance.now() - started)
@@ -297,15 +328,22 @@ export class WindowsUiaProvider implements CapabilityProvider {
     } catch (error) {
       const op = error instanceof OperatorError
         ? error
-        : new OperatorError('UIA_PROVIDER_FAILED', error instanceof Error ? error.message : String(error), { retryable: true });
+        : new OperatorError('UIA_PROVIDER_FAILED', 'Windows UIA operation failed.', { retryable: true });
+      const knownCode = PUBLIC_UIA_ERROR_CODES.has(op.code);
+      // A native error outside the validated protocol could have followed a
+      // dispatch. It is never grounds to retry a mutating action.
       const ambiguousMutation = action.risk !== 'read'
-        && ['UIA_SIDECAR_TIMEOUT', 'UIA_SIDECAR_CLOSED', 'UIA_SIDECAR_EXITED', 'EXECUTION_ABORTED'].includes(op.code);
+        && (!knownCode || UNCERTAIN_UIA_MUTATION_ERRORS.has(op.code));
+      // Messages and even syntactically plausible error codes can originate
+      // outside our trusted boundary. Never reflect arbitrary code text.
+      const publicCode = knownCode ? op.code : 'UIA_PROVIDER_FAILED';
+      const publicMessage = `Windows UIA operation failed (${publicCode}).`;
       return {
         ok: false,
         capability: action.capability,
         provider: this.name,
-        evidence: [evidence('windows_uia', 'fail', op.message, { code: op.code })],
-        error: { code: op.code, message: op.message, retryable: ambiguousMutation ? false : op.retryable, sideEffectState: ambiguousMutation ? 'uncertain' : action.risk === 'read' ? 'none' : undefined },
+        evidence: [evidence('windows_uia', 'fail', publicMessage, { code: publicCode })],
+        error: { code: publicCode, message: publicMessage, retryable: ambiguousMutation ? false : op.retryable, sideEffectState: ambiguousMutation ? 'uncertain' : action.risk === 'read' ? 'none' : undefined },
         durationMs: Math.round(performance.now() - started)
       };
     }
@@ -556,17 +594,40 @@ async function terminateSidecar(child: ChildProcessWithoutNullStreams): Promise<
   if (child.exitCode === null && child.signalCode === null) throw new OperatorError('UIA_SIDECAR_TERMINATE_FAILED', 'Windows UIA sidecar remained alive after shutdown.', { retryable: false });
 }
 
-function normalizeSelector(input: unknown) {
-  const raw = input && typeof input === 'object' ? input as Record<string, unknown> : {};
-  const text = (key: string) => typeof raw[key] === 'string' ? String(raw[key]).trim().slice(0, 512) || undefined : undefined;
-  const processId = Number.isInteger(raw.processId) && Number(raw.processId) > 0 ? Number(raw.processId) : undefined;
-  return {
+function normalizeSelector(input: unknown, exactMutationTarget = false) {
+  if (exactMutationTarget && (!input || typeof input !== 'object' || Array.isArray(input))) {
+    throw new OperatorError('INVALID_UIA_SELECTOR', 'Mutating UIA operation requires a semantic selector object.');
+  }
+  const raw = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  if (exactMutationTarget && Object.keys(raw).some(key =>
+    !['name', 'automationId', 'className', 'controlType', 'processId'].includes(key))) {
+    throw new OperatorError('INVALID_UIA_SELECTOR', 'UIA mutation selector contains unsupported identity fields.');
+  }
+  const text = (key: string) => {
+    const candidate = raw[key];
+    if (candidate === undefined) return undefined;
+    if (typeof candidate !== 'string' || !candidate.trim() || (exactMutationTarget && candidate.trim().length > 512)) {
+      if (exactMutationTarget) throw new OperatorError('INVALID_UIA_SELECTOR', 'UIA mutation selector must have exact bounded string fields.');
+      return undefined;
+    }
+    return candidate.trim().slice(0, 512) || undefined;
+  };
+  const processId = Number.isSafeInteger(raw.processId) && Number(raw.processId) > 0 && Number(raw.processId) <= 0x7fffffff
+    ? Number(raw.processId) : undefined;
+  if (exactMutationTarget && raw.processId !== undefined && processId === undefined) {
+    throw new OperatorError('INVALID_UIA_SELECTOR', 'UIA mutation process identity is invalid.');
+  }
+  const selector = {
     name: text('name'),
     automation_id: text('automationId'),
     class_name: text('className'),
     control_type: text('controlType'),
     process_id: processId
   };
+  if (exactMutationTarget && Object.values(selector).every(value => value === undefined)) {
+    throw new OperatorError('INVALID_UIA_SELECTOR', 'Mutating UIA operation requires at least one exact target identity.');
+  }
+  return selector;
 }
 
 function normalizeObserveMs(value: unknown): number {
@@ -602,8 +663,8 @@ function normalizeScrollAmount(value: unknown, field: string): string | undefine
 }
 
 function normalizeOperateInput(input: Record<string, unknown>) {
-  const operation = String(input.operation ?? '');
-  if (!(UIA_OPERATIONS as readonly string[]).includes(operation)) {
+  const operation = input.operation;
+  if (typeof operation !== 'string' || !(UIA_OPERATIONS as readonly string[]).includes(operation)) {
     throw new OperatorError('INVALID_UIA_OPERATION', `operation must be ${UIA_OPERATIONS.join(', ')}.`);
   }
   const horizontalAmount = normalizeScrollAmount(input.horizontalAmount, 'horizontalAmount');
@@ -611,10 +672,15 @@ function normalizeOperateInput(input: Record<string, unknown>) {
   if (operation === 'scroll' && horizontalAmount === undefined && verticalAmount === undefined) {
     throw new OperatorError('INVALID_UIA_SCROLL_AMOUNT', 'scroll requires horizontalAmount or verticalAmount.');
   }
+  if ((operation === 'set_value' && typeof input.value !== 'string') ||
+      (input.value !== undefined && (typeof input.value !== 'string' ||
+        Buffer.byteLength(input.value, 'utf8') > 64 * 1024 || input.value.includes(String.fromCharCode(0))))) {
+    throw new OperatorError('INVALID_UIA_VALUE', 'UIA value must be a bounded string, required for set_value.');
+  }
   return {
     operation,
-    selector: normalizeSelector(input.selector),
-    value: input.value === undefined ? undefined : String(input.value),
+    selector: normalizeSelector(input.selector, true),
+    value: input.value,
     horizontal_amount: horizontalAmount,
     vertical_amount: verticalAmount,
     wait_ms: normalizeWaitMs(input.waitMs)

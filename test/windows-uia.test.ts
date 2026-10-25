@@ -212,3 +212,193 @@ test('Windows UIA emergency lifecycle awaits sidecar shutdown', async () => {
   await provider.emergencyStop();
   assert.equal(closed, true);
 });
+
+test('C04 UIA mutation dispatch rejects unscoped, truncated and malformed semantic targets', async () => {
+  let sidecarCalls = 0;
+  const provider = new WindowsUiaProvider({
+    platform: 'win32',
+    client: { async call() { sidecarCalls++; return {}; }, close() {} }
+  });
+  const selector = { automationId: 'save-button' };
+  const cases: Array<{ input: Record<string, unknown>; code: string }> = [
+    { input: { operation: 'invoke' }, code: 'INVALID_UIA_SELECTOR' },
+    { input: { operation: 'invoke', selector: {} }, code: 'INVALID_UIA_SELECTOR' },
+    { input: { operation: 'invoke', selector: { automationId: 'x'.repeat(513) } }, code: 'INVALID_UIA_SELECTOR' },
+    { input: { operation: 'invoke', selector: { processId: 9_999_999_999 } }, code: 'INVALID_UIA_SELECTOR' },
+    { input: { operation: { toString: () => 'invoke' }, selector }, code: 'INVALID_UIA_OPERATION' },
+    { input: { operation: 'set_value', selector }, code: 'INVALID_UIA_VALUE' },
+    { input: { operation: 'set_value', selector, value: { toString: () => 'private-value' } }, code: 'INVALID_UIA_VALUE' },
+    { input: { operation: 'set_value', selector, value: 'x'.repeat(65_537) }, code: 'INVALID_UIA_VALUE' },
+    { input: { operation: 'set_value', selector, value: 'prefix' + String.fromCharCode(0) + 'suffix' }, code: 'INVALID_UIA_VALUE' }
+  ];
+  for (let index = 0; index < cases.length; index++) {
+    const { input, code } = cases[index]!;
+    const result = await provider.execute({
+      id: 'uia-target-boundary-' + index,
+      capability: 'app.operate', risk: 'external', input, provenance
+    });
+    assert.equal(result.ok, false, String(index));
+    assert.equal(result.error?.code, code, String(index));
+  }
+  assert.equal(sidecarCalls, 0, 'invalid selectors must never reach the native helper');
+  await provider.close();
+});
+
+test('C04 exact bounded UIA selector still permits an explicitly scoped semantic operation', async () => {
+  const calls: Array<{ method: string; params: unknown }> = [];
+  const provider = new WindowsUiaProvider({
+    platform: 'win32',
+    client: {
+      async call(method: string, params: unknown) {
+        calls.push({ method, params });
+        return { verified: true };
+      },
+      close() {}
+    }
+  });
+  const result = await provider.execute({
+    id: 'uia-valid-target',
+    capability: 'app.operate', risk: 'external', provenance,
+    input: { operation: 'set_value', selector: { automationId: 'target-value' }, value: 'নমস্কার' }
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.method, 'operate');
+  assert.equal((calls[0]!.params as any).selector.automation_id, 'target-value');
+  assert.equal((calls[0]!.params as any).value, 'নমস্কার');
+  await provider.close();
+});
+
+test('C08 mutating UIA transport-write and post-input capture failures cannot be automatically replayed', async () => {
+  for (const code of ['UIA_SIDECAR_WRITE_FAILED', 'UIA_OPERATION_FAILED',
+    'INPUT_AFTER_CAPTURE_FAILED', 'INPUT_AFTER_CAPTURE_INVALID']) {
+    let calls = 0;
+    const provider = new WindowsUiaProvider({
+      platform: 'win32',
+      client: {
+        async call() {
+          calls += 1;
+          throw new OperatorError(code, 'Native operation may have been dispatched', { retryable: true });
+        },
+        close() {}
+      }
+    });
+    const result = await provider.execute({
+      id: 'uncertain-uia-' + code, capability: 'app.operate', risk: 'external', provenance,
+      input: { operation: 'invoke', selector: { automationId: 'save' } }
+    });
+    assert.equal(calls, 1, code);
+    assert.equal(result.error?.sideEffectState, 'uncertain', code);
+    assert.equal(result.error?.retryable, false, code);
+    await provider.close();
+  }
+});
+
+test('C10 Windows native helper errors cannot export secret-bearing stderr or target details', async () => {
+  const secret='PRIVATE_DEVICE_TOKEN_DO_NOT_EXPORT';
+  const provider=new WindowsUiaProvider({
+    platform:'win32',
+    client:{
+      async call(){throw new OperatorError('UIA_SIDECAR_EXITED',
+        'native stderr password=' + secret + ' path=C:\\Users\\private', {retryable:true});},
+      close(){}
+    }
+  });
+  const result=await provider.execute({
+    id:'uia-privacy-boundary',capability:'app.operate',risk:'external',provenance,
+    input:{operation:'invoke',selector:{automationId:'login'}}
+  });
+  assert.equal(result.ok,false);
+  assert.equal(result.error?.code,'UIA_SIDECAR_EXITED');
+  assert.equal(result.error?.sideEffectState,'uncertain');
+  assert.equal(result.error?.retryable,false);
+  assert.equal(JSON.stringify(result).includes(secret),false);
+  assert.equal(JSON.stringify(result).includes('Users'),false);
+  await provider.close();
+});
+
+test('C04 UIA mutation cannot silently ignore unknown selector identity constraints', async () => {
+  const provider=new WindowsUiaProvider({
+    platform:'win32',
+    client:{async call(){throw Error('Native helper must not be reached');},close(){}}
+  });
+  const result=await provider.execute({
+    id:'uia-extra-selector',capability:'app.operate',risk:'external',provenance,
+    input:{operation:'invoke',selector:{automationId:'save',unexpectedTarget:'another-window'}}
+  });
+  assert.equal(result.ok,false);
+  assert.equal(result.error?.code,'INVALID_UIA_SELECTOR');
+  await provider.close();
+});
+
+test('C04 native invoke dispatch is not falsely labeled as verified application outcome', async () => {
+  const run = async (postcondition: Record<string, unknown>) => {
+    const provider=new WindowsUiaProvider({
+      platform:'win32',
+      client:{async call(){return { postcondition };},close(){}}
+    });
+    const result=await provider.execute({
+      id:'uia-invoke-dispatch-truth',capability:'app.operate',risk:'external',provenance,
+      input:{operation:'invoke',selector:{automationId:'save'}}
+    });
+    await provider.close();
+    return result;
+  };
+  const dispatch=await run({element_reachable:true});
+  assert.equal(dispatch.ok,true);
+  const unverified=dispatch.evidence.find(x=>x.kind==='postcondition');
+  assert.equal(unverified?.status,'info');
+  assert.equal(unverified?.data?.verified,false);
+  assert.equal(dispatch.evidence.some(x=>x.message.includes('verified UI Automation')),false);
+
+  const verified=await run({verified:true});
+  assert.equal(verified.evidence.find(x=>x.kind==='postcondition')?.status,'pass');
+  assert.equal(verified.evidence.find(x=>x.kind==='postcondition')?.data?.verified,true);
+});
+
+test('C04 native error codes cannot smuggle arbitrary secret-shaped strings', async () => {
+  const secret = 'PRIVATE_API_KEY_0123456789';
+  const provider = new WindowsUiaProvider({
+    platform: 'win32',
+    client: {
+      async call() {
+        throw new OperatorError('UIA_' + secret, 'secret=' + secret, { retryable: true });
+      },
+      close() {}
+    }
+  });
+  const result = await provider.execute({
+    id: 'uia-error-code-injection',
+    capability: 'app.operate',
+    risk: 'external',
+    provenance,
+    input: { operation: 'invoke', selector: { automationId: 'save' } }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'UIA_PROVIDER_FAILED');
+  assert.equal(result.error?.retryable, false);
+  assert.equal(result.error?.sideEffectState, 'uncertain');
+  assert.equal(JSON.stringify(result).includes(secret), false);
+  await provider.close();
+});
+
+test('C04 unrecognized native mutation failures are uncertain, while input validation stays definite', async () => {
+  const unknown = new WindowsUiaProvider({
+    platform: 'win32',
+    client: { async call() { throw new OperatorError('NOT_A_NATIVE_CODE', 'private', { retryable: true }); }, close() {} }
+  });
+  const mutation = await unknown.execute({
+    id: 'uia-native-unknown', capability: 'app.operate', risk: 'external',
+    provenance, input: { operation: 'focus', selector: { automationId: 'editor' } }
+  });
+  assert.equal(mutation.error?.sideEffectState, 'uncertain');
+  assert.equal(mutation.error?.retryable, false);
+  assert.equal(mutation.error?.code, 'UIA_PROVIDER_FAILED');
+  const invalid = await unknown.execute({
+    id: 'uia-invalid-scope', capability: 'app.operate', risk: 'external',
+    provenance, input: { operation: 'focus', selector: {} }
+  });
+  assert.equal(invalid.error?.code, 'INVALID_UIA_SELECTOR');
+  assert.equal(invalid.error?.sideEffectState, undefined);
+  await unknown.close();
+});
