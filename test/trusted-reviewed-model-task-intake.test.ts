@@ -185,7 +185,6 @@ test('C05 revoke during slow model request prevents issuing even a stale approva
 });
 test('C05 queued-only callback rejects a task that was already started', async()=>{
   const f=fixture();
-  const p=await f.intake.propose({principal:f.principal,request:scope,allowModelTransmission:true});
   const model=new BoundedModelGoalInference({
     modelId:'test-model',maxOutputTokens:256,maxCostMicros:0,timeoutMs:1000,
     ledger:{async reserve(){return {reservationId:'reserved'};},async finalize(){}},
