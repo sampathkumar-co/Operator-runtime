@@ -113,7 +113,14 @@ export function compareMatchedPerformance({ baseline, candidate }) {
   const missingStageInstrumentation = STAGES.filter(stage =>
     b.stageMs[stage].observed < a.stageMs[stage].observed
   );
+  // Equal aggregate sample coverage may conceal instrumentation moving from
+  // one frozen journey to another. Bind stage evidence to its exact identity.
+  const lostStageInstrumentationJourneys = keys.filter(key =>
+    STAGES.some(stage => Object.hasOwn(oldRows.get(key).stageTimingsMs, stage) &&
+      !Object.hasOwn(newRows.get(key).stageTimingsMs, stage))
+  ).length;
   const reasons = [
+    ...(lostStageInstrumentationJourneys ? ['MATCHED_JOURNEY_STAGE_TELEMETRY_LOSS'] : []),
     ...(missingStageInstrumentation.length ? ['STAGE_TELEMETRY_COVERAGE_REGRESSION'] : []),
     ...(b.p50Ms > a.p50Ms ? ['P50_LATENCY_REGRESSION'] : []),
     ...(b.p95Ms > a.p95Ms ? ['P95_LATENCY_REGRESSION'] : []),
@@ -138,6 +145,7 @@ export function compareMatchedPerformance({ baseline, candidate }) {
       introducedFalseCompletionJourneys,
       introducedHumanInterventionJourneys,
       missingStageInstrumentation,
+      lostStageInstrumentationJourneys,
       reasons
     },
     sourceTruth: 'SELF_REPORTED_INPUT_NOT_AUTHENTICATED',
