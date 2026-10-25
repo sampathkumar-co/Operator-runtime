@@ -213,6 +213,10 @@ export interface OperationSloSummary {
   completionRate: number;
   verificationRate: number;
   falseCompletionCount: number;
+  /** Traces with duplicate, missing or cross-context request/terminal lineage. */
+  invalidCausalTraces: number;
+  /** Active traces without a terminal event never enter latency percentiles. */
+  incompleteTraces: number;
   p50CompletionMs: number;
   p95CompletionMs: number;
   p99CompletionMs: number;
@@ -227,16 +231,29 @@ export function summarizeOperationSlo(eventsInput: OperationTraceEvent[]): Opera
     byTrace.set(event.traceId, bucket);
   }
   let completed = 0, blocked = 0, failed = 0, uncertain = 0, verified = 0, falseCompletionCount = 0;
+  let invalidCausalTraces = 0, incompleteTraces = 0;
   const completionMs: number[] = [];
   for (const rows of byTrace.values()) {
-    rows.sort((a,b) => a.at.localeCompare(b.at));
-    const complete = [...rows].reverse().find((event) => event.stage === 'COMPLETE');
+    rows.sort((a,b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id));
+    const requests = rows.filter((event) => event.stage === 'REQUEST');
+    const terminals = rows.filter((event) => event.stage === 'COMPLETE');
+    const complete = terminals.at(-1);
+    // Only unique, same-scope, causally ordered request lineage contributes to
+    // trusted verified-success and p50/p95/p99 latency sample denominators.
+    // Retain raw terminal claims separately for false-completion accounting.
+    const causal = requests.length === 1 && terminals.length === 1 && complete !== undefined
+      && rows[0] === requests[0] && rows[rows.length - 1] === complete
+      && Date.parse(requests[0]!.at) < Date.parse(complete.at)
+      && rows.every((event) => event.executionContextDigest === rows[0]!.executionContextDigest)
+      && new Set(rows.map((event) => event.id)).size === rows.length;
+    if (!causal && complete) invalidCausalTraces += 1;
+    if (!complete) incompleteTraces += 1;
     const verify = [...rows].reverse().find((event) => event.stage === 'VERIFY');
     const lastDispatch = [...rows].reverse().find((event) => event.stage === 'DISPATCH');
     // Positive verification must be causally newer than the last attempted
     // dispatch. A second side effect after a valid read supersedes its proof,
     // even if COMPLETE claims success.
-    const verifiedBeforeCompletion = Boolean(complete?.outcome === 'OK' && verify?.outcome === 'OK'
+    const verifiedBeforeCompletion = Boolean(causal && complete?.outcome === 'OK' && verify?.outcome === 'OK'
       && Date.parse(verify.at) < Date.parse(complete.at)
       && (!lastDispatch || Date.parse(lastDispatch.at) < Date.parse(verify.at)));
     if (complete?.outcome === 'OK') completed += 1;
@@ -245,7 +262,7 @@ export function summarizeOperationSlo(eventsInput: OperationTraceEvent[]): Opera
     if (rows.some((event) => event.outcome === 'UNCERTAIN')) uncertain += 1;
     if (verifiedBeforeCompletion) verified += 1;
     if (complete?.outcome === 'OK' && !verifiedBeforeCompletion) falseCompletionCount += 1;
-    if (complete) completionMs.push(Math.max(0, Date.parse(complete.at) - Date.parse(rows[0]!.at)));
+    if (causal) completionMs.push(Date.parse(complete!.at) - Date.parse(requests[0]!.at));
   }
   const traces = byTrace.size;
   completionMs.sort((a,b)=>a-b);
@@ -259,6 +276,8 @@ export function summarizeOperationSlo(eventsInput: OperationTraceEvent[]): Opera
     completionRate: ratio(completed, traces),
     verificationRate: ratio(verified, traces),
     falseCompletionCount,
+    invalidCausalTraces,
+    incompleteTraces,
     p50CompletionMs: percentile(completionMs, 0.5),
     p95CompletionMs: percentile(completionMs, 0.95),
     p99CompletionMs: percentile(completionMs, 0.99)
