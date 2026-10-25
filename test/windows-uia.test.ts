@@ -212,3 +212,59 @@ test('Windows UIA emergency lifecycle awaits sidecar shutdown', async () => {
   await provider.emergencyStop();
   assert.equal(closed, true);
 });
+
+test('C04 UIA mutation dispatch rejects unscoped, truncated and malformed semantic targets', async () => {
+  let sidecarCalls = 0;
+  const provider = new WindowsUiaProvider({
+    platform: 'win32',
+    client: { async call() { sidecarCalls++; return {}; }, close() {} }
+  });
+  const selector = { automationId: 'save-button' };
+  const cases: Array<{ input: Record<string, unknown>; code: string }> = [
+    { input: { operation: 'invoke' }, code: 'INVALID_UIA_SELECTOR' },
+    { input: { operation: 'invoke', selector: {} }, code: 'INVALID_UIA_SELECTOR' },
+    { input: { operation: 'invoke', selector: { automationId: 'x'.repeat(513) } }, code: 'INVALID_UIA_SELECTOR' },
+    { input: { operation: 'invoke', selector: { processId: 9_999_999_999 } }, code: 'INVALID_UIA_SELECTOR' },
+    { input: { operation: { toString: () => 'invoke' }, selector }, code: 'INVALID_UIA_OPERATION' },
+    { input: { operation: 'set_value', selector }, code: 'INVALID_UIA_VALUE' },
+    { input: { operation: 'set_value', selector, value: { toString: () => 'private-value' } }, code: 'INVALID_UIA_VALUE' },
+    { input: { operation: 'set_value', selector, value: 'x'.repeat(65_537) }, code: 'INVALID_UIA_VALUE' },
+    { input: { operation: 'set_value', selector, value: 'prefix' + String.fromCharCode(0) + 'suffix' }, code: 'INVALID_UIA_VALUE' }
+  ];
+  for (let index = 0; index < cases.length; index++) {
+    const { input, code } = cases[index]!;
+    const result = await provider.execute({
+      id: 'uia-target-boundary-' + index,
+      capability: 'app.operate', risk: 'external', input, provenance
+    });
+    assert.equal(result.ok, false, String(index));
+    assert.equal(result.error?.code, code, String(index));
+  }
+  assert.equal(sidecarCalls, 0, 'invalid selectors must never reach the native helper');
+  await provider.close();
+});
+
+test('C04 exact bounded UIA selector still permits an explicitly scoped semantic operation', async () => {
+  const calls: Array<{ method: string; params: unknown }> = [];
+  const provider = new WindowsUiaProvider({
+    platform: 'win32',
+    client: {
+      async call(method: string, params: unknown) {
+        calls.push({ method, params });
+        return { verified: true };
+      },
+      close() {}
+    }
+  });
+  const result = await provider.execute({
+    id: 'uia-valid-target',
+    capability: 'app.operate', risk: 'external', provenance,
+    input: { operation: 'set_value', selector: { automationId: 'target-value' }, value: 'নমস্কার' }
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.method, 'operate');
+  assert.equal((calls[0]!.params as any).selector.automation_id, 'target-value');
+  assert.equal((calls[0]!.params as any).value, 'নমস্কার');
+  await provider.close();
+});
