@@ -47,6 +47,7 @@ export class WorkspaceLspEditProvider implements CapabilityProvider {
   async execute(action: ActionRequest): Promise<ActionResult> {
     const started = performance.now();
     try {
+      if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Workspace LSP provider does not support this capability.');
       if (action.risk !== 'read') {
         throw new OperatorError(
           'LSP_EDIT_RESOLVE_RISK_MISMATCH',
