@@ -324,7 +324,7 @@ function normalizePolicy(input: Partial<CapabilityCertificationPolicy>): Capabil
 }
 
 function normalizeMetrics(input: CapabilityPerformanceMetrics): CapabilityPerformanceMetrics {
-  if (!input || typeof input !== 'object') throw invalid('Capability performance metrics are invalid.');
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw invalid('Capability performance metrics are invalid.');
   return {
     ...(input.p95LatencyMs !== undefined
       ? { p95LatencyMs: finite(input.p95LatencyMs, 0, 24 * 60 * 60_000, 'p95LatencyMs') }
@@ -377,27 +377,30 @@ function uniqueDigests(input: unknown, label: string): string[] {
 function uniqueReasonCodes(input: unknown): string[] {
   if (!Array.isArray(input) || input.length > 1000) throw invalid('Capability certification reasons are invalid.');
   const values = input.map((item) => {
-    const value = String(item ?? '');
-    if (!/^[A-Z0-9_:-]{1,256}$/.test(value)) throw invalid('Capability certification reason is invalid.');
+    if (typeof item !== 'string' || !/^[A-Z0-9_:-]{1,256}$/.test(item)) throw invalid('Capability certification reason is invalid.');
+    const value = item;
     return value;
   });
   return [...new Set(values)].sort();
 }
 
 function boundedReason(input: unknown): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') throw invalid('Capability revocation reasonCode must be an exact string.');
+  const value = input;
   if (!/^[A-Z0-9_:-]{1,256}$/.test(value)) throw invalid('Capability revocation reasonCode is invalid.');
   return value;
 }
 
 function boundedId(input: unknown, label: string): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') throw invalid(`${label} must be an exact string.`);
+  const value = input;
   if (!/^[A-Za-z0-9._:@/+\-=]{1,256}$/.test(value)) throw invalid(`${label} is invalid.`);
   return value;
 }
 
 function semver(input: unknown): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') throw invalid('Capability certification extensionVersion must be an exact SemVer string.');
+  const value = input;
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(value)) {
     throw invalid('Capability certification extensionVersion must be SemVer.');
   }
@@ -405,13 +408,15 @@ function semver(input: unknown): string {
 }
 
 function digest(input: unknown, label: string): string {
-  const value = String(input ?? '').toLowerCase();
+  if (typeof input !== 'string') throw invalid(`${label} must be an exact SHA-256 string.`);
+  const value = input.toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(value)) throw invalid(`${label} must be SHA-256.`);
   return value;
 }
 
 function canonicalIso(input: unknown, label: string): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') throw invalid(`${label} must be an exact canonical ISO string.`);
+  const value = input;
   if (!value || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value) {
     throw invalid(`${label} must be canonical ISO.`);
   }
@@ -419,8 +424,9 @@ function canonicalIso(input: unknown, label: string): string {
 }
 
 function finite(input: unknown, min: number, max: number, label: string): number {
-  const value = Number(input);
-  if (!Number.isFinite(value) || value < min || value > max) throw invalid(`${label} is invalid.`);
+  if (typeof input !== 'number' || !Number.isFinite(input)) throw invalid(`${label} must be an exact finite number.`);
+  const value = input;
+  if (value < min || value > max) throw invalid(`${label} is invalid.`);
   return value;
 }
 
