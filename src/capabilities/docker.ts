@@ -210,8 +210,8 @@ export class DockerProvider implements CapabilityProvider {
     if (action.capability !== 'docker.manage') {
       return reconciliation('uncertain', 'Docker reconciliation applies only to lifecycle mutations.');
     }
-    const operation = String(action.input.operation ?? '');
-    if (!['start', 'stop', 'restart'].includes(operation)) {
+    const operation = action.input.operation;
+    if (typeof operation !== 'string' || !['start', 'stop', 'restart'].includes(operation)) {
       return reconciliation('uncertain', 'Docker lifecycle operation is invalid for reconciliation.');
     }
     if (operation === 'restart') {
