@@ -153,7 +153,22 @@ export function buildWave0TraceBundle({ sourceCommit, controllerId, recorderId, 
 }
 
 export async function recordWave0Bundle({ inputPath, outputDirectory, sourceCommit }) {
-  const input = JSON.parse(await fs.readFile(inputPath, 'utf8'));
+  const handle = await fs.open(inputPath, 'r');
+  let input;
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size <= 0 || stat.size > 32 * 1024 * 1024) {
+      invalid('input evidence size invalid');
+    }
+    const raw = await handle.readFile('utf8');
+    if (Buffer.byteLength(raw, 'utf8') > 32 * 1024 * 1024) invalid('input evidence size invalid');
+    input = JSON.parse(raw);
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      invalid('input evidence must be a JSON object');
+    }
+  } finally {
+    await handle.close();
+  }
   const bundle = buildWave0TraceBundle({ ...input, sourceCommit });
   await fs.mkdir(outputDirectory, { recursive: true });
   const basename = bundle.manifest.traceSha256;
