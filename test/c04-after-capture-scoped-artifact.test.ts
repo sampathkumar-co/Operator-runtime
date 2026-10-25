@@ -77,3 +77,56 @@ test('C04 post-input native scope/window mismatch never persists foreign screens
     }
   }
 });
+
+test('C04 unchanged pixels cannot authorize input after source, window or geometry changes', async () => {
+  const bytes = Buffer.alloc(128, 7);
+  const variants = [
+    { name: 'source', modified: { source: 'screen' } },
+    { name: 'window', modified: { window_id: '0xDEF' } },
+    { name: 'origin', modified: { origin_x: 1 } },
+    { name: 'scale', modified: { scale_x: 1.25 } },
+    { name: 'source width', modified: { source_width: 401 } },
+    { name: 'returned height', modified: { returned_height: 299 } }
+  ];
+  for (const variant of variants) {
+    let captures = 0;
+    let inputs = 0;
+    const provider = new WindowsUiaProvider({
+      platform: 'win32',
+      client: {
+        async call(method: string) {
+          if (method === 'input') { inputs++; return { dispatched: true }; }
+          captures++;
+          return {
+            ...nativeCapture(bytes),
+            ...(captures === 1 ? {} : variant.modified)
+          };
+        },
+        close() {}
+      }
+    });
+    try {
+      const captured = await provider.execute({
+        id: 'before-' + variant.name, capability: 'visual.capture', risk: 'read',
+        provenance: { kind: 'runtime' },
+        input: { source: 'region', region: { x: 0, y: 0, width: 400, height: 300 } }
+      } as any);
+      assert.equal(captured.ok, true);
+      const output = captured.output as { captureId: string; sha256: string };
+      const result = await provider.execute({
+        id: 'action-' + variant.name, capability: 'input.operate', risk: 'external',
+        provenance: { kind: 'runtime' },
+        input: {
+          operation: 'click', captureId: output.captureId,
+          expectedSha256: output.sha256, x: 20, y: 20
+        }
+      } as any);
+      assert.equal(captures, 2, variant.name + ': recaptured before input');
+      assert.equal(inputs, 0, variant.name + ': did not dispatch physical input');
+      assert.equal(result.ok, false, variant.name);
+      assert.equal(result.error?.code, 'INPUT_CAPTURE_STALE', variant.name);
+    } finally {
+      await provider.close();
+    }
+  }
+});
