@@ -66,3 +66,33 @@ test('AgentKernel emits complete ordered trace for a verified read action',async
   assert.equal(coverage.complete,true);
   assert.equal(coverage.terminalOutcome,'OK');
 });
+
+test('AgentKernel keeps actions in the same task as independent causal traces',async(t)=>{
+  const stateDir=await fs.mkdtemp(path.join(os.tmpdir(),'mecord-c09-kernel-action-traces-'));
+  t.after(()=>fs.rm(stateDir,{recursive:true,force:true}));
+  const trace=new OperationTraceStore(stateDir);
+  const kernel=new AgentKernel({
+    stateDir,
+    runtime:new OperatorRuntime().register(new TraceProbeProvider()),
+    leases:new ResourceLeaseStore(stateDir),
+    operationTrace:trace
+  });
+  const permissions:PermissionProfile={
+    allowedCapabilities:['computer.inspect'],allowedRoots:[stateDir],
+    allowExternalWrites:false,allowSystemChanges:false,allowDestructive:false
+  };
+  for(const id of ['c09-action-one','c09-action-two']){
+    const result=await kernel.execute({
+      id,taskId:'c09-shared-task',capability:'computer.inspect',risk:'read',
+      input:{path:path.join(stateDir,id)},provenance:{kind:'trusted_policy'}
+    },permissions);
+    assert.equal(result.ok,true);
+  }
+  assert.equal((await trace.list({traceId:'c09-shared-task'})).length,0);
+  for(const id of ['c09-action-one','c09-action-two']){
+    const events=await trace.list({traceId:id,limit:100});
+    assert.equal(events.filter((event)=>event.stage==='REQUEST').length,1);
+    assert.equal(events.filter((event)=>event.stage==='COMPLETE').length,1);
+    assert.equal(evaluateOperationTraceCoverage(events).complete,true);
+  }
+});

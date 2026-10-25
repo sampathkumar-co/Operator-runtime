@@ -7,6 +7,7 @@ import { AccountDeviceRegistry } from '../../../src/core/account-device-registry
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { DeviceRegistryStore, answerPairingChallenge } from '../../../src/core/device-registry.ts';
 import { DeviceResetStore } from '../../../src/core/device-reset.ts';
+import { OperationTraceStore } from '../../../src/core/operation-trace.ts';
 import { RelayDeliveryStore } from '../../../src/core/relay-delivery-store.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
@@ -50,10 +51,16 @@ test('relay result service accepts only scoped results matching the first pendin
   const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
   const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
   const deliveries = new RelayDeliveryStore(authorityState);
-  const first = await deliveries.enqueue(device.deviceId, 'action', { action: { id: 'a1' } });
+  const operationTrace = new OperationTraceStore(authorityState);
+  const traceExecutionContextDigest = 'a'.repeat(64);
+  const first = await deliveries.enqueue(device.deviceId, 'action', {
+    action: { id: 'a1' }, traceId: 'a1', traceExecutionContextDigest
+  });
   await deliveries.enqueue(device.deviceId, 'action', { action: { id: 'a2' } });
 
-  const service = new RelayResultService({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, deliveries });
+  const service = new RelayResultService({
+    stateDir: authorityState, identity: authorityIdentity, devices, sessions, deliveries, operationTrace
+  });
   cleanupAfter(t, service);
   const { port } = await service.listen('127.0.0.1', 0);
   const url = `http://127.0.0.1:${port}/v1/device-result`;
@@ -94,6 +101,10 @@ test('relay result service accepts only scoped results matching the first pendin
   assert.equal(accepted.status, 200);
   assert.equal((await accepted.json() as any).accepted.duplicate, false);
   assert.deepEqual((await service.getResult(device.deviceId, first.seq))?.result, { ok: true, output: { value: 7 } });
+  const resultTrace = await operationTrace.list({ traceId: 'a1', limit: 10 });
+  assert.equal(resultTrace.length, 1);
+  assert.equal(resultTrace[0]?.stage, 'COMPLETE');
+  assert.equal(resultTrace[0]?.executionContextDigest, traceExecutionContextDigest);
 
   const duplicate = await fetch(url, {
     method: 'POST',

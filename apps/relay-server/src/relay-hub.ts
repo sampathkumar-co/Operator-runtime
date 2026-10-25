@@ -332,7 +332,7 @@ export class RelayHub {
   async dispatch(request: RelayDispatchRequest): Promise<RelayDispatchResult> {
     const requiredCapabilities = request.requiredCapabilities ?? [];
     const traceId = relayTraceId(request);
-    await this.#trace(traceId, { accountId: request.accountId }, 'REQUEST', 'OK', { transport: 'relay', kind: request.kind });
+    const requestedAt = this.#clock().toISOString();
     const memberships = await this.#accounts.listDevices(request.accountId);
     const owned = new Set(memberships.map((membership) => membership.deviceId));
     const online = (await this.onlineDevices(request.accountId)).filter((device) => owned.has(device.deviceId));
@@ -343,7 +343,10 @@ export class RelayHub {
       }, online));
     const membership = memberships.find((candidate) => candidate.deviceId === route.deviceId && candidate.status === 'active');
     if (!membership) throw new OperatorError('ACCOUNT_DEVICE_NOT_OWNED', 'Resolved device has no active account authority.');
-    await this.#trace(traceId, { accountId: request.accountId, deviceId: route.deviceId, sessionId: route.sessionId }, 'ROUTE', 'OK', { transport: 'relay', deviceId: route.deviceId });
+    const traceIdentity = { accountId: request.accountId, deviceId: route.deviceId, sessionId: route.sessionId };
+    const traceExecutionContextDigest = executionContextDigest(executionContextIdentityFrom(traceIdentity));
+    await this.#trace(traceId, traceIdentity, 'REQUEST', 'OK', { transport: 'relay', kind: request.kind }, requestedAt);
+    await this.#trace(traceId, traceIdentity, 'ROUTE', 'OK', { transport: 'relay', deviceId: route.deviceId });
     const authority: RelayDeliveryAuthority = {
       accountId: request.accountId,
       deviceId: route.deviceId,
@@ -351,7 +354,7 @@ export class RelayHub {
     };
     await this.#beforeEnqueue?.({ ...authority });
     await this.#assertDispatchAuthority(authority, route.sessionId, requiredCapabilities);
-    const payload = { ...request.payload, approvalAuthority: { ...authority }, traceId };
+    const payload = { ...request.payload, approvalAuthority: { ...authority }, traceId, traceExecutionContextDigest };
     let delivery: StoredRelayDelivery;
     try {
       delivery = await this.#accounts.withActiveAuthorityLease(authority, async () =>
@@ -475,7 +478,8 @@ export class RelayHub {
     identity: { accountId?: string; deviceId?: string; sessionId?: string },
     stage: OperationTraceStage,
     outcome: OperationTraceOutcome,
-    attributes: Record<string, string | number | boolean | null>
+    attributes: Record<string, string | number | boolean | null>,
+    at = this.#clock().toISOString()
   ): Promise<void> {
     if (!this.#operationTrace) return;
     try {
@@ -484,7 +488,7 @@ export class RelayHub {
         executionContextDigest: executionContextDigest(executionContextIdentityFrom(identity)),
         stage,
         outcome,
-        at: this.#clock().toISOString(),
+        at,
         attributes
       });
     } catch {
@@ -986,8 +990,8 @@ function relayTraceId(request: RelayDispatchRequest): string {
   const operationRequest = operation?.request && typeof operation.request === 'object' && !Array.isArray(operation.request) ? operation.request as Record<string, unknown> : undefined;
   const candidates = [
     direct,
-    typeof action?.taskId === 'string' ? action.taskId : undefined,
     typeof action?.id === 'string' ? action.id : undefined,
+    typeof action?.taskId === 'string' ? action.taskId : undefined,
     typeof task?.taskId === 'string' ? task.taskId : undefined,
     typeof taskRequest?.requestId === 'string' ? taskRequest.requestId : undefined,
     typeof operation?.operationId === 'string' ? operation.operationId : undefined,

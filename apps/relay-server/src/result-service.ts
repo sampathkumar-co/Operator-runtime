@@ -412,7 +412,7 @@ export class RelayResultService {
     try {
       await this.#operationTrace.append({
         traceId,
-        executionContextDigest: executionContextDigest(executionContextIdentityFrom({
+        executionContextDigest: deliveryTraceExecutionContextDigest(delivery) ?? executionContextDigest(executionContextIdentityFrom({
           deviceId,
           ...deliveryActionIdentity(delivery)
         })),
@@ -460,10 +460,15 @@ function deliveryTraceId(delivery: { id: string; payload: Record<string, unknown
   const action = delivery.payload.action && typeof delivery.payload.action === 'object' && !Array.isArray(delivery.payload.action)
     ? delivery.payload.action as Record<string, unknown>
     : undefined;
-  for (const candidate of [action?.taskId, action?.id, delivery.id]) {
+  for (const candidate of [action?.id, action?.taskId, delivery.id]) {
     if (typeof candidate === 'string' && /^[A-Za-z0-9._:@/+\-=]{1,256}$/.test(candidate)) return candidate;
   }
   return delivery.id;
+}
+
+function deliveryTraceExecutionContextDigest(delivery: { payload: Record<string, unknown> }): string | undefined {
+  const digest = delivery.payload.traceExecutionContextDigest;
+  return typeof digest === 'string' && /^[0-9a-f]{64}$/.test(digest) ? digest : undefined;
 }
 
 function deliveryActionIdentity(delivery: { payload: Record<string, unknown> }): { taskId?: string; actionId?: string } {
