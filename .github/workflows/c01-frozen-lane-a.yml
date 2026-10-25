@@ -1,0 +1,33 @@
+name: C01 Frozen Model-Only Lane A Evaluation
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/c01-frozen-model-lane-a.mjs'
+      - 'test/c01-frozen-model-lane-a.test.ts'
+      - '.github/workflows/c01-frozen-lane-a.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/c01-frozen-model-lane-a.mjs'
+      - 'test/c01-frozen-model-lane-a.test.ts'
+      - '.github/workflows/c01-frozen-lane-a.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  independent-frozen-decision-scorer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - run: node --experimental-strip-types --test test/c01-frozen-model-lane-a.test.ts test/wave0-evaluation-report.test.ts
+      - name: Disclose no actual model or release certification in CI
+        run: echo 'LANE_A_MODEL_ONLY=SOURCE_STUBS;REAL_MODEL=NOT_RUN;50_HELDOUT=NOT_RUN;NO_MECORD_PROVIDER_DISPATCH;PUBLICATION=NOT_AUTHORIZED'
