@@ -86,6 +86,9 @@ test('C07 post-operation UIA proof requires a causally later known semantic obse
   const verify = observation('verify-app-target', 300, 400, snapshot);
   task.execution!.records.push(verify);
   assert.equal(verifyGoalOutcomeTruth(task).ok, true);
+  task.execution!.records.push(mutation('operate-app-target', 450, 'FAILED'));
+  assert.equal(verifyGoalOutcomeTruth(task).ok, false, 'a newer failed mutation supersedes verified state');
+  task.execution!.records.pop();
 
   // A successful but pre-action read cannot establish the post-action effect.
   verify.startedAt = time(150);
