@@ -141,3 +141,46 @@ test('C09 identical-timestamp dispatch and verification cannot prove causal orde
   assert.equal(report.verified, 0);
   assert.equal(report.falseCompletionCount, 1);
 });
+
+test('C09 coverage cannot use stale verifier after a later side effect to claim COMPLETE', () => {
+  const trace = [
+    e('REQUEST','2026-10-25T00:00:00.000Z'),
+    e('ROUTE','2026-10-25T00:00:00.100Z'),
+    e('POLICY','2026-10-25T00:00:00.200Z'),
+    e('DISPATCH','2026-10-25T00:00:00.300Z'),
+    e('VERIFY','2026-10-25T00:00:00.400Z'),
+    e('DISPATCH','2026-10-25T00:00:00.500Z'),
+    e('COMPLETE','2026-10-25T00:00:00.700Z')
+  ];
+  const stale = evaluateOperationTraceCoverage(trace);
+  assert.equal(stale.complete, false);
+  assert.ok(stale.outOfOrderStages.includes('VERIFY'));
+  assert.equal(summarizeOperationSlo(trace).falseCompletionCount, 1);
+  const fresh = [
+    ...trace.slice(0, -1),
+    e('VERIFY','2026-10-25T00:00:00.600Z'),
+    trace.at(-1)!
+  ];
+  assert.equal(evaluateOperationTraceCoverage(fresh).complete, true);
+  assert.equal(summarizeOperationSlo(fresh).falseCompletionCount, 0);
+});
+
+test('C09 successful trace completion requires latest verifier to be OK and strictly earlier', () => {
+  const ordered = [
+    e('REQUEST','2026-10-25T00:00:00.000Z'),
+    e('ROUTE','2026-10-25T00:00:00.100Z'),
+    e('POLICY','2026-10-25T00:00:00.200Z'),
+    e('DISPATCH','2026-10-25T00:00:00.300Z'),
+    e('VERIFY','2026-10-25T00:00:00.400Z'),
+    e('COMPLETE','2026-10-25T00:00:00.500Z')
+  ];
+  assert.equal(evaluateOperationTraceCoverage(ordered).complete, true);
+  const failedProof = [...ordered.slice(0, -1),
+    e('VERIFY','2026-10-25T00:00:00.450Z','FAILED'), ordered.at(-1)!];
+  assert.equal(evaluateOperationTraceCoverage(failedProof).complete, false);
+  const simultaneous = [
+    ...ordered.slice(0, -1),
+    e('COMPLETE','2026-10-25T00:00:00.400Z')
+  ];
+  assert.equal(evaluateOperationTraceCoverage(simultaneous).complete, false);
+});
