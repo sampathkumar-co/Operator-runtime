@@ -380,6 +380,11 @@ export class WindowsUiaProvider implements CapabilityProvider {
     this.#pruneCaptureLeases();
     const captureParams = normalizeVisualCaptureInput(action.input);
     const raw = asRecord(await this.#client.call('capture', captureParams, signal));
+    // Never return a full-screen capture in response to a region/window request.
+    // The native helper must echo the exact selected capture source.
+    if (raw.source !== captureParams.source) {
+      throw new OperatorError('VISUAL_CAPTURE_INVALID', 'Native capture source differs from the authorized source.');
+    }
     const pngBase64 = String(raw.png_base64 ?? '');
     const png = Buffer.from(pngBase64, 'base64');
     if (png.length < 16 || png.length > 8 * 1024 * 1024) throw new OperatorError('VISUAL_CAPTURE_INVALID', 'Native capture returned an invalid PNG payload.');
@@ -731,14 +736,22 @@ function normalizeOperateInput(input: Record<string, unknown>) {
 
 
 function normalizeVisualCaptureInput(input: Record<string, unknown>): Record<string, unknown> {
-  const source = ['screen', 'window', 'region'].includes(String(input.source ?? 'screen')) ? String(input.source ?? 'screen') : 'screen';
+  const source = input.source === undefined ? 'screen' : input.source;
+  if (source !== 'screen' && source !== 'window' && source !== 'region') {
+    throw new OperatorError('VISUAL_CAPTURE_INVALID', 'Visual capture source must be explicitly screen, window or region.');
+  }
+  if ((source === 'screen' && (input.selector !== undefined || input.region !== undefined)) ||
+      (source === 'window' && input.region !== undefined) ||
+      (source === 'region' && input.selector !== undefined)) {
+    throw new OperatorError('VISUAL_CAPTURE_INVALID', 'Capture selector and region must match the exact selected source.');
+  }
   const output: Record<string, unknown> = {
     source,
     max_width: boundedCaptureInteger(input.maxWidth ?? 960, 1, 1280, 'maxWidth'),
     max_height: boundedCaptureInteger(input.maxHeight ?? 540, 1, 720, 'maxHeight'),
     wait_ms: boundedCaptureInteger(input.waitMs ?? 0, 0, 10_000, 'waitMs')
   };
-  if (source === 'window') output.selector = normalizeSelector(input.selector);
+  if (source === 'window') output.selector = normalizeSelector(input.selector, true);
   if (source === 'region') {
     const region = asRecord(input.region);
     output.region = {
@@ -767,15 +780,17 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 function boundedCaptureInteger(value: unknown, min: number, max: number, label: string): number {
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) throw new OperatorError('VISUAL_INPUT_INVALID', `${label} must be an integer from ${min} to ${max}.`);
-  return parsed;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) {
+    throw new OperatorError('VISUAL_INPUT_INVALID', `${label} must be an exact integer from ${min} to ${max}.`);
+  }
+  return value;
 }
 
 function boundedCaptureNumber(value: unknown, min: number, max: number, label: string): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < min || parsed > max) throw new OperatorError('VISUAL_CAPTURE_INVALID', `${label} is outside the allowed range.`);
-  return parsed;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
+    throw new OperatorError('VISUAL_CAPTURE_INVALID', `${label} must be an exact finite number within the allowed range.`);
+  }
+  return value;
 }
 
 function requiredCaptureText(value: unknown, label: string, max: number): string {
