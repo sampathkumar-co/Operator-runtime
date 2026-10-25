@@ -1,6 +1,7 @@
 import type { PermissionProfile } from './types.ts';
 import type { CapabilityDiscoverySnapshot } from './capability-discovery.ts';
 import { OperatorError } from './errors.ts';
+import { CAPABILITY_RISK_RULES } from './capability-policy.ts';
 
 const MAX_ITEMS = 128;
 const CAPABILITY = /^[A-Za-z][A-Za-z0-9._:-]{0,255}$/;
@@ -107,6 +108,9 @@ export function buildContextualCapabilityReadiness(input: {
         entry.providerNames.some(name=>typeof name !== 'string' || !PROVIDER.test(name)) ||
         new Set(entry.providerNames).size !== entry.providerNames.length ||
         !RISKS.has(entry.canonicalRisk) ||
+        !Object.hasOwn(CAPABILITY_RISK_RULES, entry.capability) ||
+        CAPABILITY_RISK_RULES[entry.capability] !== entry.canonicalRisk ||
+        entry.providerNames.length > input.declaration.registeredProviders ||
         typeof entry.mayRequireTypedInput !== 'boolean' ||
         (entry.status === 'DECLARED_NOT_EXECUTED' && entry.providerNames.length === 0) ||
         (entry.status === 'NOT_ADVERTISED_WITH_EMPTY_INPUT' && entry.providerNames.length !== 0) ||
