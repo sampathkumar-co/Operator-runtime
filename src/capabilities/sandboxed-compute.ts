@@ -46,6 +46,7 @@ export class SandboxedComputeProvider implements CapabilityProvider {
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
+      if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Sandboxed compute provider does not support this capability.');
       const language = String(action.input.language ?? '') as Language;
       if (language !== 'javascript' && language !== 'python') throw new OperatorError('COMPUTE_LANGUAGE_INVALID', 'compute.run language must be javascript or python.');
       const code = String(action.input.code ?? '');
