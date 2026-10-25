@@ -40,7 +40,7 @@ const PUBLIC_UIA_ERROR_CODES = new Set([
   'INVALID_UIA_OPERATION', 'INVALID_UIA_SCROLL_AMOUNT',
   'INVALID_UIA_SELECTOR', 'INVALID_UIA_VALUE', 'INVALID_UIA_INSPECT_LIMIT',
   'INPUT_AFTER_CAPTURE_INVALID', 'INPUT_AFTER_CAPTURE_FAILED',
-  'INPUT_AFTER_WINDOW_CHANGED', 'INPUT_CAPTURE_INVALID',
+  'INPUT_AFTER_WINDOW_CHANGED', 'INPUT_AFTER_SOURCE_CHANGED', 'INPUT_CAPTURE_INVALID',
   'INPUT_CAPTURE_MISMATCH', 'INPUT_CAPTURE_REVALIDATION_FAILED',
   'INPUT_CAPTURE_STALE', 'INPUT_KEYS_INVALID',
   'INPUT_OPERATION_INVALID', 'INPUT_POINT_OUTSIDE_CAPTURE',
@@ -51,6 +51,7 @@ const UNCERTAIN_UIA_MUTATION_ERRORS = new Set([
   'UIA_SIDECAR_WRITE_FAILED', 'EXECUTION_ABORTED', 'UIA_OPERATION_FAILED',
   'UIA_SIDECAR_PROTOCOL_INVALID',
   'INPUT_AFTER_CAPTURE_FAILED', 'INPUT_AFTER_CAPTURE_INVALID',
+  'INPUT_AFTER_WINDOW_CHANGED', 'INPUT_AFTER_SOURCE_CHANGED',
   'VISUAL_CAPTURE_ARTIFACT_REQUIRED', 'UIA_PROVIDER_FAILED'
 ]);
 const CAPTURE_LEASE_MS = 90_000;
@@ -421,6 +422,19 @@ export class WindowsUiaProvider implements CapabilityProvider {
     const scaleX = boundedCaptureNumber(raw.scale_x, 0.0001, 1000, 'scale_x');
     const scaleY = boundedCaptureNumber(raw.scale_y, 0.0001, 1000, 'scale_y');
     const windowId = typeof raw.window_id === 'string' && raw.window_id ? raw.window_id : undefined;
+    // The native helper does not clip authorized regions: the returned pixels
+    // must have the exact requested geometry, not merely claim source=region.
+    // Validate before storing sensitive evidence or leasing pointer authority.
+    if (captureParams.source === 'region') {
+      const region = captureParams.region as {x:number;y:number;width:number;height:number};
+      if (originX !== region.x || originY !== region.y ||
+          sourceWidth !== region.width || sourceHeight !== region.height) {
+        throw new OperatorError('VISUAL_CAPTURE_INVALID', 'Native capture region differs from the authorized coordinates.');
+      }
+    }
+    if (captureParams.source === 'window' && !windowId) {
+      throw new OperatorError('VISUAL_CAPTURE_INVALID', 'Native window capture lacked the resolved window identity.');
+    }
     const sceneKey = windowId ? `desktop:window:${windowId.toLocaleLowerCase()}` : 'visual:screen';
     const tier = renderedTier(action.input.evidenceTier, String(captureParams.source));
     const targetAssociation = optionalCaptureText(action.input.targetAssociation, 'targetAssociation', 512);
@@ -529,9 +543,23 @@ export class WindowsUiaProvider implements CapabilityProvider {
     }
     const currentSha256 = crypto.createHash('sha256').update(currentPng).digest('hex');
     const currentWindowId = typeof currentRaw.window_id === 'string' ? currentRaw.window_id : undefined;
-    if (currentSha256 !== lease.sha256 || (lease.windowId && currentWindowId !== lease.windowId)) {
+    // An unchanged screenshot hash cannot prove stable physical coordinates.
+    // A window can move or DPI/monitor scaling can change over identical pixels.
+    // Reject mismatched native geometry/source *before* dispatching any input.
+    const sameGeometry =
+      currentRaw.source === lease.captureParams.source &&
+      currentRaw.origin_x === lease.originX &&
+      currentRaw.origin_y === lease.originY &&
+      currentRaw.source_width === lease.sourceWidth &&
+      currentRaw.source_height === lease.sourceHeight &&
+      currentRaw.returned_width === lease.returnedWidth &&
+      currentRaw.returned_height === lease.returnedHeight &&
+      currentRaw.scale_x === lease.scaleX &&
+      currentRaw.scale_y === lease.scaleY;
+    if (currentSha256 !== lease.sha256 || !sameGeometry ||
+        (lease.windowId && currentWindowId !== lease.windowId)) {
       this.#captureLeases.delete(captureId);
-      throw new OperatorError('INPUT_CAPTURE_STALE', 'Visual state changed after reasoning; capture fresh state before physical input.', { retryable: true });
+      throw new OperatorError('INPUT_CAPTURE_STALE', 'Visual state or physical geometry changed after reasoning; capture fresh state before input.', { retryable: true });
     }
 
     const before = {
@@ -561,6 +589,16 @@ export class WindowsUiaProvider implements CapabilityProvider {
     if (afterPng.length < 16 || afterPng.length > 8 * 1024 * 1024) {
       throw new OperatorError('INPUT_AFTER_CAPTURE_INVALID', 'Physical input was dispatched but AFTER capture returned an invalid PNG payload.', { retryable: false });
     }
+    // The post-input capture is observational proof, not authority to persist
+    // pixels from a different scope or native window. The input has already
+    // been dispatched, so any mismatch is an UNCERTAIN result, never a retry.
+    if (afterRaw.source !== lease.captureParams.source) {
+      throw new OperatorError('INPUT_AFTER_SOURCE_CHANGED', 'Physical input was dispatched but AFTER capture used a different source.', { retryable: false });
+    }
+    const afterWindowId = typeof afterRaw.window_id === 'string' && afterRaw.window_id ? afterRaw.window_id : undefined;
+    if (lease.windowId && afterWindowId !== lease.windowId) {
+      throw new OperatorError('INPUT_AFTER_WINDOW_CHANGED', 'Physical input was dispatched but AFTER capture resolved to a different window.', { retryable: false });
+    }
     const afterSha256 = crypto.createHash('sha256').update(afterPng).digest('hex');
     const afterObservedAt = Date.now();
     const after = {
@@ -574,12 +612,8 @@ export class WindowsUiaProvider implements CapabilityProvider {
       width: boundedCaptureInteger(afterRaw.returned_width, 1, 1280, 'after.returned_width'),
       height: boundedCaptureInteger(afterRaw.returned_height, 1, 720, 'after.returned_height'),
       ...(typeof afterRaw.window_id === 'string' && afterRaw.window_id ? { windowId: afterRaw.window_id } : {}),
-      mimeType: 'image/png',
-      ...await this.#visualOutput(afterPng, afterBase64, String(afterRaw.source))
+      mimeType: 'image/png'
     };
-    if (lease.windowId && after.windowId !== lease.windowId) {
-      throw new OperatorError('INPUT_AFTER_WINDOW_CHANGED', 'Physical input was dispatched but AFTER capture resolved to a different window.', { retryable: false });
-    }
     const afterRenderedEvidence = createRenderedEvidence({
       tier: lease.tier,
       sceneKey: lease.sceneKey,
@@ -606,7 +640,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
       operation,
       before: { ...before, renderedEvidence: lease.renderedEvidence },
       native,
-      after: { ...after, renderedEvidence: afterRenderedEvidence },
+      after: { ...after, ...await this.#visualOutput(afterPng, afterBase64, String(afterRaw.source)), renderedEvidence: afterRenderedEvidence },
       ...(renderedDelta ? { renderedDelta } : {}),
       postcondition: {
         dispatched: true,
