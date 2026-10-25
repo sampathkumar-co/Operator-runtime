@@ -158,8 +158,12 @@ test('C10 projection follows latest operation, not an older blocked action', () 
   const projection = projectTaskRuntime(task);
   assert.equal(projection.currentAction?.actionId, 'newest-action');
   assert.equal(projection.currentAction?.state, 'SUCCEEDED');
-  assert.equal(projection.reconciliationRequired, false);
-  assert.equal(projection.blocker, undefined);
+  assert.equal(projection.reconciliationRequired, true, 'older unresolved effects remain visible even after latest success');
+  assert.equal(projection.blocker?.code, 'ACTION_RECONCILIATION_REQUIRED');
+  delete task.execution!.records[0]!.sideEffectState;
+  const settled = projectTaskRuntime(task);
+  assert.equal(settled.reconciliationRequired, false, 'historical planner event alone is not a pending incident');
+  assert.equal(settled.blocker, undefined);
   task.state = 'BLOCKED';
   assert.equal(projectTaskRuntime(task).reconciliationRequired, true);
 });
