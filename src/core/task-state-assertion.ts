@@ -14,15 +14,22 @@ export function normalizeTaskStateAssertions(input: unknown, label = 'assertions
   return input.map((item, index) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw new OperatorError('TASK_GOAL_INVALID', `${label}[${index}] is invalid.`);
     const raw = item as Record<string, unknown>;
-    const path = String(raw.path ?? '');
-    if (path.length < 1 || path.length > 256 || !path.split('.').every((part) => /^[A-Za-z0-9_-]{1,64}$/.test(part))) {
+    // An array/object converted through String() is not a typed assertion.
+    // Its accidental coercion must not become a different machine-state path
+    // or turn an unrecognised operation into an accepted comparison.
+    const path = raw.path;
+    if (typeof path !== 'string' || path.length < 1 || path.length > 256 ||
+        !path.split('.').every((part) => /^[A-Za-z0-9_-]{1,64}$/.test(part))) {
       throw new OperatorError('TASK_GOAL_INVALID', `${label}[${index}].path is invalid.`);
     }
-    const operator = String(raw.operator ?? '') as TaskStateAssertion['operator'];
-    if (!['exists', 'equals', 'not_equals', 'includes'].includes(operator)) throw new OperatorError('TASK_GOAL_INVALID', `${label}[${index}].operator is invalid.`);
+    const operator = raw.operator;
+    if (typeof operator !== 'string' || !['exists', 'equals', 'not_equals', 'includes'].includes(operator)) {
+      throw new OperatorError('TASK_GOAL_INVALID', `${label}[${index}].operator is invalid.`);
+    }
     if (operator !== 'exists' && raw.value === undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}[${index}] requires value.`);
     if (raw.value !== undefined && Buffer.byteLength(canonicalJson(raw.value)) > 16 * 1024) throw new OperatorError('TASK_GOAL_INVALID', `${label}[${index}].value is too large.`);
-    return { path, operator, ...(raw.value === undefined ? {} : { value: structuredClone(raw.value) }) };
+    return { path, operator: operator as TaskStateAssertion['operator'],
+      ...(raw.value === undefined ? {} : { value: structuredClone(raw.value) }) };
   });
 }
 
