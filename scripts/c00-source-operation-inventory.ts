@@ -7,6 +7,7 @@ import { censusCurrentGitCheckout } from './wave0-provider-census.ts';
 const TEST_ROOT = fileURLToPath(new URL('../test/', import.meta.url));
 const MAX_TEST_FILES = 10_000;
 const MAX_SINGLE_TEST_BYTES = 512 * 1024;
+const MAX_TOTAL_TEST_SOURCE_BYTES = 64 * 1024 * 1024;
 
 async function sourceTestReferences() {
   const pending = [TEST_ROOT];
@@ -26,13 +27,15 @@ async function sourceTestReferences() {
   paths.sort();
   const references: Array<{ path: string; source: string | null }> = [];
   let omittedOversize = 0;
+  let bytesRead = 0;
   for (const full of paths) {
     const relative = path.relative(TEST_ROOT, full).split(path.sep).join('/');
     const stat = await fs.stat(full);
-    if (stat.size > MAX_SINGLE_TEST_BYTES) {
+    if (stat.size > MAX_SINGLE_TEST_BYTES || bytesRead + stat.size > MAX_TOTAL_TEST_SOURCE_BYTES) {
       omittedOversize++;
       references.push({ path: relative, source: null });
     } else {
+      bytesRead += stat.size;
       references.push({ path: relative, source: await fs.readFile(full, 'utf8') });
     }
   }
