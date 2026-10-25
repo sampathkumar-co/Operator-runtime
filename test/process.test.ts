@@ -537,3 +537,36 @@ test('Windows native one-shot Job Object contains a burst of independently detac
       'detached descendant ' + n + ' escaped the dead supervisor Job Object');
   }
 });
+
+test('C06 trusted terminal invocation and managed session refuse coercible arguments before spawn', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-process-exact-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'] });
+  t.after(() => provider.close());
+  let invoked = 0;
+  const imposter = { toString() { invoked++; return 'node'; } };
+  const attempts = [
+    { capability: 'terminal.execute', input: { executable: ['node'], args: [], cwd: root } },
+    { capability: 'terminal.execute', input: { executable: imposter, args: [], cwd: root } },
+    { capability: 'terminal.execute', input: { executable: 'node', args: [['-e'], 'process.exit(0)'], cwd: root } },
+    { capability: 'terminal.execute', input: { executable: 'node', args: [], cwd: [root] } },
+    { capability: 'terminal.session', input: { operation: 'start', executable: ['node'], args: [], cwd: root } },
+    { capability: 'terminal.session', input: { operation: 'start', executable: 'node', args: [imposter], cwd: root } },
+    { capability: 'terminal.session', input: { operation: 'start', executable: 'node', args: [], cwd: [root] } },
+    { capability: 'terminal.session', input: { operation: 'list', developerSessionId: ['trusted'] } }
+  ];
+  for (const [index, item] of attempts.entries()) {
+    const result = await provider.execute({
+      id: 'coercion-' + index, capability: item.capability,
+      risk: item.capability === 'terminal.execute' ? 'destructive' : 'destructive',
+      input: item.input, provenance: { kind: 'runtime' }
+    } as any);
+    assert.equal(result.ok, false, 'case ' + index);
+    assert.ok(['PROCESS_INPUT_INVALID', 'DEVELOPER_RUNTIME_SESSION_INVALID'].includes(result.error?.code ?? ''), 'case ' + index);
+  }
+  assert.equal(invoked, 0, 'No attacker coercion hook may run before terminal authority.');
+  assert.throws(() => provider.resolveRisk({
+    id: 'risk-array', capability: 'terminal.session', risk: 'read',
+    input: { operation: ['list'] }, provenance: { kind: 'runtime' }
+  } as any), /terminal.session operation/);
+});
