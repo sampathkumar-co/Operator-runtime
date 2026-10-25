@@ -58,14 +58,17 @@ export function createSanitizedEvaluationTrace(input) {
  const steps=input.steps.map(recordStep);
  // Uncertain effect persists across any number of observations. Only an
  // explicit positive reconciliation step can clear it before new dispatch.
- let unresolvedUncertain=false;
+ const unresolvedUncertain=new Set();
  for(const step of steps){
-   if(unresolvedUncertain&&step.phase==='DISPATCH'){
+   if(unresolvedUncertain.size>0&&step.phase==='DISPATCH'){
      deny('Uncertain prior side effect cannot be silently followed by another dispatch.');
    }
-   if(step.sideEffectState==='uncertain') unresolvedUncertain=true;
-   if(step.phase==='RECONCILE'&&step.result==='PASS'&&step.sideEffectState!=='uncertain'){
-     unresolvedUncertain=false;
+   if(step.sideEffectState==='uncertain') unresolvedUncertain.add(step.actionOrdinal);
+   // Reconciliation evidence is scoped to the same numeric action identity.
+   // A successful read or an unrelated reconciliation must never clear
+   // uncertainty about an earlier side effect, and "none" is not proof.
+   if(step.phase==='RECONCILE'&&step.result==='PASS'&&step.sideEffectState==='known'){
+     unresolvedUncertain.delete(step.actionOrdinal);
    }
  }
  // A single Lane C arm is NOT a paired cohort. Keep only the exact
