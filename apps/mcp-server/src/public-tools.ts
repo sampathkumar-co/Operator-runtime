@@ -145,11 +145,19 @@ type PublicMcpServerInternals = {
 function installPublicToolSecurityProjection(server: McpServer): void {
   const internal = server as unknown as PublicMcpServerInternals;
   server.server.removeRequestHandler('tools/list');
-  server.server.setRequestHandler('tools/list', (() => ({
-    tools: Object.entries(internal._registeredTools)
-      .filter(([, tool]) => tool.enabled)
-      .map(([name, tool]) => publicToolDefinition(internal, name, tool))
-  })) as any);
+  server.server.setRequestHandler('tools/list', (() => {
+    const visible=Object.entries(internal._registeredTools)
+      .filter(([,tool])=>tool.enabled);
+    const expected=new Set(PUBLIC_TOOL_NAMES);
+    if(visible.length!==expected.size ||
+      visible.some(([name])=>!expected.has(name)) ||
+      PUBLIC_TOOL_NAMES.some(name=>!visible.some(([actual])=>actual===name))) {
+      throw new Error('PUBLIC_TOOL_SURFACE_MISMATCH: only the nine versioned public tools may be exposed.');
+    }
+    return {
+      tools:visible.map(([name,tool])=>publicToolDefinition(internal,name,tool))
+    };
+  }) as any);
 }
 
 function publicToolDefinition(
@@ -177,7 +185,10 @@ function validatedSecuritySchemes(input: unknown): Array<{ type: 'oauth2'; scope
   if (scheme?.type !== 'oauth2' || !Array.isArray(scheme.scopes) || scheme.scopes.length < 1) {
     throw new Error('Public tool OAuth metadata is invalid.');
   }
-  const scopes = scheme.scopes.map((scope) => String(scope));
+  if (scheme.scopes.some(scope => typeof scope !== 'string')) {
+    throw new Error('Public tool OAuth scope metadata must contain exact literal strings.');
+  }
+  const scopes=scheme.scopes as string[];
   if (scopes.some((scope) => !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/.test(scope))) {
     throw new Error('Public tool OAuth scope metadata is invalid.');
   }
