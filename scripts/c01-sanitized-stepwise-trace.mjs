@@ -21,7 +21,9 @@ function recordStep(value,index){
     !count(value.sequence,1000)||value.sequence!==index+1||
     !PHASES.has(value.phase)||!RESULTS.has(value.result)||
     !SIDE_EFFECTS.has(value.sideEffectState)||!STAGES.has(value.failureStage)||
-    !PROVIDERS.has(value.providerClass)||!count(value.durationMs,120000)||
+    !PROVIDERS.has(value.providerClass)||
+    typeof value.durationMs!=='number'||!Number.isFinite(value.durationMs)||
+    value.durationMs<0||value.durationMs>120000||
     !DIGEST.test(value.evidenceDigest??'')||
     !count(value.actionOrdinal,1000)){
    deny('Each step must have exact sequence, bounded categorical fields and an evidence SHA; raw user content is forbidden.');
