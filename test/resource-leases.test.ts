@@ -578,3 +578,24 @@ test('C08 even empty leases reject an invalid mode and lose ownership after rele
     (error: any) => error?.code === 'RESOURCE_LEASE_LOST'
   );
 });
+
+test('C08 no-resource lease cannot bypass reconciliation identity preflight', async (t) => {
+  const store = new ResourceLeaseStore(await temp(t));
+  for (const mutationActionId of ['', 42, { toString: () => 'prior-authorized-action' },
+    String.fromCharCode(0), 'x'.repeat(513)] as unknown[]) {
+    await assert.rejects(
+      () => store.acquire('owner', [], 'exclusive', { mutationActionId } as any),
+      (error: any) => error?.code === 'RESOURCE_LEASE_INPUT_INVALID'
+    );
+  }
+  for (const options of [null, []] as unknown[]) {
+    await assert.rejects(
+      () => store.acquire('owner', [], 'shared', options as any),
+      (error: any) => error?.code === 'RESOURCE_LEASE_INPUT_INVALID'
+    );
+  }
+  const empty = await store.acquire('owner', [], 'exclusive', { mutationActionId: 'bound-case' });
+  await empty.assertOwned();
+  await empty.release();
+  await assert.rejects(() => empty.assertOwned(), (error: any) => error?.code === 'RESOURCE_LEASE_LOST');
+});
