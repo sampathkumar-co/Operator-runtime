@@ -251,3 +251,39 @@ test('C05 asynchronous native review cannot submit after the trusted Stop signal
     signal: stop.signal
   }), (error: any) => error?.code === 'TASK_MODEL_REVIEW_DENIED');
 });
+
+test('C05 native confirmation accepts only literal boolean true, never truthy provider output', async () => {
+  let nativeResult: unknown = 'true';
+  let submits = 0;
+  const model = new BoundedModelGoalInference({
+    modelId: 'fake-model', maxOutputTokens: 256, maxCostMicros: 0, timeoutMs: 1000,
+    ledger: { async reserve() { return { reservationId: 'reserved' }; }, async finalize() {} },
+    generator: { async generate() { return { text: JSON.stringify(modelResponse) }; } }
+  });
+  const intake = new TrustedReviewedModelTaskIntake({
+    model, authority: {
+      async currentApprovedScope() { return scope; },
+      async verifyTrustedReview() { return nativeResult as boolean; },
+      async submitReviewedTask() {
+        submits++;
+        return { id: 'queued-task', executionStarted: false as const };
+      }
+    }
+  });
+  const p = await intake.propose({
+    principal: 'auth-owner', request: scope, allowModelTransmission: true
+  });
+  const review = {
+    principal: 'auth-owner', proposalId: p.proposalId,
+    proposalDigest: p.proposalDigest, reviewProof: 'native-proof'
+  };
+  for (const invalid of ['true', 1, {}, [], null, undefined]) {
+    nativeResult = invalid;
+    await assert.rejects(intake.confirm(review),
+      (error: any) => error?.code === 'TASK_MODEL_REVIEW_DENIED');
+    assert.equal(submits, 0);
+  }
+  nativeResult = true;
+  assert.equal((await intake.confirm(review)).taskId, 'queued-task');
+  assert.equal(submits, 1);
+});
