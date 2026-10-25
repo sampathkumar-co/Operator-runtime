@@ -874,10 +874,13 @@ export async function performSemanticInteraction(
           ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
         };
       }
-      const requested = input.operation === 'key_press' ? [String(input.key ?? '')] : Array.isArray(input.keys) ? input.keys.map(String) : [];
-      if (!requested.length || requested.length > 4 || requested.some((key) => !isSupportedBrowserNativeKey(key))) {
+      const requestedRaw = input.operation === 'key_press'
+        ? [input.key] : Array.isArray(input.keys) ? input.keys : [];
+      if (!requestedRaw.length || requestedRaw.length > 4 ||
+          requestedRaw.some((key) => !isSupportedBrowserNativeKey(key))) {
         throw new OperatorError('INVALID_BROWSER_KEY', 'Keyboard input must use one supported key or a bounded supported modifier chord.', { retryable: false });
       }
+      const requested = requestedRaw as string[];
       const modifierBit = (key: string) => key === 'Alt' ? 1 : key === 'Control' ? 2 : key === 'Meta' ? 4 : key === 'Shift' ? 8 : 0;
       const keyMeta = (key: string) => {
         const upper = key.length === 1 ? key.toUpperCase() : key;
