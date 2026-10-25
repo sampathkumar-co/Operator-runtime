@@ -215,6 +215,7 @@ export interface OperationSloSummary {
   falseCompletionCount: number;
   p50CompletionMs: number;
   p95CompletionMs: number;
+  p99CompletionMs: number;
 }
 
 export function summarizeOperationSlo(eventsInput: OperationTraceEvent[]): OperationSloSummary {
@@ -259,7 +260,8 @@ export function summarizeOperationSlo(eventsInput: OperationTraceEvent[]): Opera
     verificationRate: ratio(verified, traces),
     falseCompletionCount,
     p50CompletionMs: percentile(completionMs, 0.5),
-    p95CompletionMs: percentile(completionMs, 0.95)
+    p95CompletionMs: percentile(completionMs, 0.95),
+    p99CompletionMs: percentile(completionMs, 0.99)
   };
 }
 
