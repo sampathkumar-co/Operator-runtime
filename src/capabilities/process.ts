@@ -121,7 +121,7 @@ export class ProcessProvider implements CapabilityProvider {
 
   resolveRisk(action: ActionRequest): ActionRisk {
     if (action.capability !== 'terminal.session') throw new OperatorError('CAPABILITY_RISK_UNRESOLVED', 'Process dynamic risk applies only to terminal.session.');
-    const operation = String(action.input.operation ?? '');
+    const operation = action.input.operation;
     if (operation === 'list' || operation === 'read') return 'read';
     if (['start', 'write', 'terminate'].includes(operation)) return 'destructive';
     throw new OperatorError('PROCESS_INPUT_INVALID', 'terminal.session operation must be start, list, read, write, or terminate.');
@@ -234,8 +234,14 @@ export class ProcessProvider implements CapabilityProvider {
     });
     if (action.capability === 'process.inspect') return await this.#inspectProcesses(action, started, context.signal);
     if (action.capability === 'process.manage') return await this.#manageProcess(action, started, context.signal);
-    const executable = String(action.input.executable ?? '').trim();
-    const args = Array.isArray(action.input.args) ? action.input.args.map(String) : [];
+    const executable = typeof action.input.executable === 'string' ? action.input.executable.trim() : '';
+    if (!exactProcessArgs(action.input.args)) {
+      return failure(action, this.name, started, 'PROCESS_INPUT_INVALID', 'Process arguments must be an exact array of strings.');
+    }
+    if (typeof action.input.cwd !== 'string' || !action.input.cwd) {
+      return failure(action, this.name, started, 'PROCESS_INPUT_INVALID', 'Working directory must be an exact non-empty string.');
+    }
+    const args = (action.input.args ?? []) as string[];
     const timeoutMs = boundedInteger(action.input.timeoutMs, DEFAULT_TIMEOUT_MS, 100, MAX_TIMEOUT_MS);
 
     if (this.#requiredRisk && action.risk !== this.#requiredRisk) {
@@ -252,7 +258,7 @@ export class ProcessProvider implements CapabilityProvider {
     }
 
     try {
-      const cwd = await this.#scope.resolveExisting(String(action.input.cwd ?? ''));
+      const cwd = await this.#scope.resolveExisting(action.input.cwd as string);
       const output = await runProcess(executable, args, cwd, timeoutMs, this.#maxOutputBytes, this.#environmentOverrides, context.signal);
       const ok = output.exitCode === 0;
       return {
@@ -297,10 +303,10 @@ export class ProcessProvider implements CapabilityProvider {
     context: CapabilityExecutionContext = {}
   ): Promise<ProviderReconciliationResult> {
     const action = request.action;
-    if (action.capability === 'process.manage' && String(action.input.operation ?? '') === 'terminate') {
+    if (action.capability === 'process.manage' && action.input.operation === 'terminate') {
       if (process.platform !== 'win32') return processReconciliation('uncertain', 'Process reconciliation is certified only on Windows.');
       const pid = boundedInteger(action.input.pid, 0, 1, 0x7fff_ffff);
-      const expectedFingerprint = String(action.input.expectedFingerprint ?? '').toLowerCase();
+      const expectedFingerprint = typeof action.input.expectedFingerprint === 'string' ? action.input.expectedFingerprint.toLowerCase() : '';
       if (!/^[0-9a-f]{64}$/.test(expectedFingerprint)) {
         return processReconciliation('uncertain', 'Process termination reconciliation requires the original fingerprint.');
       }
@@ -318,7 +324,7 @@ export class ProcessProvider implements CapabilityProvider {
       }
     }
 
-    if (action.capability === 'terminal.session' && String(action.input.operation ?? '') === 'terminate') {
+    if (action.capability === 'terminal.session' && action.input.operation === 'terminate') {
       let sessionId: string;
       try { sessionId = requiredSessionId(action.input.sessionId); }
       catch { return processReconciliation('uncertain', 'Managed-session termination reconciliation requires a valid sessionId.'); }
@@ -345,18 +351,22 @@ export class ProcessProvider implements CapabilityProvider {
   async #session(action: ActionRequest, started: number, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     this.#pruneSessions();
     if (context.signal?.aborted) return failure(action, this.name, started, 'EXECUTION_ABORTED', 'Terminal session operation was cancelled before dispatch.');
-    const operation = String(action.input.operation ?? '');
+    const operation = action.input.operation;
     if (operation === 'start') {
       if (this.#closed) return failure(action, this.name, started, 'TERMINAL_SESSION_PROVIDER_CLOSED', 'Terminal session provider is shutting down.');
       if (this.#sessions.size >= MAX_SESSIONS) return failure(action, this.name, started, 'SESSION_LIMIT_REACHED', `At most ${MAX_SESSIONS} managed terminal sessions may exist.`);
-      const executable = String(action.input.executable ?? '').trim();
-      const args = Array.isArray(action.input.args) ? action.input.args.map(String) : [];
+      const executable = typeof action.input.executable === 'string' ? action.input.executable.trim() : '';
+      if (!exactProcessArgs(action.input.args) || typeof action.input.cwd !== 'string' || !action.input.cwd) {
+        return failure(action, this.name, started, 'PROCESS_INPUT_INVALID', 'Terminal start requires exact string arguments and a working directory.');
+      }
+      const args = (action.input.args ?? []) as string[];
       const validation = this.#validateInvocation(executable, args);
       if (validation) return failure(action, this.name, started, validation.code, validation.message);
 
-      const developerSessionId = action.input.developerSessionId === undefined
-        ? undefined
-        : String(action.input.developerSessionId);
+      if (action.input.developerSessionId !== undefined && typeof action.input.developerSessionId !== 'string') {
+        return failure(action, this.name, started, 'DEVELOPER_RUNTIME_SESSION_INVALID', 'Developer Session ID must be a literal string.');
+      }
+      const developerSessionId = action.input.developerSessionId as string | undefined;
       const ports = normalizeDeclaredPorts(action.input.ports);
       if (ports.length > 0 && !developerSessionId) {
         return failure(action, this.name, started, 'DEVELOPER_RUNTIME_SESSION_REQUIRED', 'Declared ports require developerSessionId so ownership can survive restart.');
@@ -392,7 +402,7 @@ export class ProcessProvider implements CapabilityProvider {
           developerLaunchIntent = true;
         }
 
-        const cwd = await this.#scope.resolveExisting(String(action.input.cwd ?? ''));
+        const cwd = await this.#scope.resolveExisting(action.input.cwd as string);
         const env = safeChildEnvironment(process.env, this.#environmentOverrides);
         const trustedExecutable = resolveTrustedExecutable(executable, env);
         child = spawn(trustedExecutable, args, {
@@ -515,9 +525,10 @@ export class ProcessProvider implements CapabilityProvider {
     }
 
     if (operation === 'list') {
-      const developerSessionFilter = action.input.developerSessionId === undefined
-        ? undefined
-        : String(action.input.developerSessionId);
+      if (action.input.developerSessionId !== undefined && typeof action.input.developerSessionId !== 'string') {
+        return failure(action, this.name, started, 'DEVELOPER_RUNTIME_SESSION_INVALID', 'Developer Session filter must be a literal string.');
+      }
+      const developerSessionFilter = action.input.developerSessionId as string | undefined;
       const durable = await this.#store?.list() ?? [];
       const developerOwnership = this.#ownership
         ? (developerSessionFilter
@@ -613,8 +624,8 @@ export class ProcessProvider implements CapabilityProvider {
     if (operation === 'write') {
       if (!session) return failure(action, this.name, started, 'SESSION_NOT_RUNNING', 'Recovered terminal session has no reattachable stdin.');
       if (session.state !== 'running' || session.child.stdin.destroyed) return failure(action, this.name, started, 'SESSION_NOT_RUNNING', 'Managed terminal session is not accepting input.');
-      const input = String(action.input.input ?? '');
-      if (!input || input.includes('\0') || Buffer.byteLength(input, 'utf8') > MAX_SESSION_INPUT_BYTES) {
+      const input = action.input.input;
+      if (typeof input !== 'string' || !input || input.includes('\0') || Buffer.byteLength(input, 'utf8') > MAX_SESSION_INPUT_BYTES) {
         return failure(action, this.name, started, 'PROCESS_INPUT_INVALID', `Session input must contain 1-${MAX_SESSION_INPUT_BYTES} UTF-8 bytes and no NUL.`);
       }
       if (context.signal?.aborted) return failure(action, this.name, started, new OperatorError('EXECUTION_ABORTED', 'Terminal session write was cancelled before dispatch.', { details: { sideEffectState: 'none' } }));
@@ -765,9 +776,9 @@ export class ProcessProvider implements CapabilityProvider {
 
   async #manageProcess(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
     if (process.platform !== 'win32') return failure(action, this.name, started, 'WINDOWS_ONLY', 'System process management is currently certified only on Windows.');
-    if (String(action.input.operation ?? '') !== 'terminate') return failure(action, this.name, started, 'PROCESS_INPUT_INVALID', 'process.manage currently supports only terminate.');
+    if (action.input.operation !== 'terminate') return failure(action, this.name, started, 'PROCESS_INPUT_INVALID', 'process.manage currently supports only terminate.');
     const pid = boundedInteger(action.input.pid, 0, 1, 0x7fff_ffff);
-    const expectedFingerprint = String(action.input.expectedFingerprint ?? '').toLowerCase();
+    const expectedFingerprint = typeof action.input.expectedFingerprint === 'string' ? action.input.expectedFingerprint.toLowerCase() : '';
     if (!/^[0-9a-f]{64}$/.test(expectedFingerprint)) return failure(action, this.name, started, 'PROCESS_PRECONDITION_REQUIRED', 'process.manage terminate requires expectedFingerprint from a fresh process.inspect.');
     if (pid === process.pid || pid <= 4) return failure(action, this.name, started, 'PROCESS_TERMINATE_DENIED', 'Refusing to terminate the Operator process or reserved system PIDs.');
     try {
@@ -1538,4 +1549,9 @@ async function runTaskkill(pid: number, signal?: AbortSignal): Promise<void> {
   const executable = path.join(systemRoot, 'System32', 'taskkill.exe');
   const output = await runProcess(executable, ['/PID', String(pid), '/T', '/F'], process.cwd(), 20_000, 512 * 1024, {}, signal);
   if (output.exitCode !== 0) throw new OperatorError('PROCESS_TERMINATE_FAILED', `taskkill exited with ${String(output.exitCode)}.`);
+}
+
+function exactProcessArgs(value: unknown): boolean {
+  return value === undefined || (Array.isArray(value) &&
+    value.length <= MAX_ARGS && value.every(item => typeof item === 'string'));
 }
