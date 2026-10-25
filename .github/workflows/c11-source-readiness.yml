@@ -8,6 +8,8 @@ on:
       - 'scripts/wave4-publication-gate.mjs'
       - 'test/wave4-publication-gate.test.ts'
       - 'test/wave4-release-workflow-enforcement.test.ts'
+      - 'certification/wave4-owner-key.json'
+      - 'docs/C11_RELEASE_READINESS_AND_OWNER_ACCEPTANCE_2026-10-25.md'
       - '.github/workflows/windows-production-release.yml'
       - '.github/workflows/c11-source-readiness.yml'
   push:
@@ -18,6 +20,8 @@ on:
       - 'scripts/wave4-publication-gate.mjs'
       - 'test/wave4-publication-gate.test.ts'
       - 'test/wave4-release-workflow-enforcement.test.ts'
+      - 'certification/wave4-owner-key.json'
+      - 'docs/C11_RELEASE_READINESS_AND_OWNER_ACCEPTANCE_2026-10-25.md'
       - '.github/workflows/windows-production-release.yml'
       - '.github/workflows/c11-source-readiness.yml'
   workflow_dispatch:
