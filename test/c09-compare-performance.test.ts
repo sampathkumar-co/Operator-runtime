@@ -132,3 +132,63 @@ test('C09 p95 improvements cannot hide a worse p99 or increased human interventi
   });
   assert.equal(increasedCorrections.observedCandidateNotWorse, false);
 });
+
+test('C09 detects false-completion swapping between matched journeys even when totals do not change', () => {
+  const baseline = make(100, { records: [
+    sample(100, { scenarioId: 'old_false_claim', claimedSuccess: true, verifiedSuccess: false }),
+    sample(100, { scenarioId: 'previously_clean', claimedSuccess: false, verifiedSuccess: false })
+  ] });
+  const candidate = make(80, { sourceCommit: '9'.repeat(40), records: [
+    sample(80, { scenarioId: 'old_false_claim', claimedSuccess: false, verifiedSuccess: false }),
+    sample(80, { scenarioId: 'previously_clean', claimedSuccess: true, verifiedSuccess: false })
+  ] });
+  const result = compareMatchedPerformance({ baseline, candidate });
+  assert.equal(result.baseline.falseCompletionCount, result.candidate.falseCompletionCount);
+  assert.ok(result.candidate.p95Ms < result.baseline.p95Ms);
+  assert.equal(result.regressionDiagnostics.introducedFalseCompletionJourneys, 1);
+  assert.deepEqual(result.regressionDiagnostics.reasons, ['NEW_FALSE_COMPLETION_JOURNEY']);
+  assert.equal(result.observedCandidateNotWorse, false);
+  assert.equal(result.releaseAcceptance, 'NOT_ACCEPTED');
+});
+
+test('C09 rejects shifted human interventions and increased measured model spend', () => {
+  const rows = [
+    sample(100, { scenarioId: 'prior_assistance', humanInterventions: 1 }),
+    sample(100, { scenarioId: 'no_assistance', humanInterventions: 0 })
+  ];
+  const changed = [
+    sample(80, { scenarioId: 'prior_assistance', humanInterventions: 0 }),
+    sample(80, { scenarioId: 'no_assistance', humanInterventions: 1 })
+  ];
+  const moved = compareMatchedPerformance({
+    baseline: make(100, { records: rows }),
+    candidate: make(80, { sourceCommit: '9'.repeat(40), records: changed })
+  });
+  assert.equal(moved.candidate.humanInterventions, moved.baseline.humanInterventions);
+  assert.equal(moved.regressionDiagnostics.introducedHumanInterventionJourneys, 1);
+  assert.deepEqual(moved.regressionDiagnostics.reasons, ['NEW_HUMAN_INTERVENTION_JOURNEY']);
+  assert.equal(moved.observedCandidateNotWorse, false);
+
+  const extraSpend = compareMatchedPerformance({
+    baseline: make(100),
+    candidate: make(80, { sourceCommit: '9'.repeat(40), records: [sample(80, { costMicros: 21 })] })
+  });
+  assert.deepEqual(extraSpend.regressionDiagnostics.reasons, ['COST_INCREASE']);
+  assert.equal(extraSpend.observedCandidateNotWorse, false);
+});
+
+test('C09 tail latency gains cannot mask the median becoming slower', () => {
+  const baselineRows = Array.from({ length: 100 }, (_, i) =>
+    sample(i < 60 ? 50 : 200, { scenarioId: 'journey_' + i }));
+  const candidateRows = Array.from({ length: 100 }, (_, i) =>
+    sample(i < 60 ? 70 : 100, { scenarioId: 'journey_' + i }));
+  const result = compareMatchedPerformance({
+    baseline: make(100, { records: baselineRows }),
+    candidate: make(80, { sourceCommit: '9'.repeat(40), records: candidateRows })
+  });
+  assert.ok(result.candidate.p95Ms < result.baseline.p95Ms);
+  assert.ok(result.candidate.p99Ms < result.baseline.p99Ms);
+  assert.ok(result.candidate.p50Ms > result.baseline.p50Ms);
+  assert.deepEqual(result.regressionDiagnostics.reasons, ['P50_LATENCY_REGRESSION']);
+  assert.equal(result.observedCandidateNotWorse, false);
+});

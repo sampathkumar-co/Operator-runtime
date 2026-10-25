@@ -93,17 +93,43 @@ export function compareMatchedPerformance({ baseline, candidate }) {
   const noLostVerifiedJourneys = keys.every(key =>
     oldRows.get(key).verifiedSuccess !== true || newRows.get(key).verifiedSuccess === true
   );
-  const candidateNotWorse = b.p95Ms <= a.p95Ms && b.p99Ms <= a.p99Ms &&
-    noLostVerifiedJourneys &&
-    b.verifiedSuccesses >= a.verifiedSuccesses &&
-    b.falseCompletionCount <= a.falseCompletionCount &&
-    b.humanInterventions <= a.humanInterventions &&
-    b.unauthorizedOperations === 0 && b.uncertainReplays === 0;
+  // Aggregate counters can also hide a false-success or intervention swap
+  // between two different journeys. Regressions belong to the exact frozen
+  // scenario/seed/model identity, not merely to the campaign totals.
+  const introducedFalseCompletionJourneys = keys.filter(key => {
+    const before = oldRows.get(key);
+    const after = newRows.get(key);
+    return after.claimedSuccess && !after.verifiedSuccess &&
+      !(before.claimedSuccess && !before.verifiedSuccess);
+  }).length;
+  const introducedHumanInterventionJourneys = keys.filter(key =>
+    newRows.get(key).humanInterventions > oldRows.get(key).humanInterventions
+  ).length;
+  const reasons = [
+    ...(b.p50Ms > a.p50Ms ? ['P50_LATENCY_REGRESSION'] : []),
+    ...(b.p95Ms > a.p95Ms ? ['P95_LATENCY_REGRESSION'] : []),
+    ...(b.p99Ms > a.p99Ms ? ['P99_LATENCY_REGRESSION'] : []),
+    ...(!noLostVerifiedJourneys ? ['LOST_VERIFIED_JOURNEY'] : []),
+    ...(b.verifiedSuccesses < a.verifiedSuccesses ? ['VERIFIED_COMPLETION_REGRESSION'] : []),
+    ...(b.falseCompletionCount > a.falseCompletionCount ? ['FALSE_COMPLETION_TOTAL_INCREASE'] : []),
+    ...(introducedFalseCompletionJourneys ? ['NEW_FALSE_COMPLETION_JOURNEY'] : []),
+    ...(b.humanInterventions > a.humanInterventions ? ['HUMAN_INTERVENTION_TOTAL_INCREASE'] : []),
+    ...(introducedHumanInterventionJourneys ? ['NEW_HUMAN_INTERVENTION_JOURNEY'] : []),
+    ...(b.costMicros > a.costMicros ? ['COST_INCREASE'] : []),
+    ...(b.unauthorizedOperations ? ['UNAUTHORIZED_OPERATION'] : []),
+    ...(b.uncertainReplays ? ['UNCERTAIN_REPLAY'] : [])
+  ];
+  const candidateNotWorse = reasons.length === 0;
   return {
     schemaVersion: 1,
     baselineSourceCommit: baseline.sourceCommit, candidateSourceCommit: candidate.sourceCommit,
     matchedRecordCount: keys.length, comparisonKeyDigest: digest(keys),
     baseline: a, candidate: b, observedCandidateNotWorse: candidateNotWorse,
+    regressionDiagnostics: {
+      introducedFalseCompletionJourneys,
+      introducedHumanInterventionJourneys,
+      reasons
+    },
     sourceTruth: 'SELF_REPORTED_INPUT_NOT_AUTHENTICATED',
     physicalAcceptance: 'NOT_VERIFIED', modelAndEnvironmentTruth: 'DECLARED_NOT_INDEPENDENTLY_ATTESTED',
     releaseAcceptance: 'NOT_ACCEPTED',
