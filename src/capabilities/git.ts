@@ -175,8 +175,21 @@ function boundedGitInteger(value: unknown, fallback: number, min: number, max: n
   return number;
 }
 
-function structuredGitStatus(result: ActionResult, input: Record<string, unknown>): ActionResult {
+export function structuredGitStatus(result: ActionResult, input: Record<string, unknown>): ActionResult {
   const raw = result.output as { stdout?: unknown; truncated?: unknown } | undefined;
+  // Partial process stdout may end in the middle of a NUL-delimited record.
+  // Never return a success-shaped status or a non-advancing nextOffset for it.
+  if (raw?.truncated === true) {
+    return {
+      ...result, ok: false, evidence: [],
+      output: { branch: null, detached: false, clean: false, entries: [], returnedBytes: 0, truncated: true },
+      error: {
+        code: 'GIT_STATUS_SOURCE_TRUNCATED',
+        message: 'Git subprocess status output was incomplete; cannot prove repository status.',
+        retryable: false
+      }
+    };
+  }
   const records = String(raw?.stdout ?? '').split('\0').filter(Boolean);
   let branch: string | null = null;
   let detached = false;
@@ -212,10 +225,22 @@ function structuredGitStatus(result: ActionResult, input: Record<string, unknown
     if (bytes + entryBytes > maxBytes) break;
     page.push(entry); bytes += entryBytes;
   }
+  // A single valid status entry may exceed the caller's page byte budget.
+  // Returning nextOffset===offset here would cause unbounded retry loops.
+  if (page.length === 0 && offset < entries.length) {
+    return {
+      ...result, ok: false, evidence: [],
+      output: { branch, detached, clean: false, entries: [], offset, returnedBytes: 0, truncated: true },
+      error: {
+        code: 'GIT_STATUS_ENTRY_TOO_LARGE',
+        message: 'A Git status entry exceeds the requested page byte budget.',
+        retryable: false
+      }
+    };
+  }
   const nextOffset = offset + page.length;
-  const truncated = nextOffset < entries.length || raw?.truncated === true;
-  // A truncated status source cannot prove a clean worktree.
-  return { ...result, output: { branch, detached, clean: entries.length === 0 && raw?.truncated !== true, entries: page, offset, returnedBytes: bytes, truncated, ...(truncated ? { nextOffset } : {}) } };
+  const truncated = nextOffset < entries.length;
+  return { ...result, output: { branch, detached, clean: entries.length === 0, entries: page, offset, returnedBytes: bytes, truncated, ...(truncated ? { nextOffset } : {}) } };
 }
 
 async function validatePublicLiteralPaths(
