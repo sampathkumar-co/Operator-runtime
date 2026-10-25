@@ -611,7 +611,7 @@ export async function doctor() {
 
 export async function runRemote({ root = process.cwd(), browser = true } = {}) {
   assertSupportedRuntime();
-  await verifyRuntimePayload();
+  const manifest = await verifyRuntimePayload();
   const authorizedRoot = await canonicalDirectory(root);
   const env = safeRuntimeEnvironment();
   env.OPERATOR_ALLOWED_ROOTS = authorizedRoot;
@@ -628,6 +628,8 @@ export async function runRemote({ root = process.cwd(), browser = true } = {}) {
   env.OPERATOR_WINDOWS_UIA_PATH = helperPath('operator-windows-uia.exe');
   env.OPERATOR_WINDOWS_PATH_LEASE_PATH = helperPath('operator-windows-path-lease.exe');
   env.OPERATOR_REMOTE_PACKAGE = PACKAGE_NAME;
+  env.OPERATOR_RUNTIME_PACKAGE_VERSION = manifest.version;
+  env.OPERATOR_RUNTIME_SOURCE_COMMIT = manifest.sourceCommit;
 
   console.log('[mecord-connect] starting secure remote runtime');
   console.log(`[mecord-connect] authorized root: ${authorizedRoot}`);

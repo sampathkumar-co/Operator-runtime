@@ -44,6 +44,7 @@ export const CONTRACT_REGISTRY = Object.freeze([
   { name: 'developer-verification-receipt', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'control-center-model', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
   { name: 'control-center-ux', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
+  { name: 'control-center-runtime-status', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
   { name: 'operation-trace', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'runtime' },
   { name: 'otlp-operation-trace-export', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
   { name: 'production-slo-decision', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },

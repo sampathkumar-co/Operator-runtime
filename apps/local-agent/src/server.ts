@@ -33,6 +33,7 @@ import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
 import { renderControlCenter } from './control-center.ts';
 import { buildRedactedControlCenterDiagnostics } from '../../../src/core/control-center-diagnostic-export.ts';
+import { buildControlCenterRuntimeStatus } from '../../../src/core/control-center-runtime-status.ts';
 import { ControlCenterSessions, browserUiRouteAllowed, controlCenterBrowserRequestAllowed } from './control-center-session.ts';
 import { resourceKeysForAction } from '../../../src/core/resource-identity.ts';
 import { capabilityRiskRule } from '../../../src/core/capability-policy.ts';
@@ -154,6 +155,7 @@ export function createLocalAgentServer(options: {
   if (!Number.isInteger(inlineApprovalWaitMs) || inlineApprovalWaitMs < 10 || inlineApprovalWaitMs > MAX_INLINE_APPROVAL_WAIT_MS) {
     throw new Error(`inlineApprovalWaitMs must be an integer between 10 and ${MAX_INLINE_APPROVAL_WAIT_MS}.`);
   }
+  const serverStartedAt = new Date().toISOString();
 
   type InlineApprovalDecision = 'approve' | 'session' | 'deny';
   type InlineApprovalWaiter = {
@@ -537,6 +539,25 @@ export function createLocalAgentServer(options: {
         declaration, permissions: requestPermissions,
         platform: process.platform, emergencyStopped: emergency.engaged === true
       }) });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/status' && req.method === 'GET') {
+      const [runtimeStatus, supportedCapabilities] = await Promise.all([
+        options.getRuntimeStatus ? options.getRuntimeStatus() : Promise.resolve({}),
+        options.runtime.supportedCapabilities(options.permissions.allowedCapabilities)
+      ]);
+      send(res, 200, {
+        ok: true,
+        status: buildControlCenterRuntimeStatus({
+          productVersion: PRODUCT_VERSION,
+          startedAt: serverStartedAt,
+          runtimeStatus,
+          supportedCapabilities,
+          authorizedRootCount: options.permissions.allowedRoots.length,
+          settings: options.settings ?? {}
+        })
+      });
       return;
     }
 

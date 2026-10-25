@@ -591,6 +591,8 @@ const agent = createLocalAgentServer({
     catch (error) { console.error(`[operator] relay reconnect after emergency recovery failed: ${error instanceof Error ? error.message : String(error)}`); }
   },
   getRuntimeStatus: () => ({
+    packageVersion: process.env.OPERATOR_RUNTIME_PACKAGE_VERSION,
+    sourceCommit: process.env.OPERATOR_RUNTIME_SOURCE_COMMIT,
     relay: {
       ...relayConnectionStatus,
       configured: Boolean(relayUrl),
