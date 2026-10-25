@@ -265,8 +265,14 @@ export class WindowsUiaProvider implements CapabilityProvider {
           : action.capability === 'visual.capture'
             ? await this.#capture(action, context.signal)
             : await this.#physicalInput(action, context.signal);
+      const observedPostcondition = asRecord(asRecord(output).postcondition);
+      const semanticVerified = observedPostcondition.verified === true;
       const postcondition = action.capability === 'app.operate'
-        ? evidence('postcondition', 'pass', 'Windows UIA/Win32 operation returned verified semantic postcondition evidence.', { operation: action.input.operation, waitMs: normalizeWaitMs(action.input.waitMs) })
+        ? evidence('postcondition', semanticVerified ? 'pass' : 'info',
+            semanticVerified
+              ? 'Windows UIA/Win32 reported a verified semantic postcondition.'
+              : 'Native operation was dispatched; the requested application effect still needs independent verification.',
+            { operation: action.input.operation, waitMs: normalizeWaitMs(action.input.waitMs), verified: semanticVerified })
         : action.capability === 'visual.capture'
           ? evidence('visual_observation', 'pass', 'Captured bounded visual state with a short-lived SHA-bound interaction lease.', {
               captureId: asRecord(output).captureId,
@@ -291,7 +297,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
         provider: this.name,
         output,
         evidence: [
-          evidence('windows_uia', 'pass', action.capability === 'app.inspect' ? 'Inspected Windows controls through Microsoft UI Automation and optional bounded Win32 discovery.' : action.capability === 'visual.capture' ? 'Captured bounded Windows visual state through the signed native sidecar.' : action.capability === 'input.operate' ? 'Dispatched capture-bound physical input through the signed native sidecar.' : 'Operated Windows control through a verified UI Automation or semantic Win32 operation.', {}),
+          evidence('windows_uia', 'pass', action.capability === 'app.inspect' ? 'Inspected Windows controls through Microsoft UI Automation and optional bounded Win32 discovery.' : action.capability === 'visual.capture' ? 'Captured bounded Windows visual state through the signed native sidecar.' : action.capability === 'input.operate' ? 'Dispatched capture-bound physical input through the signed native sidecar.' : 'Dispatched Windows UI Automation or semantic Win32 operation; independent application outcome verification is still required.', {}),
           postcondition
         ],
         durationMs: Math.round(performance.now() - started)
