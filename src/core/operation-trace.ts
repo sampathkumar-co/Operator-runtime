@@ -224,12 +224,17 @@ export function summarizeOperationSlo(eventsInput: OperationTraceEvent[]): Opera
     rows.sort((a,b) => a.at.localeCompare(b.at));
     const complete = [...rows].reverse().find((event) => event.stage === 'COMPLETE');
     const verify = [...rows].reverse().find((event) => event.stage === 'VERIFY');
+    // Verification must causally precede the terminal completion. A late
+    // VERIFY or a same-timestamp reordering is not evidence for the claimed
+    // COMPLETE, regardless of its outcome.
+    const verifiedBeforeCompletion = Boolean(complete && verify && verify.outcome === 'OK'
+      && Date.parse(verify.at) < Date.parse(complete.at));
     if (complete?.outcome === 'OK') completed += 1;
     if (rows.some((event) => event.outcome === 'BLOCKED')) blocked += 1;
     if (rows.some((event) => event.outcome === 'FAILED')) failed += 1;
     if (rows.some((event) => event.outcome === 'UNCERTAIN')) uncertain += 1;
-    if (verify?.outcome === 'OK') verified += 1;
-    if (complete?.outcome === 'OK' && verify?.outcome !== 'OK') falseCompletionCount += 1;
+    if (verifiedBeforeCompletion) verified += 1;
+    if (complete?.outcome === 'OK' && !verifiedBeforeCompletion) falseCompletionCount += 1;
     if (complete) completionMs.push(Math.max(0, Date.parse(complete.at) - Date.parse(rows[0]!.at)));
   }
   const traces = byTrace.size;
