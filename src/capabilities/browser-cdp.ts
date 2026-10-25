@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
@@ -188,6 +189,121 @@ type DownloadTracker = {
   stop(): void;
 };
 
+const JAVASCRIPT_DIALOG_TYPES = new Set(['alert', 'confirm', 'prompt', 'beforeunload']);
+const DIALOG_REF = /^bd-[0-9a-f]{16}-[1-9a-z][0-9a-z]*-[0-9a-f]{12}$/;
+
+export interface BrowserJavaScriptDialogObservation {
+  state: 'open';
+  ref: string;
+  type: 'alert' | 'confirm' | 'prompt' | 'beforeunload';
+  messageDigest: string;
+  messageLength: number;
+  sourceOrigin?: string;
+  hasBrowserHandler: boolean;
+  defaultPromptPresent: boolean;
+  observedAt: string;
+}
+
+type BrowserDialogClosure = {
+  ref: string;
+  result: boolean;
+  observedAt: string;
+};
+
+type BrowserDialogWatch = {
+  targetId: string;
+  session: CdpConnection;
+  generation: number;
+  current?: BrowserJavaScriptDialogObservation;
+  lastClosed?: BrowserDialogClosure;
+  invalidEvent?: boolean;
+  stop(): void;
+};
+
+type BrowserDialogAction = {
+  operation: 'dialog_accept' | 'dialog_dismiss';
+  targetId: string;
+  dialogRef: string;
+  promptText?: string;
+};
+
+function dialogSourceOrigin(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length > 8192) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : undefined;
+  } catch { return undefined; }
+}
+
+/** Normalize an untrusted CDP dialog event without exporting prompt contents. */
+export function normalizeJavaScriptDialogObservation(input: {
+  params: unknown;
+  targetId: string;
+  instanceNonce: string;
+  generation: number;
+  observedAt?: string;
+}): BrowserJavaScriptDialogObservation {
+  const params = input.params;
+  if (!params || typeof params !== 'object' || Array.isArray(params) ||
+      typeof input.targetId !== 'string' || !input.targetId || input.targetId.length > 256 ||
+      !/^[0-9a-f]{16}$/.test(input.instanceNonce) ||
+      !Number.isSafeInteger(input.generation) || input.generation < 1) {
+    throw new OperatorError('BROWSER_DIALOG_EVENT_INVALID', 'JavaScript dialog event identity is invalid.');
+  }
+  const record = params as JsonMap;
+  if (typeof record.type !== 'string' || !JAVASCRIPT_DIALOG_TYPES.has(record.type) ||
+      typeof record.message !== 'string' || Buffer.byteLength(record.message, 'utf8') > 64 * 1024 ||
+      typeof record.hasBrowserHandler !== 'boolean' ||
+      (record.defaultPrompt !== undefined && typeof record.defaultPrompt !== 'string')) {
+    throw new OperatorError('BROWSER_DIALOG_EVENT_INVALID', 'JavaScript dialog event has an unsupported or malformed shape.');
+  }
+  const observedAt = input.observedAt ?? new Date().toISOString();
+  if (!Number.isFinite(Date.parse(observedAt)) || new Date(observedAt).toISOString() !== observedAt) {
+    throw new OperatorError('BROWSER_DIALOG_EVENT_INVALID', 'JavaScript dialog observation time is invalid.');
+  }
+  const message = record.message;
+  const targetDigest = crypto.createHash('sha256').update(input.targetId, 'utf8').digest('hex').slice(0, 12);
+  return {
+    state: 'open',
+    ref: `bd-${input.instanceNonce}-${input.generation.toString(36)}-${targetDigest}`,
+    type: record.type as BrowserJavaScriptDialogObservation['type'],
+    messageDigest: crypto.createHash('sha256').update(message, 'utf8').digest('hex'),
+    messageLength: message.length,
+    ...(dialogSourceOrigin(record.url) ? { sourceOrigin: dialogSourceOrigin(record.url) } : {}),
+    hasBrowserHandler: record.hasBrowserHandler,
+    defaultPromptPresent: typeof record.defaultPrompt === 'string' && record.defaultPrompt.length > 0,
+    observedAt
+  };
+}
+
+/** Closed input contract for JavaScript dialog actions. */
+export function normalizeBrowserDialogAction(input: unknown): BrowserDialogAction {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new OperatorError('INVALID_BROWSER_DIALOG_ACTION', 'Browser dialog action must be an object.');
+  }
+  const record = input as JsonMap;
+  const allowed = new Set(['targetId', 'operation', 'dialogRef', 'promptText']);
+  if (Object.keys(record).some((key) => !allowed.has(key)) ||
+      (record.operation !== 'dialog_accept' && record.operation !== 'dialog_dismiss') ||
+      typeof record.targetId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(record.targetId) ||
+      typeof record.dialogRef !== 'string' || !DIALOG_REF.test(record.dialogRef)) {
+    throw new OperatorError('INVALID_BROWSER_DIALOG_ACTION', 'Browser dialog action identity or fields are invalid.');
+  }
+  if (record.promptText !== undefined &&
+      (typeof record.promptText !== 'string' || record.promptText.length > 4096 || record.promptText.includes('\0'))) {
+    throw new OperatorError('INVALID_BROWSER_DIALOG_PROMPT', 'Dialog promptText must be an exact bounded string without NUL characters.');
+  }
+  if (record.operation === 'dialog_dismiss' && record.promptText !== undefined) {
+    throw new OperatorError('INVALID_BROWSER_DIALOG_PROMPT', 'Dismissed dialogs cannot supply promptText.');
+  }
+  return {
+    operation: record.operation,
+    targetId: record.targetId,
+    dialogRef: record.dialogRef,
+    ...(record.promptText !== undefined ? { promptText: record.promptText } : {})
+  };
+}
+
 function browserReconciliation(
   status: ProviderReconciliationResult['status'],
   message: string
@@ -225,6 +341,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
   #endpoint: URL;
   #sessions = new CdpSessionManager();
   #browserSession?: CdpConnection;
+  #dialogInstanceNonce = crypto.randomBytes(8).toString('hex');
+  #dialogWatches = new Map<string, BrowserDialogWatch>();
   #noProgressHistory = new Map<string, number>();
   #noProgressPrevented = 0;
 
@@ -251,7 +369,13 @@ export class BrowserCdpProvider implements CapabilityProvider {
       if (action.capability === 'browser.tab.close') return await this.#closeTab(action, started, context.signal);
       throw new OperatorError('UNSUPPORTED_ACTION', action.capability);
     } catch (error) {
-      const caught = context.signal?.aborted ? abortError() : error;
+      // Cancellation before dispatch is side-effect-free. Once a provider has
+      // attached an execution phase, preserve that stronger truth instead of
+      // laundering an uncertain dispatched effect into a generic abort.
+      const caught = context.signal?.aborted && !(error instanceof OperatorError &&
+        error.details?.executionPhase !== undefined && error.details?.sideEffectState !== undefined)
+        ? abortError()
+        : error;
       const normalized = action.capability === 'browser.interact'
         && caught instanceof OperatorError
         && caught.details?.executionPhase === undefined
@@ -266,6 +390,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
   }
 
   close(): void {
+    for (const watch of this.#dialogWatches.values()) watch.stop();
+    this.#dialogWatches.clear();
     this.#sessions.closeAll();
     this.#browserSession?.close();
     this.#browserSession = undefined;
@@ -318,6 +444,17 @@ export class BrowserCdpProvider implements CapabilityProvider {
       }
 
       if (action.capability === 'browser.interact') {
+        if (action.input.operation === 'dialog_accept' || action.input.operation === 'dialog_dismiss') {
+          const dialogAction = normalizeBrowserDialogAction(action.input);
+          const tabs = await this.#listTargets(context.signal);
+          const target = requireTarget(tabs, dialogAction.targetId);
+          const session = this.#sessions.get(target);
+          const watch = await this.#ensureDialogWatch(target, session, context.signal);
+          if (watch.current?.ref === dialogAction.dialogRef) {
+            return browserReconciliation('not_applied', 'The exact observed JavaScript dialog is still open; no successful handling outcome is claimed.');
+          }
+          return browserReconciliation('uncertain', 'The exact observed JavaScript dialog is no longer open; absence alone cannot prove which actor or outcome closed it. Do not replay without a fresh observation.');
+        }
         const targetId = optionalTargetId(action.input.targetId);
         const expect = action.input.expect;
         if (!targetId || !expect || typeof expect !== 'object' || Array.isArray(expect)) {
@@ -369,6 +506,23 @@ export class BrowserCdpProvider implements CapabilityProvider {
     const target = requireTarget(tabs, targetId);
     const session = this.#sessions.get(target);
     const observation = normalizeObservationOptions(action.input.observation);
+    const dialogWatch = await this.#ensureDialogWatch(target, session, signal);
+    if (dialogWatch.current) {
+      return {
+        ok: true,
+        capability: action.capability,
+        provider: this.name,
+        output: { target: compactTab(target), dialog: dialogWatch.current },
+        evidence: [
+          evidence('browser_javascript_dialog', 'pass', 'Observed an exact target/session-bound JavaScript dialog without exporting its message contents.', {
+            targetId, dialogRef: dialogWatch.current.ref, type: dialogWatch.current.type,
+            messageDigest: dialogWatch.current.messageDigest
+          }),
+          evidence('data_minimization', 'pass', 'Dialog message and default prompt contents were withheld; only digest, length and bounded origin metadata were returned.')
+        ],
+        durationMs: Math.round(performance.now() - started)
+      };
+    }
     throwIfAborted(signal);
     const [mainPage, frameInspection] = await Promise.all([
       inspectPage(session, observation),
@@ -559,8 +713,11 @@ export class BrowserCdpProvider implements CapabilityProvider {
   }
 
   async #interact(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
-    const targetId = requiredTargetId(action.input.targetId);
     const operation = typeof action.input.operation === 'string' ? action.input.operation : '';
+    if (operation === 'dialog_accept' || operation === 'dialog_dismiss') {
+      return await this.#handleDialog(action, started, signal);
+    }
+    const targetId = requiredTargetId(action.input.targetId);
     if (!['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll', 'type', 'select', 'set_value', 'select_date', 'key_press', 'hotkey', 'keyboard_text', 'format_text', 'select_text_range'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation is not a supported bounded browser interaction.');
 
     const targetSpec = normalizeTargetSpec(action.input.target);
@@ -802,6 +959,177 @@ export class BrowserCdpProvider implements CapabilityProvider {
     } finally {
       diagnostics.stop();
       download?.stop();
+    }
+  }
+
+  async #ensureDialogWatch(target: CdpTarget, session: CdpConnection, signal?: AbortSignal): Promise<BrowserDialogWatch> {
+    let watch = this.#dialogWatches.get(target.id);
+    if (watch?.session !== session) {
+      watch?.stop();
+      const created: BrowserDialogWatch = {
+        targetId: target.id,
+        session,
+        generation: 0,
+        stop: () => undefined
+      };
+      const offOpening = session.on('Page.javascriptDialogOpening', (params) => {
+        try {
+          created.current = normalizeJavaScriptDialogObservation({
+            params,
+            targetId: target.id,
+            instanceNonce: this.#dialogInstanceNonce,
+            generation: ++created.generation
+          });
+          created.invalidEvent = false;
+        } catch {
+          created.current = undefined;
+          created.invalidEvent = true;
+        }
+      });
+      const offClosed = session.on('Page.javascriptDialogClosed', (params) => {
+        const current = created.current;
+        created.current = undefined;
+        if (current && typeof params.result === 'boolean') {
+          created.lastClosed = {
+            ref: current.ref,
+            result: params.result,
+            observedAt: new Date().toISOString()
+          };
+        }
+      });
+      created.stop = () => { offOpening(); offClosed(); };
+      watch = created;
+      this.#dialogWatches.set(target.id, watch);
+    }
+    await session.send('Page.enable', {}, 8_000, signal);
+    // CDP may enqueue javascriptDialogOpening in the same turn as Page.enable.
+    await Promise.resolve();
+    if (watch.invalidEvent) {
+      throw new OperatorError('BROWSER_DIALOG_EVENT_INVALID', 'Browser reported a malformed JavaScript dialog event; refusing to inspect or handle it.', {
+        retryable: false,
+        details: { targetId: target.id, remedy: 'close_the_dialog_manually_then_reobserve' }
+      });
+    }
+    return watch;
+  }
+
+  #waitForDialogClosure(
+    watch: BrowserDialogWatch,
+    dialogRef: string,
+    signal?: AbortSignal
+  ): { promise: Promise<BrowserDialogClosure>; stop(): void } {
+    let settled = false;
+    let resolveClosure!: (value: BrowserDialogClosure) => void;
+    let rejectClosure!: (error: Error) => void;
+    const promise = new Promise<BrowserDialogClosure>((resolve, reject) => {
+      resolveClosure = resolve;
+      rejectClosure = reject;
+    });
+    void promise.catch(() => undefined);
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      offClosed();
+      callback();
+    };
+    const check = () => {
+      if (watch.lastClosed?.ref === dialogRef) finish(() => resolveClosure(watch.lastClosed!));
+    };
+    const offClosed = watch.session.on('Page.javascriptDialogClosed', () => queueMicrotask(check));
+    const onAbort = () => finish(() => rejectClosure(abortError()));
+    const timer = setTimeout(() => finish(() => rejectClosure(new OperatorError(
+      'BROWSER_DIALOG_POSTCONDITION_UNCONFIRMED',
+      'Browser did not emit an exact dialog-closed postcondition in time.',
+      { retryable: false }
+    ))), 2_000);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    else queueMicrotask(check);
+    return { promise, stop: () => finish(() => rejectClosure(new OperatorError('BROWSER_DIALOG_WAIT_STOPPED', 'Dialog close observation stopped.', { retryable: false }))) };
+  }
+
+  async #handleDialog(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
+    const request = normalizeBrowserDialogAction(action.input);
+    const target = requireTarget(await this.#listTargets(signal), request.targetId);
+    const session = this.#sessions.get(target);
+    const watch = await this.#ensureDialogWatch(target, session, signal);
+    const current = watch.current;
+    if (!current) {
+      throw new OperatorError('BROWSER_DIALOG_NOT_FOUND', 'No open JavaScript dialog is observed for the exact browser target.', {
+        retryable: true,
+        details: { targetId: request.targetId, remedy: 'reobserve_before_retry', sideEffectState: 'none', executionPhase: 'pre_dispatch' }
+      });
+    }
+    if (current.ref !== request.dialogRef) {
+      throw new OperatorError('BROWSER_DIALOG_STALE', 'The JavaScript dialog ref is stale or belongs to a different target/session generation.', {
+        retryable: true,
+        details: { targetId: request.targetId, remedy: 'reobserve_before_retry', sideEffectState: 'none', executionPhase: 'pre_dispatch' }
+      });
+    }
+    if (request.promptText !== undefined && current.type !== 'prompt') {
+      throw new OperatorError('INVALID_BROWSER_DIALOG_PROMPT', 'promptText is only valid for an observed prompt dialog.', {
+        retryable: false,
+        details: { sideEffectState: 'none', executionPhase: 'pre_dispatch' }
+      });
+    }
+    throwIfAborted(signal);
+    const accept = request.operation === 'dialog_accept';
+    const close = this.#waitForDialogClosure(watch, request.dialogRef, signal);
+    let dispatchAttempted = false;
+    try {
+      dispatchAttempted = true;
+      await session.send('Page.handleJavaScriptDialog', {
+        accept,
+        ...(request.promptText !== undefined ? { promptText: request.promptText } : {})
+      }, 8_000, signal);
+      const closure = await close.promise;
+      if (closure.result !== accept) {
+        throw new OperatorError('BROWSER_DIALOG_OUTCOME_MISMATCH', 'The observed dialog closed with a different result than the requested action.', {
+          retryable: false,
+          details: { targetId: request.targetId, dialogRef: request.dialogRef, expectedAccept: accept,
+            observedAccept: closure.result, sideEffectState: 'known', executionPhase: 'effect_observed' }
+        });
+      }
+      return {
+        ok: true,
+        capability: action.capability,
+        provider: this.name,
+        output: {
+          targetId: request.targetId,
+          dialogRef: request.dialogRef,
+          dialogType: current.type,
+          outcome: accept ? 'accepted' : 'dismissed',
+          closedAt: closure.observedAt
+        },
+        evidence: [
+          evidence('browser_javascript_dialog', 'pass', 'Handled the exact target/session-bound JavaScript dialog.', {
+            targetId: request.targetId, dialogRef: request.dialogRef, type: current.type, outcome: accept ? 'accepted' : 'dismissed'
+          }),
+          evidence('postcondition', 'pass', 'CDP emitted the matching dialog-closed result after the requested handling command.', {
+            dialogRef: request.dialogRef, accepted: closure.result
+          })
+        ],
+        durationMs: Math.round(performance.now() - started)
+      };
+    } catch (error) {
+      if (!dispatchAttempted) throw error;
+      if (error instanceof OperatorError &&
+          error.details?.executionPhase !== undefined && error.details?.sideEffectState !== undefined) throw error;
+      throw new OperatorError('BROWSER_DIALOG_OUTCOME_UNCERTAIN', 'JavaScript dialog handling was dispatched but its exact outcome was not proven; re-observe and do not replay blindly.', {
+        retryable: false,
+        details: {
+          targetId: request.targetId,
+          dialogRef: request.dialogRef,
+          causeCode: error instanceof OperatorError ? error.code : 'UNKNOWN',
+          remedy: 'reobserve_dialog_do_not_retry',
+          sideEffectState: 'uncertain',
+          executionPhase: 'dispatched'
+        }
+      });
+    } finally {
+      close.stop();
     }
   }
 

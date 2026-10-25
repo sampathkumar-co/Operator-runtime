@@ -1307,10 +1307,10 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('browser.interact', {
     title: 'Interact with browser control',
-    description: 'Interact with an observed browser target using native pointer, wheel, or keyboard input plus bounded semantic text/select operations, or focus/close an exact observed tab. Prefer the short-lived ref returned by browser.inspect; CSS, text, rendered color, and role+accessible name remain compatibility fallbacks. Optional expect binds an explicit post-state contract so uncertain transport loss can be reconciled without replay. Ref-bounded scroll uses native CDP wheel input and observation exposes bounded scroll state. Observed refs fail stale rather than silently binding to replacement nodes. Native keyboard supports bounded navigation/editing keys and modifier chords; select_text_range uses visible text offsets. This can cause external side effects, so the local policy treats it as an external action.',
+    description: 'Interact with an observed browser target using native pointer, wheel, or keyboard input plus bounded semantic text/select operations, handle an exact target/session-bound JavaScript dialog, or focus/close an exact observed tab. Prefer the short-lived ref returned by browser.inspect; CSS, text, rendered color, and role+accessible name remain compatibility fallbacks. Dialog accept/dismiss requires dialogRef from a fresh browser.inspect and is never blindly retried after dispatch. Optional expect binds an explicit post-state contract so uncertain transport loss can be reconciled without replay. Ref-bounded scroll uses native CDP wheel input and observation exposes bounded scroll state. Observed refs fail stale rather than silently binding to replacement nodes. Native keyboard supports bounded navigation/editing keys and modifier chords; select_text_range uses visible text offsets. This can cause external side effects, so the local policy treats it as an external action.',
     inputSchema: z.object({
       targetId: z.string().min(1),
-      operation: z.enum(['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll', 'type', 'select', 'set_value', 'key_press', 'hotkey', 'select_text_range', 'tab_focus', 'tab_close']),
+      operation: z.enum(['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll', 'type', 'select', 'set_value', 'key_press', 'hotkey', 'select_text_range', 'dialog_accept', 'dialog_dismiss', 'tab_focus', 'tab_close']),
       target: z.object({
         ref: z.string().min(1).max(128).optional(),
         css: z.string().min(1).max(500).optional(),
@@ -1335,6 +1335,8 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       keys: z.array(z.string().min(1).max(32)).min(1).max(4).optional(),
       start: z.number().int().min(0).max(100000).optional(),
       end: z.number().int().min(0).max(100000).optional(),
+      dialogRef: z.string().regex(/^bd-[0-9a-f]{16}-[1-9a-z][0-9a-z]*-[0-9a-f]{12}$/).optional(),
+      promptText: z.string().max(4096).refine((value) => !value.includes('\0'), 'promptText cannot contain NUL.').optional(),
       value: z.union([
         z.string().max(100000),
         z.array(z.string().max(100000)).min(1).max(100)
@@ -1353,9 +1355,14 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       }).optional()
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
-  }, async ({ targetId, operation, target, toTarget, value, deltaX, deltaY, xRatio, yRatio, key, keys, start, end, expect }) => {
+  }, async ({ targetId, operation, target, toTarget, value, deltaX, deltaY, xRatio, yRatio, key, keys, start, end, dialogRef, promptText, expect }) => {
     if (operation === 'tab_focus') return invoke('browser.tab.focus', 'write', { targetId }, targetId);
     if (operation === 'tab_close') return invoke('browser.tab.close', 'write', { targetId }, targetId);
+    if (operation === 'dialog_accept' || operation === 'dialog_dismiss') {
+      return invoke('browser.interact', 'external', {
+        targetId, operation, dialogRef, ...(promptText !== undefined ? { promptText } : {})
+      }, targetId);
+    }
     if (!target) {
       return {
         isError: true,
