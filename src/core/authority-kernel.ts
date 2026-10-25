@@ -167,6 +167,10 @@ export class AuthorityKernel {
       throw new PolicyError('AUTHORITY_ACTION_ID_INVALID', 'Capability token action IDs are invalid.');
     }
 
+    if ((permissions.maxRisk !== undefined && !isKnownRisk(permissions.maxRisk))
+      || (request.maxRisk !== undefined && !isKnownRisk(request.maxRisk))) {
+      throw new PolicyError('AUTHORITY_RISK_INVALID', 'Capability token risk must be an exact known canonical risk.');
+    }
     const parentMaxRisk = permissions.maxRisk ?? 'destructive';
     const requestedMaxRisk = request.maxRisk ?? parentMaxRisk;
     // Object prototype names, typos and coercible values can otherwise yield
@@ -202,7 +206,8 @@ export class AuthorityKernel {
     const expected = this.#sign(token.claims);
     if (!safeEqualHex(token.mac, expected)) throw new PolicyError('AUTHORITY_TOKEN_TAMPERED', 'Capability token integrity check failed.');
 
-    if (!isKnownRisk(token.claims.maxRisk) || !isKnownRisk(permissions.maxRisk ?? 'destructive')) {
+    if (!isKnownRisk(token.claims.maxRisk) ||
+        (permissions.maxRisk !== undefined && !isKnownRisk(permissions.maxRisk))) {
       throw new PolicyError('AUTHORITY_TOKEN_INVALID', 'Capability token risk ceiling is invalid.');
     }
     const now = this.#clock().getTime();
