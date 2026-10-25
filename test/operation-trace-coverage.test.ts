@@ -216,3 +216,69 @@ test('C09 empty operation sample exposes zero p99 rather than fabricated latency
   assert.equal(empty.p95CompletionMs, 0);
   assert.equal(empty.p99CompletionMs, 0);
 });
+
+test('C09 cross-context terminal claims do not count as verified success or latency samples', () => {
+  const valid = [
+    e('REQUEST', '2026-10-25T00:00:00.000Z'),
+    e('VERIFY', '2026-10-25T00:00:00.100Z'),
+    e('COMPLETE', '2026-10-25T00:00:00.200Z')
+  ];
+  const good = summarizeOperationSlo(valid);
+  assert.equal(good.verified, 1);
+  assert.equal(good.invalidCausalTraces, 0);
+  assert.equal(good.p95CompletionMs, 200);
+
+  const mixed = [valid[0]!, {...valid[1]!, executionContextDigest:'b'.repeat(64)}, valid[2]!];
+  const report = summarizeOperationSlo(mixed);
+  assert.equal(report.traces, 1);
+  assert.equal(report.completed, 1, 'raw terminal claims remain visible for safety accounting');
+  assert.equal(report.verified, 0);
+  assert.equal(report.falseCompletionCount, 1);
+  assert.equal(report.invalidCausalTraces, 1);
+  assert.equal(report.p95CompletionMs, 0, 'no invalid measurement enters a percentile');
+});
+
+test('C09 duplicate terminal claims and event identities fail closed in operation SLOs', () => {
+  const base = [
+    e('REQUEST', '2026-10-25T00:00:00.000Z'),
+    e('VERIFY', '2026-10-25T00:00:00.100Z'),
+    e('COMPLETE', '2026-10-25T00:00:00.200Z')
+  ];
+  for (const mutated of [
+    [...base, e('COMPLETE', '2026-10-25T00:00:00.300Z')],
+    [...base, {...base[1]!, id:base[0]!.id}],
+    [base[0]!, base[2]!, e('VERIFY', '2026-10-25T00:00:00.300Z')],
+    [base[1]!, base[2]!],
+    [base[0]!, base[1]!, base[2]!, {...base[0]!, id:'replayed-request',at:'2026-10-25T00:00:00.300Z'}]
+  ]) {
+    const report = summarizeOperationSlo(mutated);
+    assert.equal(report.verified, 0);
+    assert.equal(report.invalidCausalTraces, 1);
+    assert.equal(report.p95CompletionMs, 0);
+    assert.equal(report.falseCompletionCount, 1);
+  }
+});
+
+test('C09 completed and incomplete traces never fabricate samples from absent requests', () => {
+  const report = summarizeOperationSlo([
+    e('VERIFY', '2026-10-25T00:00:00.100Z'),
+    e('COMPLETE', '2026-10-25T00:00:00.200Z')
+  ]);
+  assert.equal(report.completed, 1);
+  assert.equal(report.verified, 0);
+  assert.equal(report.falseCompletionCount, 1);
+  assert.equal(report.p50CompletionMs, 0);
+  assert.equal(report.invalidCausalTraces, 1);
+});
+
+test('C09 active operation traces remain incomplete, not corrupt terminal evidence', () => {
+  const report = summarizeOperationSlo([
+    e('REQUEST', '2026-10-25T00:00:00.000Z'),
+    e('DISPATCH', '2026-10-25T00:00:00.100Z')
+  ]);
+  assert.equal(report.traces, 1);
+  assert.equal(report.incompleteTraces, 1);
+  assert.equal(report.invalidCausalTraces, 0);
+  assert.equal(report.completed, 0);
+  assert.equal(report.p95CompletionMs, 0);
+});
