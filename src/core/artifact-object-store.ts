@@ -56,6 +56,7 @@ export class PresignedHttpsArtifactBlobBackend implements ArtifactBlobBackend {
 
   async put(digestInput:string,bytesInput:Uint8Array):Promise<void>{
     const digest=validDigest(digestInput);
+    if (!(bytesInput instanceof Uint8Array)) throw new OperatorError('ARTIFACT_SIZE_INVALID','Object artifact bytes must be a typed byte array.');
     const bytes=Buffer.from(bytesInput);
     if(bytes.byteLength<1||bytes.byteLength>MAX_BYTES) throw new OperatorError('ARTIFACT_SIZE_INVALID','Object artifact size is invalid.');
     if(sha256(bytes)!==digest) throw new OperatorError('ARTIFACT_INTEGRITY_FAILED','Object artifact bytes do not match their content address.');
@@ -108,8 +109,16 @@ async function readBoundedResponse(response:ArtifactFetchResponse,declaredSize?:
   return bytes;
 }
 function validPresignedUrl(input:unknown,policy:HttpsTargetPolicy):string{
-  try{return requireHttpsUrlForPolicy(String(input??''),'Object storage URL',policy).toString();}
+  try{
+    if(typeof input!=='string') throw new Error('Not a URL string');
+    return requireHttpsUrlForPolicy(input,'Object storage URL',policy).toString();
+  }
   catch{throw new OperatorError('ARTIFACT_OBJECT_URL_INVALID','Object storage URL violates the configured HTTPS target policy.');}
 }
-function validDigest(input:unknown):string{const d=String(input??'').toLowerCase();if(!DIGEST.test(d))throw new OperatorError('ARTIFACT_DIGEST_INVALID','Artifact blob digest is invalid.');return d;}
+function validDigest(input:unknown):string{
+  if(typeof input!=='string')throw new OperatorError('ARTIFACT_DIGEST_INVALID','Artifact blob digest must be a literal string.');
+  const d=input.toLowerCase();
+  if(!DIGEST.test(d))throw new OperatorError('ARTIFACT_DIGEST_INVALID','Artifact blob digest is invalid.');
+  return d;
+}
 function sha256(bytes:Uint8Array):string{return crypto.createHash('sha256').update(bytes).digest('hex');}

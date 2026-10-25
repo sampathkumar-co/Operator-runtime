@@ -82,6 +82,9 @@ export class ArtifactStore {
 
   async put(input: ArtifactPutInput): Promise<ArtifactRecord> {
     await this.init();
+    if (typeof input.bytes !== 'string' && !(input.bytes instanceof Uint8Array)) {
+      throw new OperatorError('ARTIFACT_SIZE_INVALID', 'Artifact bytes must be a UTF-8 string or a typed byte array.');
+    }
     const bytes = typeof input.bytes === 'string' ? Buffer.from(input.bytes, 'utf8') : Buffer.from(input.bytes);
     if (bytes.byteLength < 1 || bytes.byteLength > MAX_ARTIFACT_BYTES) {
       throw new OperatorError('ARTIFACT_SIZE_INVALID', `Artifact must contain 1-${MAX_ARTIFACT_BYTES} bytes.`);
@@ -218,8 +221,8 @@ function normalizeRecord(input: unknown, expectedId?: string): ArtifactRecord {
   const raw = input as Record<string, unknown>;
   if (raw.schemaVersion !== 1) throw new OperatorError('ARTIFACT_RECORD_INVALID', 'Artifact record schema version is invalid.');
   const blobDigest = normalizeDigest(raw.blobDigest, 'blobDigest');
-  const bytes = Number(raw.bytes);
-  if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > MAX_ARTIFACT_BYTES) {
+  const bytes = raw.bytes;
+  if (typeof bytes !== 'number' || !Number.isSafeInteger(bytes) || bytes < 1 || bytes > MAX_ARTIFACT_BYTES) {
     throw new OperatorError('ARTIFACT_RECORD_INVALID', 'Artifact record byte length is invalid.');
   }
   const kind = normalizeKind(raw.kind);
@@ -286,20 +289,22 @@ function normalizeKind(value: unknown): ArtifactKind {
 }
 
 function normalizePrivacy(value: unknown): ArtifactPrivacy {
-  if (!['public', 'internal', 'sensitive'].includes(String(value))) {
+  if (typeof value !== 'string' || !['public', 'internal', 'sensitive'].includes(value)) {
     throw new OperatorError('ARTIFACT_PRIVACY_INVALID', 'Artifact privacy class is invalid.');
   }
   return value as ArtifactPrivacy;
 }
 
 function normalizeMediaType(value: unknown): string {
-  const text = String(value ?? '').trim().toLowerCase();
+  if (typeof value !== 'string') throw new OperatorError('ARTIFACT_MEDIA_TYPE_INVALID', 'Artifact media type must be a literal string.');
+  const text = value.trim().toLowerCase();
   if (!MEDIA_TYPE.test(text) || text.length > 256) throw new OperatorError('ARTIFACT_MEDIA_TYPE_INVALID', 'Artifact media type is invalid.');
   return text;
 }
 
 function normalizeDigest(value: unknown, label: string): string {
-  const text = String(value ?? '').toLowerCase();
+  if (typeof value !== 'string') throw new OperatorError('ARTIFACT_DIGEST_INVALID', `${label} must be a literal digest string.`);
+  const text = value.toLowerCase();
   if (!DIGEST.test(text)) throw new OperatorError('ARTIFACT_DIGEST_INVALID', `${label} is invalid.`);
   return text;
 }
@@ -309,7 +314,8 @@ function normalizeOptionalDigest(value: unknown, label: string): string | undefi
 }
 
 function normalizeIso(value: unknown, label: string): string {
-  const text = String(value ?? '');
+  if (typeof value !== 'string') throw new OperatorError('ARTIFACT_TIMESTAMP_INVALID', `${label} must be a canonical ISO string.`);
+  const text = value;
   if (!text || !Number.isFinite(Date.parse(text)) || new Date(text).toISOString() !== text) {
     throw new OperatorError('ARTIFACT_TIMESTAMP_INVALID', `${label} must be a canonical ISO timestamp.`);
   }
