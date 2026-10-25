@@ -67,7 +67,7 @@ test('C01 JSONL is first-write-only with SHA, never overwrites or retries the sa
 test('C01 no new dispatch after a prior uncertain effect, even with apparently successful later observations',()=>{
  const a=fixture();
  a.steps[1].sideEffectState='uncertain';
- const later={...a.steps[1],sequence:3,phase:'DISPATCH',actionOrdinal:2};
+ const later={...a.steps[1],sequence:4,phase:'DISPATCH',actionOrdinal:2};
  a.steps.push(later);
  assert.throws(()=>createSanitizedEvaluationTrace(a),/Uncertain prior side effect/);
 });
