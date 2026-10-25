@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import test from 'node:test';
-import { boundBrowserInspectOutput, BrowserCdpInspectProvider } from '../src/capabilities/browser-cdp.ts';
+import { boundBrowserInspectOutput, boundedDiscoveryJson, BrowserCdpInspectProvider } from '../src/capabilities/browser-cdp.ts';
 
 test('aborted browser execution fails before contacting CDP', async () => {
   const provider = new BrowserCdpInspectProvider('http://127.0.0.1:65534');
@@ -116,4 +116,32 @@ test('CDP discovery rejects invalid target-list JSON structure', async (t) => {
   });
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, 'CDP_DISCOVERY_INVALID');
+});
+
+test('C03 CDP discovery refuses infinite empty chunks instead of hanging despite small byte count', async () => {
+  let pulls = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulls++;
+      controller.enqueue(new Uint8Array(0));
+    }
+  });
+  await assert.rejects(() => boundedDiscoveryJson(new Response(stream)), (error: any) =>
+    error?.code === 'CDP_DISCOVERY_STALLED');
+  assert.ok(pulls < 40, 'Stalled discovery consumed bounded read attempts.');
+});
+
+test('C03 CDP discovery consumes valid split data without silently dropping empty chunks', async () => {
+  const encoder = new TextEncoder();
+  const expected = [{ id: 'valid-tab', type: 'page' }];
+  const data = encoder.encode(JSON.stringify(expected));
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(data.subarray(0, 9));
+      controller.enqueue(new Uint8Array(0));
+      controller.enqueue(data.subarray(9));
+      controller.close();
+    }
+  });
+  assert.deepEqual(await boundedDiscoveryJson(new Response(stream)), expected);
 });
