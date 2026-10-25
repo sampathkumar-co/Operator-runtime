@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'src/core/durable-model-call-budget-ledger.ts'
+      - 'src/core/persistent-data-catalog.ts'
       - 'src/core/bounded-model-goal-inference.ts'
       - 'test/durable-model-call-budget-ledger.test.ts'
       - '.github/workflows/c05-durable-model-budget.yml'
@@ -11,6 +12,7 @@ on:
     branches: [main]
     paths:
       - 'src/core/durable-model-call-budget-ledger.ts'
+      - 'src/core/persistent-data-catalog.ts'
       - 'src/core/bounded-model-goal-inference.ts'
       - 'test/durable-model-call-budget-ledger.test.ts'
       - '.github/workflows/c05-durable-model-budget.yml'
