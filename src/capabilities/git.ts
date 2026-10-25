@@ -63,14 +63,14 @@ export class GitProvider implements CapabilityProvider {
     // Neither object-coercing path values nor malformed pagination inputs may
     // broaden a Git read to a different file or invoke attacker-owned toString.
     const cwd = action.input.cwd;
-    if (typeof cwd !== 'string' || !cwd || cwd.length > 4096 || /[\\0\\r\\n]/.test(cwd)) {
+    if (typeof cwd !== 'string' || !cwd || cwd.length > 4096 || hasGitForbiddenControl(cwd)) {
       return gitFailure(action, 'GIT_INPUT_INVALID', 'Git working directory must be an exact bounded path.');
     }
     const suppliedPaths = action.input.paths;
     if (suppliedPaths !== undefined && (
       action.capability !== 'git.diff' || !Array.isArray(suppliedPaths) ||
       suppliedPaths.length > 128 || suppliedPaths.some(item =>
-        typeof item !== 'string' || item.length < 1 || item.length > 4096 || /[\\0\\r\\n]/.test(item))
+        typeof item !== 'string' || item.length < 1 || item.length > 4096 || hasGitForbiddenControl(item))
     )) {
       return gitFailure(action, 'GIT_INPUT_INVALID', 'Git paths must be a bounded array of literal string values.');
     }
@@ -186,6 +186,13 @@ export function boundedGitDiff(result: ActionResult, input: Record<string, unkno
     ...result,
     output: { stdout: chunk.toString('utf8'), stderr: String(raw?.stderr ?? '') ? 'GIT_STDERR_REDACTED' : '', offset, returnedBytes: chunk.byteLength, truncated, ...(truncated ? { nextOffset } : {}) }
   };
+}
+
+function hasGitForbiddenControl(value: string): boolean {
+  return [...value].some(character => {
+    const code = character.charCodeAt(0);
+    return code === 0 || code === 10 || code === 13;
+  });
 }
 
 function boundedGitInteger(value: unknown, fallback: number, min: number, max: number): number {
