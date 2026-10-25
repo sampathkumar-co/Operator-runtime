@@ -101,14 +101,16 @@ export function normalizeTraceEvent(input: unknown): OperationTraceEvent {
   const id = validId(raw.id, 'id');
   const traceId = validId(raw.traceId, 'traceId');
   const parentEventId = raw.parentEventId === undefined ? undefined : validId(raw.parentEventId, 'parentEventId');
-  const executionContextDigest = String(raw.executionContextDigest ?? '').toLowerCase();
+  if (typeof raw.executionContextDigest !== 'string') throw invalid('executionContextDigest must be an exact string.');
+  const executionContextDigest = raw.executionContextDigest.toLowerCase();
   if (!DIGEST.test(executionContextDigest)) throw invalid('executionContextDigest is invalid.');
   if (!STAGES.has(raw.stage as OperationTraceStage)) throw invalid('stage is invalid.');
   if (!OUTCOMES.has(raw.outcome as OperationTraceOutcome)) throw invalid('outcome is invalid.');
   const code = raw.code === undefined ? undefined : validId(raw.code, 'code');
   let durationMs: number | undefined;
   if (raw.durationMs !== undefined) {
-    durationMs = Number(raw.durationMs);
+    if (typeof raw.durationMs !== 'number') throw invalid('durationMs must be an exact number.');
+    durationMs = raw.durationMs;
     if (!Number.isFinite(durationMs) || durationMs < 0 || durationMs > 24 * 60 * 60_000) throw invalid('durationMs is invalid.');
   }
   const at = canonicalIso(raw.at, 'at');
@@ -318,7 +320,8 @@ function validId(input: unknown, label: string): string {
   return input;
 }
 function canonicalIso(input: unknown, label: string): string {
-  const text=String(input??'');
+  if (typeof input !== 'string') throw invalid(`${label} must be a canonical ISO string.`);
+  const text=input;
   if(!text || !Number.isFinite(Date.parse(text)) || new Date(text).toISOString()!==text) throw invalid(`${label} must be canonical ISO.`);
   return text;
 }
