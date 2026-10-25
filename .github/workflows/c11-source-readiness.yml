@@ -1,0 +1,48 @@
+name: C11 Wave 0-4 Source Readiness (Not Release Authorization)
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/wave4-source-readiness.mjs'
+      - 'test/wave4-source-readiness.test.ts'
+      - '.github/workflows/c11-source-readiness.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/wave4-source-readiness.mjs'
+      - 'test/wave4-source-readiness.test.ts'
+      - '.github/workflows/c11-source-readiness.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  source-workboard-truth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Verify source workboard contract and strict external acceptance limits
+        run: node --experimental-strip-types --test test/wave4-source-readiness.test.ts
+      - name: Capture live 134-item workboard for exact checkout without release authorization
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node scripts/wave4-source-readiness.mjs > "$RUNNER_TEMP/c11-source-readiness.json"
+          node -e "const fs=require('fs');const r=JSON.parse(fs.readFileSync(process.argv[1]));if(r.candidateSha!==process.env.GITHUB_SHA||r.totalTasks!==134||r.releaseAuthorization!=='NOT_GRANTED'||r.publicationAllowed!==false||r.sourceChecklistAccepted+r.sourceChecklistPending!==134)throw Error('C11 source truth or release prohibition invalid')" "$RUNNER_TEMP/c11-source-readiness.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: c11-source-readiness-${{ github.sha }}
+          path: ${{ runner.temp }}/c11-source-readiness.json
+          retention-days: 30
+          if-no-files-found: error
