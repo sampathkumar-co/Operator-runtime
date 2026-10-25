@@ -75,6 +75,8 @@ export interface TaskPlannerContext {
   decisionBudget: TaskDecisionBudget;
   /** Bound current planning to Stop/Pause/Cancel; never grants model authority. */
   signal?: AbortSignal;
+  /** Reserve one local-model inference before sending any prompt; never refunded. */
+  reserveModelBudget?: (maxTokens: number) => Promise<void>;
 }
 
 export interface TaskIntelligenceContext {
