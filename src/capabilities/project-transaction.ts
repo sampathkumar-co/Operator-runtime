@@ -58,7 +58,7 @@ export class ProjectTransactionProvider implements CapabilityProvider {
       if (typeof commandId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(commandId)) {
         throw new OperatorError('INVALID_COMMAND_ID', 'Automatic transaction requires a literal registered command identity.');
       }
-      if (!['read', 'write'].includes(expectedRisk)) {
+      if (typeof expectedRisk !== 'string' || !['read', 'write'].includes(expectedRisk)) {
         throw new OperatorError('TRANSACTION_RISK_UNSUPPORTED', 'Automatic rollback supports only trusted read/write commands; external effects are not reversible.');
       }
 
