@@ -304,3 +304,31 @@ test('file.manage mkdir and bounded remove preserve destructive safeguards', asy
   const removedDir = await provider.execute({ ...action('file.manage', { operation: 'remove', path: dir }), risk: 'destructive' });
   assert.equal(removedDir.ok, true, removedDir.error?.message);
 });
+
+test('C06 file.manage never coerces mutation operation or recursive flag into authority', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-file-manage-exact-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const provider = new FilesystemProvider({ allowedRoots: [root] });
+  const target = path.join(root, 'must-not-create');
+  let coercions = 0;
+  const impostor = { toString() { coercions++; return 'mkdir'; } };
+  for (const operation of [['mkdir'], impostor, 1, null]) {
+    const input = { operation, path: target };
+    assert.throws(() => provider.resolveRisk({
+      ...action('file.manage', input), risk: 'write'
+    } as any), (error: any) => error?.code === 'FILESYSTEM_INPUT_INVALID');
+    const result = await provider.execute({ ...action('file.manage', input), risk: 'write' } as any);
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, 'FILESYSTEM_INPUT_INVALID');
+    await assert.rejects(fs.access(target));
+  }
+  for (const recursive of [['true'], 'true', 1, { valueOf: () => true }]) {
+    const result = await provider.execute({
+      ...action('file.manage', { operation: 'mkdir', recursive, path: target }), risk: 'write'
+    } as any);
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, 'FILESYSTEM_INPUT_INVALID');
+    await assert.rejects(fs.access(target));
+  }
+  assert.equal(coercions, 0, 'No attacker-controlled coercion hook may run before filesystem mutation.');
+});
