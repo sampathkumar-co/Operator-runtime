@@ -1030,3 +1030,65 @@ test('AgentKernel global abort generation interrupts already-dispatched provider
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, 'EXECUTION_ABORTED');
 });
+
+test('C08 provider dispatch refuses a lease lost after routing and before any side effect',async t=>{
+  const stateDir=await temp(t);
+  const provider=new StateProvider();
+  const runtime=new OperatorRuntime().register(provider);
+  const journal=new ActionTransitionJournal(stateDir);
+  const leases=new ResourceLeaseStore(stateDir);
+  const realAcquire=leases.acquire.bind(leases);
+  let ownershipChecks=0;
+  (leases as any).acquire=async(...args:any[])=>{
+    const acquired=await (realAcquire as any)(...args);
+    return {...acquired,assertOwned:async()=>{
+      ownershipChecks++;
+      throw new Error('simulated exact-owner lease revocation');
+    }};
+  };
+  const kernel=new AgentKernel({stateDir,runtime,journal,leases});
+  const action:ActionRequest={
+    id:'c08-lost-before-dispatch',capability:'file.write',risk:'write',
+    input:{path:path.join(os.tmpdir(),'c08-lost-lease.txt'),key:'lease-test',value:1},
+    provenance:{kind:'trusted_policy'}
+  };
+  const answer=await kernel.execute(action,permissions(['file.write']));
+  assert.equal(answer.ok,false);
+  assert.equal(answer.error?.code,'RESOURCE_LEASE_LOST');
+  assert.equal(answer.error?.sideEffectState,'none');
+  assert.equal(answer.error?.executionPhase,'pre_dispatch');
+  assert.equal(provider.calls,0);
+  assert.ok(ownershipChecks>=1);
+  assert.equal((await journal.inspect(action.id)).state,'DEFERRED');
+});
+
+test('C08 superseded user intent during pre-dispatch hook cannot dispatch a mutation',async t=>{
+  const stateDir=await temp(t);
+  const provider=new StateProvider();
+  const runtime=new OperatorRuntime().register(provider);
+  const journal=new ActionTransitionJournal(stateDir);
+  const intents=new IntentRegistry(stateDir);
+  const original=await intents.update('intent-during-hook',{
+    objective:'Write initial value',directive:'continue',sourceTurnId:'initial-turn'
+  });
+  const kernel=new AgentKernel({
+    stateDir,runtime,journal,intents,leases:new ResourceLeaseStore(stateDir),
+    beforeProviderDispatch:async()=>{
+      await intents.update('intent-during-hook',{
+        objective:'Stop that write',directive:'redirect',sourceTurnId:'new-turn'
+      });
+    }
+  });
+  const action:ActionRequest={
+    id:'c08-superseded-at-hook',capability:'file.write',risk:'write',
+    input:{path:path.join(os.tmpdir(),'c08-superseded-hook.txt'),key:'intent-test',value:1},
+    provenance:{kind:'trusted_policy'},intent:bindingForIntent(original)
+  };
+  const outcome=await kernel.execute(action,permissions(['file.write']));
+  assert.equal(outcome.ok,false);
+  assert.equal(outcome.error?.code,'INTENT_STALE');
+  assert.equal(outcome.error?.executionPhase,'pre_dispatch');
+  assert.equal(outcome.error?.sideEffectState,'none');
+  assert.equal(provider.calls,0);
+  assert.equal((await journal.inspect(action.id)).state,'DEFERRED');
+});
