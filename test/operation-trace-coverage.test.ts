@@ -100,3 +100,15 @@ test('C09 operation SLO preserves verified claim only when last verification pre
   assert.equal(bad.verified,0);
   assert.equal(bad.falseCompletionCount,1);
 });
+
+test('C09 a failed terminal outcome must not be counted as verified task success',()=>{
+  const report=summarizeOperationSlo([
+    e('REQUEST','2026-10-07T00:00:00.000Z'),
+    e('VERIFY','2026-10-07T00:00:00.100Z'),
+    e('COMPLETE','2026-10-07T00:00:00.200Z','FAILED')
+  ]);
+  assert.equal(report.completed,0);
+  assert.equal(report.verified,0);
+  assert.equal(report.falseCompletionCount,0);
+  assert.equal(report.failed,1);
+});
