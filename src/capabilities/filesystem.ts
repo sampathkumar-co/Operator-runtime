@@ -250,7 +250,11 @@ export class FilesystemProvider implements CapabilityProvider {
       const { stat, bytes: fullBytes, identity } = snapshot;
       const size = typeof stat.size === 'bigint' ? Number(stat.size) : stat.size;
       if (!Number.isSafeInteger(size) || size < 0) throw new OperatorError('FILE_SIZE_INVALID', 'Observed file size exceeds the safe numeric range.');
-      const encoding = action.input.encoding === 'base64' ? 'base64' : 'utf8';
+      const requestedEncoding = action.input.encoding;
+      if (requestedEncoding !== undefined && requestedEncoding !== 'base64' && requestedEncoding !== 'utf8') {
+        throw new OperatorError('FILESYSTEM_INPUT_INVALID', 'Read encoding must be an exact utf8 or base64 string.');
+      }
+      const encoding = requestedEncoding === 'base64' ? 'base64' : 'utf8';
       const offset = boundedInteger(action.input.offset, 0, 0, size);
       const maxBytes = boundedInteger(action.input.maxBytes, 48 * 1024, 1024, encoding === 'base64' ? 96 * 1024 : 128 * 1024);
       const returnedBytes = Math.min(maxBytes, Math.max(0, size - offset));
@@ -329,7 +333,11 @@ export class FilesystemProvider implements CapabilityProvider {
     if (query.length > 512) throw new OperatorError('FILESYSTEM_INPUT_INVALID', 'Search query exceeds 512 characters.');
     const maxResults = boundedInteger(action.input.maxResults, 100, 1, MAX_SEARCH_RESULTS);
     const maxDepth = boundedInteger(action.input.maxDepth, 8, 0, MAX_SEARCH_DEPTH);
-    const kind = ['all', 'file', 'directory'].includes(String(action.input.kind ?? 'all')) ? String(action.input.kind ?? 'all') : 'all';
+    const requestedKind = action.input.kind ?? 'all';
+    if (typeof requestedKind !== 'string' || !['all', 'file', 'directory'].includes(requestedKind)) {
+      throw new OperatorError('FILESYSTEM_INPUT_INVALID', 'Filesystem search kind must be all, file or directory.');
+    }
+    const kind = requestedKind;
     return await this.#scope.withExisting(requested, async (root) => {
       await this.#pathLeaseHook?.(action.capability, root);
       const stat = await fs.stat(root);
@@ -731,8 +739,10 @@ async function restoreClaimedPath(backupPath: string, filePath: string): Promise
 
 
 function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
-  const parsed = Number(value ?? fallback);
-  if (!Number.isFinite(parsed)) return fallback;
+  if (value !== undefined && (typeof value !== 'number' || !Number.isSafeInteger(value))) {
+    throw new OperatorError('FILESYSTEM_INPUT_INVALID', 'Filesystem pagination and traversal budgets must be exact integers.');
+  }
+  const parsed = value === undefined ? fallback : value;
   return Math.min(Math.max(Math.trunc(parsed), min), max);
 }
 
