@@ -110,3 +110,40 @@ test('C01 rejects coercible object digests before any protected data can enter J
     assert.throws(()=>createSanitizedEvaluationTrace(bad),/C01_TRACE_INVALID/);
   }
 });
+
+test('C01 only reconciliation of the exact uncertain action can permit later dispatch', () => {
+  const input = fixture();
+  input.steps[1].sideEffectState = 'uncertain';
+  input.steps[2].sideEffectState = 'uncertain';
+  const unrelated = { ...input.steps[1], sequence: 4, phase: 'RECONCILE',
+    actionOrdinal: 2, result: 'PASS', sideEffectState: 'known', failureStage: 'none' };
+  const next = { ...input.steps[1], sequence: 5, actionOrdinal: 3,
+    phase: 'DISPATCH', sideEffectState: 'known' };
+  input.steps.push(unrelated, next);
+  assert.throws(() => createSanitizedEvaluationTrace(input), /Uncertain prior side effect/);
+  input.steps[3].actionOrdinal = 1;
+  assert.doesNotThrow(() => createSanitizedEvaluationTrace(input));
+
+  input.steps[3].sideEffectState = 'none';
+  assert.throws(() => createSanitizedEvaluationTrace(input), /Uncertain prior side effect/);
+});
+
+test('C01 multiple independent uncertain actions each require action-bound reconciliation', () => {
+  const input = fixture();
+  input.steps[1].sideEffectState = 'uncertain';
+  input.steps[2].sideEffectState = 'uncertain';
+  input.steps.push(
+    { ...input.steps[1], sequence: 4, phase: 'VERIFY',
+      actionOrdinal: 2, sideEffectState: 'uncertain' },
+    { ...input.steps[1], sequence: 5, phase: 'RECONCILE',
+      actionOrdinal: 1, sideEffectState: 'known', result: 'PASS', failureStage: 'none' },
+    { ...input.steps[1], sequence: 6, phase: 'DISPATCH',
+      actionOrdinal: 3, sideEffectState: 'known' }
+  );
+  assert.throws(() => createSanitizedEvaluationTrace(input), /Uncertain prior side effect/);
+  input.steps[5].phase = 'RECONCILE';
+  input.steps[5].actionOrdinal = 2;
+  input.steps.push({ ...input.steps[1], sequence: 7, phase: 'DISPATCH',
+    actionOrdinal: 3, sideEffectState: 'known' });
+  assert.doesNotThrow(() => createSanitizedEvaluationTrace(input));
+});
