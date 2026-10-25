@@ -27,7 +27,7 @@ function fixture(){
     steps:[
       {sequence:1,phase:'OBSERVE',providerClass:'browser',actionOrdinal:1,
         result:'PASS',sideEffectState:'none',failureStage:'none',
-        evidenceDigest:h('1'),durationMs:12,secret:hidden.secret},
+        evidenceDigest:h('1'),durationMs:12.5,secret:hidden.secret},
       {sequence:2,phase:'DISPATCH',providerClass:'browser',actionOrdinal:1,
         result:'PASS',sideEffectState:'known',failureStage:'none',
         evidenceDigest:h('2'),durationMs:100,path:hidden.path},
@@ -44,6 +44,7 @@ test('C01 produces stepwise allowlisted JSONL without ever copying raw prompts, 
   const lines=trace.bytes.trimEnd().split('\n').map(v=>JSON.parse(v));
   assert.deepEqual(lines.map(v=>v.kind),['header','step','step','step','scorer']);
   assert.equal(lines[1].sequence,1);
+  assert.equal(lines[1].durationMs,12.5);
   assert.equal(lines[4].campaignCoverage,'PARTIAL_UNVERIFIED');
   assert.equal(lines[4].physicalAcceptance,'NOT_VERIFIED');
   assert.equal(lines[4].verifiedSuccess,false);
@@ -79,6 +80,7 @@ test('C01 malformed optional fields, wrong run identity, nonsequential events an
   {...fixture(),steps:[{...fixture().steps[0],phase:'DIRECT_CREDENTIAL_EXPORT'}]},
   {...fixture(),steps:[{...fixture().steps[0],result:'FAIL',failureStage:'none'}]},
   {...fixture(),steps:[{...fixture().steps[0],actionOrdinal:'private-id'}]},
+  {...fixture(),steps:[{...fixture().steps[0],durationMs:Number.NaN}]},
   {...fixture(),steps:[]}
  ];
  for(const bad of inputs) assert.throws(()=>createSanitizedEvaluationTrace(bad),/C01_TRACE_INVALID/);
