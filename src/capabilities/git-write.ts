@@ -60,17 +60,45 @@ export class GitWriteProvider implements CapabilityProvider {
     const started = performance.now();
     try {
       if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Git write provider does not support this capability.');
+      // Fail before any Git process or checkpoint can change repository refs.
+      const operation = action.input.operation;
+      if (typeof operation !== 'string' || !['stage', 'unstage', 'commit'].includes(operation)) {
+        throw new OperatorError('INVALID_GIT_WRITE_OPERATION', 'operation must be an exact stage, unstage, or commit string.');
+      }
+      const cwd = action.input.cwd;
+      if (typeof cwd !== 'string' || !cwd || cwd.length > 4096 || /[\0\r\n]/.test(cwd)) {
+        throw new OperatorError('GIT_WRITE_CWD_INVALID', 'Git working directory must be a bounded exact path.');
+      }
+      const expectedCurrentFingerprint = action.input.expectedCurrentFingerprint;
+      if (typeof expectedCurrentFingerprint !== 'string' ||
+          !/^[0-9a-f]{64}$/i.test(expectedCurrentFingerprint)) {
+        throw new OperatorError('GIT_WRITE_FINGERPRINT_REQUIRED', 'An exact fingerprint from git.checkpoint inspect is required.');
+      }
+      if (action.input.all !== undefined && typeof action.input.all !== 'boolean') {
+        throw new OperatorError('GIT_PATH_SELECTION_INVALID', 'Git all flag must be an exact Boolean.');
+      }
+      const proposedPaths = validatePaths(action.input.paths);
+      if (operation === 'stage' || operation === 'unstage') {
+        if (action.input.all === true && proposedPaths.length > 0) {
+          throw new OperatorError('GIT_PATH_SELECTION_INVALID', 'Select either all=true or explicit paths, never both.');
+        }
+        if (action.input.all !== true && proposedPaths.length === 0) {
+          throw new OperatorError('GIT_PATHS_REQUIRED', 'Git stage/unstage requires exact paths or all=true.');
+        }
+        if (action.input.message !== undefined) {
+          throw new OperatorError('GIT_WRITE_INPUT_INVALID', 'Commit message is not an input for stage or unstage.');
+        }
+      } else {
+        if (action.input.paths !== undefined || action.input.all !== undefined) {
+          throw new OperatorError('GIT_WRITE_INPUT_INVALID', 'Git commit uses only the previously staged index; paths/all are not accepted.');
+        }
+        const message = action.input.message;
+        if (typeof message !== 'string' || !message.trim() ||
+            message.length > 4000 || message.includes('\0')) {
+          throw new OperatorError('INVALID_COMMIT_MESSAGE', 'Commit message must be an exact nonempty bounded string.');
+        }
+      }
       resolveSupportedGitExecutable(gitEnvironment({}));
-      const operation = String(action.input.operation ?? '');
-      if (!['stage', 'unstage', 'commit'].includes(operation)) {
-        throw new OperatorError('INVALID_GIT_WRITE_OPERATION', 'operation must be stage, unstage, or commit.');
-      }
-      const cwd = String(action.input.cwd ?? '');
-      const expectedCurrentFingerprint = String(action.input.expectedCurrentFingerprint ?? '');
-      if (!/^[0-9a-f]{64}$/i.test(expectedCurrentFingerprint)) {
-        throw new OperatorError('GIT_WRITE_FINGERPRINT_REQUIRED', 'expectedCurrentFingerprint from git.checkpoint inspect is required.');
-      }
-
       const before = await this.#inspectState(cwd);
       if (before.fingerprint !== expectedCurrentFingerprint) {
         throw new OperatorError('GIT_WRITE_STATE_CHANGED', 'Repository state changed after the supplied write precondition was captured.', {
@@ -196,11 +224,14 @@ export class GitWriteProvider implements CapabilityProvider {
 }
 
 function validatePaths(input: unknown): string[] {
-  const raw = Array.isArray(input) ? input.map(String) : [];
+  if (input === undefined) return [];
+  if (!Array.isArray(input)) throw new OperatorError('GIT_PATH_SELECTION_INVALID', 'Git paths must be an exact array of strings.');
+  const raw = input;
   if (raw.length > 200) throw new OperatorError('TOO_MANY_GIT_PATHS', 'At most 200 paths may be supplied.');
   return raw.map((item) => {
-    const value = item.trim();
-    if (!value || value.length > 1000 || value.includes('\0') || value.includes('\r') || value.includes('\n')) {
+    if (typeof item !== 'string') throw new OperatorError('INVALID_GIT_PATH', 'Git path must be a literal string.');
+    const value = item;
+    if (!value || value !== value.trim() || value.length > 1000 || value.includes('\0') || value.includes('\r') || value.includes('\n')) {
       throw new OperatorError('INVALID_GIT_PATH', 'Git paths must be non-empty bounded single-line relative paths.');
     }
     if (path.isAbsolute(value) || value.startsWith(':')) throw new OperatorError('INVALID_GIT_PATH', 'Absolute paths and Git pathspec magic are not allowed.');
