@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import { DurableModelCallBudgetLedger } from '../src/core/durable-model-call-budget-ledger.ts';
 import { BoundedModelGoalInference } from '../src/core/bounded-model-goal-inference.ts';
 
@@ -12,7 +12,7 @@ function claim() {
   return {callId: crypto.randomUUID(), modelId:'local-test-model',
     maxOutputTokens:256, maxCostMicros:900};
 }
-async function temp(t:test.TestContext):Promise<string> {
+async function temp(t:TestContext):Promise<string> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-model-budget-'));
   t.after(async () => await fs.rm(root, { recursive:true,force:true,maxRetries:5,retryDelay:50 }));
   return root;
