@@ -55,7 +55,14 @@ export function verifyTaskCompletion(task: TaskCapsule): { ok: boolean; bundle: 
     return false;
   });
   const plannerTerminal = builtinPlannerStateIsTerminal(task);
-  const semanticObservationPresent = execution?.records.some((record) => record.observation !== undefined) ?? false;
+  const semanticObservationPresent = execution?.records.some((record) =>
+    record.state === 'SUCCEEDED' && record.observation !== undefined
+  ) ?? false;
+  // A failed/interrupted action or an INFO/FAIL diagnostic is not proof of
+  // the requested outcome, even when it exists in the durable action journal.
+  const successfulProviderEvidencePresent = execution?.records.some((record) =>
+    record.state === 'SUCCEEDED' && record.evidence.some((item) => item.status === 'pass')
+  ) ?? false;
   const epistemicallyUnresolved = execution?.records.filter((record) => record.state === 'SUCCEEDED'
     && record.observation?.schemaVersion === 2
     && record.observation.epistemicStatus !== 'KNOWN') ?? [];
@@ -122,10 +129,12 @@ export function verifyTaskCompletion(task: TaskCapsule): { ok: boolean; bundle: 
   });
   checks.push({
     name: 'evidence-present',
-    ok: semanticObservationPresent || (execution?.records.some((record) => record.evidence.length > 0) ?? false),
+    ok: semanticObservationPresent || successfulProviderEvidencePresent,
     detail: semanticObservationPresent
       ? 'At least one durable semantic/visual machine observation supports completion.'
-      : 'Completion requires durable provider evidence or a machine observation; planner completion text alone is insufficient.'
+      : successfulProviderEvidencePresent
+        ? 'At least one succeeded action has positive provider evidence.'
+        : 'Completion requires a succeeded action with positive provider evidence or machine observation; failed/info-only events are not proof.'
   });
 
   const stateVersions = [...new Set(
