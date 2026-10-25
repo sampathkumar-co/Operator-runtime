@@ -96,3 +96,18 @@ test('C06 an oversized status record cannot return a non-progressing page cursor
   assert.equal((sufficient.output as any).entries.length, 1);
   assert.equal((sufficient.output as any).truncated, false);
 });
+
+test('C06 successful Git diff pagination must not copy secret-bearing subprocess diagnostics', () => {
+  const secret = 'PRIVATE_DOCUMENT_TOKEN_0123456789';
+  const raw = { ...result('diff --git a/public.txt b/public.txt'), output: {
+    stdout: 'diff --git a/public.txt b/public.txt',
+    stderr: 'fatal: access denied in C:\\Users\\secret\\' + secret,
+    truncated: false
+  } };
+  const answer = boundedGitDiff(raw, { offset: 0, maxBytes: 1024 });
+  assert.equal(answer.ok, true);
+  const output = answer.output as any;
+  assert.equal(output.stderr, 'GIT_STDERR_REDACTED');
+  assert.equal(output.stdout, 'diff --git a/public.txt b/public.txt');
+  assert.equal(JSON.stringify(answer).includes(secret), false);
+});
