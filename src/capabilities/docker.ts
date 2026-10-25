@@ -62,6 +62,7 @@ export class DockerProvider implements CapabilityProvider {
   async execute(action: ActionRequest, executionContext: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
+      if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Docker provider does not support the requested capability.');
       if (action.capability === 'docker.inspect') {
         const pathValue = action.input.path;
         if (pathValue !== undefined && (typeof pathValue !== 'string' || pathValue.length > 4096)) {
