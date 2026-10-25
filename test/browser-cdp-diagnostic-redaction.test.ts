@@ -68,3 +68,19 @@ test('C03 hostile CDP error storms are bounded to 50 redacted entries', async ()
   assert.ok(state.consoleErrors.every(s => s.endsWith('_REDACTED')));
   diagnostics.stop();
 });
+
+test('C03 shape-compatible but attacker-controlled network error text is never exported', async () => {
+  const harness=fixture();
+  const diagnostics=await collectDiagnostics(harness.session);
+  const secret='PRIVATE_API_KEY_0123456789';
+  harness.emit('Network.loadingFailed',{
+    url:'https://example.test/?password='+secret,
+    errorText:'net::ERR_'+secret,
+    blockedReason:'csp'
+  });
+  const snapshot=diagnostics.snapshot();
+  assert.equal(snapshot.networkFailures[0]?.url,'URL_REDACTED');
+  assert.equal(snapshot.networkFailures[0]?.errorText,'NETWORK_ERROR_DETAILS_REDACTED');
+  assert.ok(!JSON.stringify(snapshot).includes(secret));
+  diagnostics.stop();
+});
