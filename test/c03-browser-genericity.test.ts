@@ -44,7 +44,7 @@ test('C03 incomplete source or altered 125 roster is never treated as independen
   const missing = files();
   delete missing['src/capabilities/browser-cdp-page.ts'];
   assert.throws(() => verifyProductionBrowserGenericity({files:missing,roster}),
-    /source file census incomplete/);
+    /browser production file census incomplete/);
   const wrong = {taskIds: roster.taskIds.slice(1)};
   assert.throws(() => verifyProductionBrowserGenericity({files:files(),roster:wrong}),
     /official 125-task/);
