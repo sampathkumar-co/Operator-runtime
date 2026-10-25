@@ -47,3 +47,19 @@ test('C06 ASCII-only Git diff preserves existing byte offset and pagination beha
   assert.equal(first.stdout + last.stdout, 'x'.repeat(1200));
   assert.equal(last.returnedBytes, 176);
 });
+
+test('C06 incomplete subprocess diff cannot masquerade as a paginated complete result', () => {
+  const incomplete = { ...result('x'.repeat(4096)), output: {
+    stdout: 'x'.repeat(4096), truncated: true, stderr: 'private details'
+  } };
+  for (const offset of [0, 1024, 4096]) {
+    const answer = boundedGitDiff(incomplete, { offset, maxBytes: 1024 });
+    assert.equal(answer.ok, false);
+    assert.equal(answer.error?.code, 'GIT_DIFF_SOURCE_TRUNCATED');
+    assert.equal(answer.error?.retryable, false);
+    const output = answer.output as any;
+    assert.equal(output.stdout, '');
+    assert.equal(output.returnedBytes, 0);
+    assert.equal(output.nextOffset, undefined);
+  }
+});
