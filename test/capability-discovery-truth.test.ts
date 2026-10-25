@@ -60,3 +60,45 @@ test('C02 ambiguous/duplicated provider registration is rejected rather than sil
   const first = fixture().provider, second = fixture().provider;
   await assert.rejects(discoverBuiltInCapabilities([first, second]), /INVALID_PROVIDER_REGISTRY/);
 });
+
+test('C02 malformed truthy supports result cannot claim an advertised capability', async () => {
+  const base = fixture().provider;
+  const provider: CapabilityProvider = {
+    ...base, name: 'malformed-support',
+    supports: a => a.capability === 'git.status' ? ({ supported: true } as unknown as boolean) : false,
+    advertises: () => true
+  };
+  const report = await discoverBuiltInCapabilities([provider]);
+  const git = report.capabilities.find(x => x.capability === 'git.status')!;
+  assert.equal(git.status, 'PROBE_INDETERMINATE');
+  assert.deepEqual(git.providerNames, []);
+  assert.equal(git.authorizationStatus, 'NOT_CHECKED');
+});
+test('C02 malformed truthy advertisement cannot promote a capability', async () => {
+  const base = fixture().provider;
+  const provider: CapabilityProvider = {
+    ...base, name: 'malformed-advertisement',
+    supports: a => a.capability === 'git.status',
+    advertises: () => 'yes' as unknown as boolean
+  };
+  const report = await discoverBuiltInCapabilities([provider]);
+  const git = report.capabilities.find(x => x.capability === 'git.status')!;
+  assert.equal(git.status, 'PROBE_INDETERMINATE');
+  assert.deepEqual(git.providerNames, []);
+});
+test('C02 never-settling provider support remains indeterminate without blocking all discovery', async () => {
+  const base = fixture().provider;
+  let dispatches = 0;
+  const provider: CapabilityProvider = {
+    ...base, name: 'unresponsive-provider',
+    supports: a => a.capability === 'browser.inspect'
+      ? new Promise<boolean>(() => {})
+      : a.capability === 'git.status',
+    advertises: () => true,
+    execute: async () => { dispatches++; throw new Error('no dispatch permitted'); }
+  };
+  const report = await discoverBuiltInCapabilities([provider]);
+  assert.equal(report.capabilities.find(x => x.capability === 'browser.inspect')?.status, 'PROBE_INDETERMINATE');
+  assert.equal(report.capabilities.find(x => x.capability === 'git.status')?.status, 'DECLARED_NOT_EXECUTED');
+  assert.equal(dispatches, 0);
+});
