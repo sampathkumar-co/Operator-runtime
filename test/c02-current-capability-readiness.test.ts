@@ -147,3 +147,30 @@ test('C02 source readiness does not trust malformed or self-contradictory provid
     }), (error: any) => error?.code === 'CAPABILITY_READINESS_INVALID');
   }
 });
+
+test('C02 native Windows UIA operations cannot appear available on unsupported host OS', async () => {
+  let dispatches=0;
+  const snapshot=await discoverBuiltInCapabilities([{
+    name:'source-uia',
+    supports:(action:any)=>['app.inspect','app.operate','visual.capture','browser.inspect'].includes(action.capability),
+    score:()=>({reliability:1,latency:1,determinism:1,security:1,reversibility:1,informationQuality:1,interactionCost:0}),
+    execute:async()=>{dispatches++;throw new Error('discovery must not dispatch');}
+  }]);
+  const profile={allowedCapabilities:['app.*','visual.capture','browser.inspect'],allowedRoots:[]};
+  const statuses=(platform:string,stopped=false)=>buildContextualCapabilityReadiness({
+    declaration:snapshot,permissions:profile,platform,emergencyStopped:stopped
+  }).capabilities;
+  for(const platform of ['linux','darwin','unknown']) {
+    const rows=statuses(platform);
+    for(const capability of ['app.inspect','app.operate','visual.capture']) {
+      const entry=rows.find(x=>x.capability===capability)!;
+      assert.equal(entry.state,'PLATFORM_UNSUPPORTED',platform+' '+capability);
+      assert.equal(entry.currentPhysicalOperation,'NOT_TESTED');
+      assert.equal(entry.requiresFreshAuthorization,true);
+    }
+    assert.equal(rows.find(x=>x.capability==='browser.inspect')?.state,'PROVIDER_DECLARED_NOT_EXECUTION_TESTED');
+  }
+  assert.equal(statuses('win32').find(x=>x.capability==='app.inspect')?.state,'PROVIDER_DECLARED_NOT_EXECUTION_TESTED');
+  assert.equal(statuses('linux',true).find(x=>x.capability==='app.inspect')?.state,'EMERGENCY_STOPPED');
+  assert.equal(dispatches,0);
+});

@@ -12,6 +12,7 @@ type Advertised =
   | 'PROVIDER_DECLARED_NOT_EXECUTION_TESTED'
   | 'SCOPE_NOT_LISTED'
   | 'ROOT_SCOPE_MISSING'
+  | 'PLATFORM_UNSUPPORTED'
   | 'EMERGENCY_STOPPED'
   | 'REQUIRES_TYPED_INPUT'
   | 'PROVIDER_PROBE_INDETERMINATE'
@@ -126,9 +127,14 @@ export function buildContextualCapabilityReadiness(input: {
     seen.add(entry.capability);
     const group = family(entry.capability);
     const permittedByScope = listed(entry.capability,scope);
+    const runningPlatform = safePlatform(input.platform);
     let state: Advertised;
     if (input.emergencyStopped) state = 'EMERGENCY_STOPPED';
     else if (!permittedByScope) state = 'SCOPE_NOT_LISTED';
+    // A native Windows UIA provider cannot be treated as a present desktop
+    // implementation on Linux/macOS just because source registers its stub.
+    // This is discovery presentation only, not a dispatch authorization gate.
+    else if (group === 'WINDOWS_UIA' && runningPlatform !== 'win32') state = 'PLATFORM_UNSUPPORTED';
     else if (group === 'FILESYSTEM' && input.permissions.allowedRoots.length === 0) state = 'ROOT_SCOPE_MISSING';
     else if (entry.status === 'PROBE_INDETERMINATE') state = 'PROVIDER_PROBE_INDETERMINATE';
     else if (entry.status === 'NOT_ADVERTISED_WITH_EMPTY_INPUT') state = 'REQUIRES_TYPED_INPUT';
