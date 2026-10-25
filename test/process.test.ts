@@ -553,7 +553,10 @@ test('C06 trusted terminal invocation and managed session refuse coercible argum
     { capability: 'terminal.session', input: { operation: 'start', executable: ['node'], args: [], cwd: root } },
     { capability: 'terminal.session', input: { operation: 'start', executable: 'node', args: [imposter], cwd: root } },
     { capability: 'terminal.session', input: { operation: 'start', executable: 'node', args: [], cwd: [root] } },
-    { capability: 'terminal.session', input: { operation: 'list', developerSessionId: ['trusted'] } }
+    { capability: 'terminal.session', input: { operation: 'list', developerSessionId: ['trusted'] } },
+    { capability: 'terminal.session', input: { operation: 'terminate', sessionId: ['00000000-0000-4000-8000-000000000001'] } },
+    { capability: 'terminal.session', input: { operation: 'terminate',
+      sessionId: { toString() { invoked++; return '00000000-0000-4000-8000-000000000001'; } } } }
   ];
   for (const [index, item] of attempts.entries()) {
     const result = await provider.execute({
