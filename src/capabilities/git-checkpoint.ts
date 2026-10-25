@@ -68,6 +68,7 @@ export class GitCheckpointProvider implements CapabilityProvider {
   async execute(action: ActionRequest): Promise<ActionResult> {
     const started = performance.now();
     try {
+      if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Git checkpoint provider does not support this capability.');
       resolveSupportedGitExecutable(gitEnvironment({}));
       if (action.capability === 'git.checkpoint.create') return await this.#create(action, started);
       if (action.capability === 'git.checkpoint.inspect') return await this.#inspect(action, started);
