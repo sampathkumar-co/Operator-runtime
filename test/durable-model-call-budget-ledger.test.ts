@@ -125,3 +125,24 @@ test('C05 denied caps, forged reservations and symlinked state directory fail cl
   }
   await assert.rejects(ledger.reserve(claim()),matching('TASK_MODEL_BUDGET_LEDGER_CORRUPT'));
 });
+
+
+test('C05 deleting or replacing only the used ledger never silently replenishes model credits',async t=>{
+  const root=await temp(t);
+  const ledger=new DurableModelCallBudgetLedger(root,limits);
+  await ledger.reserve(claim());
+  const folder=path.join(root,'model-budget');
+  const ledgerFile=path.join(folder,'ledger-v1.json');
+  const markerFile=path.join(folder,'initialized-v1.json');
+  assert.equal((await ledger.inspect()).remainingCalls,2);
+  await fs.rm(ledgerFile);
+  await assert.rejects(ledger.reserve(claim()),matching('TASK_MODEL_BUDGET_LEDGER_CORRUPT'));
+  await assert.rejects(ledger.inspect(),matching('TASK_MODEL_BUDGET_LEDGER_CORRUPT'));
+  await fs.writeFile(ledgerFile,JSON.stringify({
+    schemaVersion:1,limits,reservations:[]
+  }));
+  await fs.writeFile(markerFile,JSON.stringify({
+    schemaVersion:1,profileDigest:'a'.repeat(64)
+  }));
+  await assert.rejects(ledger.inspect(),matching('TASK_MODEL_BUDGET_LEDGER_CORRUPT'));
+});
