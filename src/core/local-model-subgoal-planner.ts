@@ -23,6 +23,19 @@ function family(raw: string): string {
 }
 
 /**
+ * Owner-provided, provider-neutral inference boundary. This is not a source of
+ * authority: return only the candidate index from the supplied safe metadata.
+ * An external paid service must be independently authorized and cost-ledgered;
+ * the shipping local-agent only uses its fixed loopback implementation.
+ */
+export interface ReadySubgoalRanker {
+  select(input: {
+    modelId: string; prompt: string; candidateCount: number;
+    signal: AbortSignal; timeoutMs: number;
+  }): Promise<number>;
+}
+
+/**
  * Selects the ordering of PREAUTHORIZED and DEPENDENCY-READY subgoals only.
  * All action inputs, verification assertions and permissions are established
  * by the existing durable plan. An advisory model never creates or alters them.
@@ -35,12 +48,17 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
   readonly #model: string;
   readonly #fetch: typeof fetch;
   readonly #now: () => number;
+  readonly #ranker?: ReadySubgoalRanker;
 
-  constructor(options: { model: string; fetchFn?: typeof fetch; now?: () => number }) {
+  constructor(options: { model: string; fetchFn?: typeof fetch; now?: () => number; ranker?: ReadySubgoalRanker }) {
     if (typeof options.model !== 'string' ||
       !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(options.model)) {
       invalid('Local planner model identifier is invalid.');
     }
+    if (options.ranker !== undefined && typeof options.ranker?.select !== 'function') {
+      invalid('Provider-neutral subgoal ranker must implement the bounded selection contract.');
+    }
+    this.#ranker = options.ranker;
     this.#model = options.model;
     this.#fetch = options.fetchFn ?? fetch;
     this.#now = options.now ?? Date.now;
@@ -151,7 +169,16 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
           reject(new OperatorError('TASK_MODEL_SUBGOAL_TIMEOUT', 'Local subgoal selection exceeded its deadline.'));
         }, timeoutMs);
       });
-      return await Promise.race([this.#readChoice(prompt, count, signal), deadline, cancelled]);
+      const inference = this.#ranker
+        ? Promise.resolve().then(() => this.#ranker!.select({
+            modelId: this.#model, prompt, candidateCount: count, signal, timeoutMs
+          }))
+        : this.#readChoice(prompt, count, signal);
+      const selected = await Promise.race([inference, deadline, cancelled]);
+      if (!Number.isSafeInteger(selected) || selected < 0 || selected >= count) {
+        invalid('Provider-neutral model selected a nonexistent or unauthorized subgoal.');
+      }
+      return selected;
     } finally {
       if (timer) clearTimeout(timer);
       if (parent && onAbort) parent.removeEventListener('abort', onAbort);
