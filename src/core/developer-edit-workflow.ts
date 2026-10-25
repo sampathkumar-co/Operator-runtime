@@ -221,9 +221,12 @@ function uniqueCommandIds(input: unknown): string[] {
 }
 
 function commandIdValue(input: unknown): string {
-  const value = String(input ?? '');
-  if (!COMMAND_ID.test(value)) throw invalid('Trusted command id is invalid.');
-  return value;
+  // Array-wrapped IDs and attacker-owned coercion objects must never become
+  // registered commands or satisfy post-edit / build verification evidence.
+  if (typeof input !== 'string' || !COMMAND_ID.test(input)) {
+    throw invalid('Trusted command id must be an exact bounded string.');
+  }
+  return input;
 }
 
 function uniquePaths(input: unknown): string[] {
@@ -248,7 +251,8 @@ function normalizeRelativePath(input: unknown): string {
 }
 
 function digest(input: unknown, label: string): string {
-  const value = String(input ?? '').toLowerCase();
+  if (typeof input !== 'string') throw invalid(label + ' must be an exact SHA-256 string.');
+  const value = input.toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(value)) throw invalid(label + ' must be SHA-256.');
   return value;
 }
