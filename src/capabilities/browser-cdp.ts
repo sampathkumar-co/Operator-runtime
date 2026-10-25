@@ -698,9 +698,12 @@ export class BrowserCdpProvider implements CapabilityProvider {
       }
       const stateProgress = downloadResult?.state === 'completed' || directSemanticProgress || JSON.stringify(beforeRelevant) !== JSON.stringify(afterRelevant);
       if (['drag', 'drag_by', 'drag_between'].includes(operation) && !stateProgress) {
+        // An unobserved page delta does not prove no physical effect: a drag
+        // was dispatched and may have changed hidden server or application state.
+        // Never mark it side-effect-free or permit blind replay.
         throw new OperatorError('BROWSER_NO_PROGRESS', 'Drag input was dispatched but no source, destination, or associated objective state changed.', {
           retryable: false,
-          details: { sideEffectState: 'none', executionPhase: 'effect_observed', actionFamily: 'drag', target: targetSpec, toTarget: toTargetSpec, before: beforeRelevant, after: afterRelevant }
+          details: { sideEffectState: 'uncertain', executionPhase: 'effect_observed', actionFamily: 'drag', target: targetSpec, toTarget: toTargetSpec, before: beforeRelevant, after: afterRelevant }
         });
       }
       const actionIdentity = String(beforeTarget.identity ?? targetSpec.ref ?? targetSpec.css ?? `${targetSpec.role ?? ''}:${targetSpec.name ?? targetSpec.text ?? ''}`);
