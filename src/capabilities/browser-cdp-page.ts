@@ -96,7 +96,13 @@ export function requirePageTarget(targets: CdpTarget[]): CdpTarget {
   return target;
 }
 
-export function validateNavigationUrl(raw: string): string {
+export function validateNavigationUrl(raw: unknown): string {
+  // URL() stringifies arrays and arbitrary objects. Never let a malformed
+  // model/tool argument become a valid navigation target through coercion.
+  if (typeof raw !== 'string' || raw.length < 1 || raw.length > 4096 ||
+      [...raw].some(char => [0, 10, 13].includes(char.charCodeAt(0)))) {
+    throw new OperatorError('INVALID_URL', 'A bounded, exact absolute URL string is required.');
+  }
   let url: URL;
   try { url = new URL(raw); } catch { throw new OperatorError('INVALID_URL', 'A valid absolute URL is required.'); }
   if (!['http:', 'https:'].includes(url.protocol)) throw new OperatorError('URL_SCHEME_DENIED', 'Only HTTP(S) browser navigation is allowed.');
