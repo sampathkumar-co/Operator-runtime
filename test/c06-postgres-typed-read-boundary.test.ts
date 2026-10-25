@@ -15,7 +15,7 @@ async function setup(t: test.TestContext) {
     id:'local',roots:[project],host:'127.0.0.1',port:5432,
     database:'testdb',user:'testuser',sslMode:'disable'
   };
-  const save=async profile=>fs.writeFile(registryPath,JSON.stringify({version:1,profiles:[profile]}));
+  const save=async (profile:unknown)=>fs.writeFile(registryPath,JSON.stringify({version:1,profiles:[profile]}));
   await save(validProfile);
   const provider=new PostgresProvider({allowedRoots:[project],registryPath,
     psqlExecutable:'/missing/psql/must/not/run'});
