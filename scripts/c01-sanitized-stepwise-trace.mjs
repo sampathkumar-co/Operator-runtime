@@ -54,8 +54,17 @@ export function createSanitizedEvaluationTrace(input) {
  const run=validateWave0Record(input.record,input.sourceCommit);
  if(run.id!==input.runId||!LANES.has(run.lane))deny('Step trace run identity or lane differs from scorer record.');
  const steps=input.steps.map(recordStep);
- if(steps.some((step,i)=>i>0&&steps[i-1].sideEffectState==='uncertain'&&step.phase==='DISPATCH')){
-   deny('Uncertain prior side effect cannot be silently followed by another dispatch.');
+ // Uncertain effect persists across any number of observations. Only an
+ // explicit positive reconciliation step can clear it before new dispatch.
+ let unresolvedUncertain=false;
+ for(const step of steps){
+   if(unresolvedUncertain&&step.phase==='DISPATCH'){
+     deny('Uncertain prior side effect cannot be silently followed by another dispatch.');
+   }
+   if(step.sideEffectState==='uncertain') unresolvedUncertain=true;
+   if(step.phase==='RECONCILE'&&step.result==='PASS'&&step.sideEffectState!=='uncertain'){
+     unresolvedUncertain=false;
+   }
  }
  // A single Lane C arm is NOT a paired cohort. Keep only the exact
  // run-level digest here; the separate campaign reporter authenticates pairing.
