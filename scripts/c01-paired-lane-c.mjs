@@ -18,7 +18,8 @@ function integer(x, min, max) {
 }
 function validCase(c) {
   return c && typeof c === 'object' && !Array.isArray(c) &&
-    ID.test(c.id ?? '') && ID.test(c.version ?? '') &&
+    typeof c.id === 'string' && typeof c.version === 'string' &&
+    ID.test(c.id) && ID.test(c.version) &&
     integer(c.seed, 0, 1_000_000) &&
     boundedString(c.objective, 2048) &&
     boundedString(c.prompt, 16 * 1024) &&
@@ -26,11 +27,12 @@ function validCase(c) {
     DIGEST.test(c.independentOracleDigest ?? '');
 }
 function validInput(x) {
-  return x && SHA.test(x.sourceCommit ?? '') &&
-    DIGEST.test(x.runnerDigest ?? '') &&
-    DIGEST.test(x.modelConfigDigest ?? '') &&
-    DIGEST.test(x.environmentDigest ?? '') &&
-    ID.test(x.modelId ?? '') &&
+  return x && typeof x === 'object' && !Array.isArray(x) &&
+    typeof x.sourceCommit === 'string' && SHA.test(x.sourceCommit) &&
+    typeof x.runnerDigest === 'string' && DIGEST.test(x.runnerDigest) &&
+    typeof x.modelConfigDigest === 'string' && DIGEST.test(x.modelConfigDigest) &&
+    typeof x.environmentDigest === 'string' && DIGEST.test(x.environmentDigest) &&
+    typeof x.modelId === 'string' && ID.test(x.modelId) &&
     Array.isArray(x.cases) && x.cases.length >= 1 && x.cases.length <= 200 &&
     x.cases.every(validCase) &&
     integer(x.maxSteps, 1, 300) &&
