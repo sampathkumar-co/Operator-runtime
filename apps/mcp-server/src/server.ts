@@ -966,8 +966,8 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     inputSchema: z.object({
       operation: z.enum(['stage', 'unstage', 'commit']),
       cwd: z.string().min(1),
-      paths: z.array(z.string().min(1).max(1000)).max(200).default([]),
-      all: z.boolean().default(false),
+      paths: z.array(z.string().min(1).max(1000)).max(200).optional(),
+      all: z.boolean().optional(),
       message: z.string().min(1).max(4000).optional(),
       expectedCurrentFingerprint: z.string().regex(/^[0-9a-f]{64}$/i)
     }),
@@ -975,9 +975,9 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   }, async ({ operation, cwd, paths, all, message, expectedCurrentFingerprint }) => invoke('git.write', 'write', {
     operation,
     cwd,
-    paths,
-    all,
-    message,
+    ...(paths === undefined ? {} : { paths }),
+    ...(all === undefined ? {} : { all }),
+    ...(message === undefined ? {} : { message }),
     expectedCurrentFingerprint
   }, cwd));
 
