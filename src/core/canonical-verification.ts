@@ -3,6 +3,7 @@ import { canonicalJson } from './action-identity.ts';
 import type { AgentKernel } from './agent-kernel.ts';
 import { kernelVerificationDigest } from './action-verification.ts';
 import { OperatorError } from './errors.ts';
+import { CAPABILITY_RISK_RULES } from './capability-policy.ts';
 import { normalizeMachineObservation } from './machine-state.ts';
 import { assertTaskMachineState, normalizeTaskStateAssertions, type TaskStateAssertion } from './task-state-assertion.ts';
 import type { IntentBinding, PermissionProfile } from './types.ts';
@@ -40,6 +41,12 @@ export function normalizeCanonicalVerificationRequest(input: unknown): Canonical
     }
     names.add(name);
     const capability = bounded(probe.capability, 256, `probes[${index}].capability`);
+    // The verifier must never reinterpret a write, external, dynamic or
+    // extension operation as read-only by labeling the issued action 'read'.
+    // Only canonical built-in read capabilities may act as independent probes.
+    if (!Object.hasOwn(CAPABILITY_RISK_RULES, capability) || CAPABILITY_RISK_RULES[capability] !== 'read') {
+      throw new OperatorError('CANONICAL_VERIFICATION_INVALID', `probes[${index}].capability is not a registered read-only verification probe.`);
+    }
     const probeInput = probe.input && typeof probe.input === 'object' && !Array.isArray(probe.input)
       ? structuredClone(probe.input as Record<string, unknown>)
       : undefined;
