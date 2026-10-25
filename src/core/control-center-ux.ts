@@ -306,14 +306,15 @@ function recoveryItem(candidate: RecoveryCandidateInput): RecoveryCenterItem {
   if (
     candidate.sideEffectState === 'none' &&
     candidate.retryable &&
-    (candidate.reconciliationStatus === undefined || candidate.reconciliationStatus === 'not_applied')
+    (candidate.reconciliationStatus === 'not_applied' ||
+      (candidate.executionPhase === 'pre_dispatch' && candidate.reconciliationStatus === undefined))
   ) {
     return {
       ...base,
       disposition: 'RETRYABLE',
       recommendedAction: 'RETRY',
       requiresFreshApproval: true,
-      reason: 'No side effect was applied and the failure is explicitly retryable.'
+      reason: 'A pre-dispatch failure or independent reconciliation proves no effect was applied; a fresh approval is still required.'
     };
   }
 
