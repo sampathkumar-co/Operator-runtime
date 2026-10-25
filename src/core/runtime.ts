@@ -3,6 +3,7 @@ import { AuthorityKernel } from './authority-kernel.ts';
 import { discoverBuiltInCapabilities, type CapabilityDiscoverySnapshot } from './capability-discovery.ts';
 import { CapabilityRouter } from './router.ts';
 import { evidence } from './evidence.ts';
+import { assertProviderResultContract } from './provider-result-contract.ts';
 import { OperatorError } from './errors.ts';
 import type { ProviderLearning } from './provider-learning.ts';
 import { conservativeExecutionPhase, conservativeSideEffectState, retrySafeWithoutReconciliation, validExecutionPhase, validSideEffectState } from './side-effect.ts';
@@ -129,7 +130,9 @@ export class OperatorRuntime {
           return policyDeniedBeforeDispatch(canonicalAction, error, start);
         }
         await context.onProviderDispatch?.(provider.name);
-        const result = await provider.execute(canonicalAction, context);
+        const result = assertProviderResultContract(
+          await provider.execute(canonicalAction, context), canonicalAction, provider.name
+        );
         result.evidence.unshift(evidence('routing', 'info', `Selected ${provider.name}.`, { score, baseScore, learnedAdjustment }));
         result.durationMs = Math.round(performance.now() - start);
         if (result.ok) return result;
