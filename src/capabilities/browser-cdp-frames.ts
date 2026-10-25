@@ -6,6 +6,18 @@ const MAX_OOPIF_SESSIONS = 16;
 const MAX_OOPIF_DEPTH = 4;
 const ATTACH_SETTLE_MS = 25;
 
+// One closed native keyboard key contract shared by the CDP provider
+// preflight and the exact frame dispatcher. Never coerce untrusted arrays
+// or objects into keys after browser observation/focus has begun.
+const ALLOWED_BROWSER_NATIVE_KEYS = new Set([
+  'Enter', 'Escape', 'Tab', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+  'Backspace', 'Delete', 'Home', 'End', 'PageUp', 'PageDown',
+  'Shift', 'Control', 'Alt', 'Meta', 'a', 'c', 'v', 'b', 'i', 'A', 'C', 'V', 'B', 'I'
+]);
+export function isSupportedBrowserNativeKey(value: unknown): value is string {
+  return typeof value === 'string' && ALLOWED_BROWSER_NATIVE_KEYS.has(value);
+}
+
 type AttachedFrame = {
   sessionId: string;
   targetId: string;
@@ -863,8 +875,7 @@ export async function performSemanticInteraction(
         };
       }
       const requested = input.operation === 'key_press' ? [String(input.key ?? '')] : Array.isArray(input.keys) ? input.keys.map(String) : [];
-      const allowedKeys = new Set(['Enter','Escape','Tab','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Backspace','Delete','Home','End','PageUp','PageDown','Shift','Control','Alt','Meta','a','c','v','b','i','A','C','V','B','I']);
-      if (!requested.length || requested.length > 4 || requested.some((key) => !allowedKeys.has(key))) {
+      if (!requested.length || requested.length > 4 || requested.some((key) => !isSupportedBrowserNativeKey(key))) {
         throw new OperatorError('INVALID_BROWSER_KEY', 'Keyboard input must use one supported key or a bounded supported modifier chord.', { retryable: false });
       }
       const modifierBit = (key: string) => key === 'Alt' ? 1 : key === 'Control' ? 2 : key === 'Meta' ? 4 : key === 'Shift' ? 8 : 0;
