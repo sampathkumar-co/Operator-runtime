@@ -34,6 +34,7 @@ const PUBLIC_UIA_ERROR_CODES = new Set([
   'UIA_SIDECAR_CLOSED', 'UIA_SIDECAR_EXITED', 'UIA_SIDECAR_TIMEOUT',
   'UIA_SIDECAR_UNAVAILABLE', 'UIA_SIDECAR_WRITE_FAILED',
   'UIA_SIDECAR_START_FAILED', 'UIA_SIDECAR_START_TIMEOUT',
+  'UIA_SIDECAR_PROTOCOL_INVALID',
   'UIA_SIDECAR_TERMINATE_FAILED', 'UIA_REQUEST_TOO_LARGE',
   'INVALID_UIA_OPERATION', 'INVALID_UIA_SCROLL_AMOUNT',
   'INVALID_UIA_SELECTOR', 'INVALID_UIA_VALUE',
@@ -47,6 +48,7 @@ const PUBLIC_UIA_ERROR_CODES = new Set([
 const UNCERTAIN_UIA_MUTATION_ERRORS = new Set([
   'UIA_SIDECAR_TIMEOUT', 'UIA_SIDECAR_CLOSED', 'UIA_SIDECAR_EXITED',
   'UIA_SIDECAR_WRITE_FAILED', 'EXECUTION_ABORTED', 'UIA_OPERATION_FAILED',
+  'UIA_SIDECAR_PROTOCOL_INVALID',
   'INPUT_AFTER_CAPTURE_FAILED', 'INPUT_AFTER_CAPTURE_INVALID',
   'UIA_PROVIDER_FAILED'
 ]);
@@ -57,6 +59,16 @@ const SCROLL_AMOUNTS = ['large_decrement', 'small_decrement', 'none', 'large_inc
 
 type SidecarError = { code: string; message: string; retryable?: boolean };
 type SidecarResponse = { id: string; ok: boolean; result?: unknown; error?: SidecarError };
+
+/** Native JSON is untrusted until its boolean result is validated at runtime. */
+export function strictUiaSidecarOutcome(value: unknown): boolean {
+  if (typeof value !== 'boolean') {
+    throw new OperatorError('UIA_SIDECAR_PROTOCOL_INVALID',
+      'Native UIA response did not contain a boolean success flag.', { retryable: false });
+  }
+  return value;
+}
+
 type CaptureLease = {
   captureId: string;
   sha256: string;
@@ -206,15 +218,30 @@ class WindowsUiaSidecarClient {
         void this.close();
         return;
       }
-      let response: SidecarResponse;
-      try { response = JSON.parse(line) as SidecarResponse; } catch { return; }
-      if (!response?.id) return;
-      const pending = this.#pending.get(response.id);
+      let parsed: unknown;
+      try { parsed = JSON.parse(line); } catch { return; }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+      const candidate = parsed as Record<string, unknown>;
+      if (typeof candidate.id !== 'string') return;
+      const pending = this.#pending.get(candidate.id);
       if (!pending) return;
+      let ok: boolean;
+      try { ok = strictUiaSidecarOutcome(candidate.ok); }
+      catch (error) {
+        clearTimeout(pending.timer);
+        pending.cleanup?.();
+        this.#pending.delete(candidate.id);
+        pending.reject(error instanceof Error ? error : new OperatorError(
+          'UIA_SIDECAR_PROTOCOL_INVALID', 'Native UIA protocol response was invalid.'));
+        // Unknown native protocol state is untrusted. Do not route another
+        // action through the same sidecar without starting a new process.
+        void this.close();
+        return;
+      }
       clearTimeout(pending.timer);
       pending.cleanup?.();
-      this.#pending.delete(response.id);
-      pending.resolve(response);
+      this.#pending.delete(candidate.id);
+      pending.resolve({ ...candidate, id: candidate.id, ok } as SidecarResponse);
     });
 
     child.once('exit', (code, signal) => {

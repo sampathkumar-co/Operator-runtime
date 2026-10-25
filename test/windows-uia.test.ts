@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { WindowsUiaProvider } from '../src/capabilities/windows-uia.ts';
+import { WindowsUiaProvider, strictUiaSidecarOutcome } from '../src/capabilities/windows-uia.ts';
 import { OperatorError } from '../src/core/errors.ts';
 
 const provenance = { kind: 'chatgpt' as const };
@@ -434,4 +434,23 @@ test('C04 exact UIA mutation identity rejects leading/trailing whitespace instea
   assert.equal(exact.ok, true);
   assert.equal(sidecarCalls, 1);
   await provider.close();
+});
+
+test('C04 native JSON sidecar result must be literal boolean, never a truthy string or number', () => {
+  assert.equal(strictUiaSidecarOutcome(true), true);
+  assert.equal(strictUiaSidecarOutcome(false), false);
+  for (const untrusted of ['true', 'false', 1, 0, {}, [], null, undefined]) {
+    assert.throws(() => strictUiaSidecarOutcome(untrusted),
+      (error: any) => error?.code === 'UIA_SIDECAR_PROTOCOL_INVALID');
+  }
+});
+
+test('C04 native protocol rejection never includes remote data in the public error message', () => {
+  const secret = 'sensitive-native-result';
+  for (const value of [secret, { value: secret }]) {
+    assert.throws(() => strictUiaSidecarOutcome(value),
+      (error: any) => error?.code === 'UIA_SIDECAR_PROTOCOL_INVALID'
+        && !String(error?.message).includes(secret)
+        && error?.retryable !== true);
+  }
 });
