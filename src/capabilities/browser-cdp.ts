@@ -2,7 +2,7 @@ import type { ActionRequest, ActionResult, CapabilityExecutionContext, Capabilit
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { CdpConnection, CdpSessionManager, type CdpTarget, type JsonMap } from './browser-cdp-connection.ts';
-import { inspectOopifFrames, observeSemanticTargetState, performSemanticInteraction } from './browser-cdp-frames.ts';
+import { inspectOopifFrames, isSupportedBrowserNativeKey, observeSemanticTargetState, performSemanticInteraction } from './browser-cdp-frames.ts';
 import {
   assertLoopbackEndpoint,
   collectDiagnostics,
@@ -548,6 +548,39 @@ export class BrowserCdpProvider implements CapabilityProvider {
     const operation = typeof action.input.operation === 'string' ? action.input.operation : '';
     if (!['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll', 'type', 'select', 'set_value', 'select_date', 'key_press', 'hotkey', 'keyboard_text', 'format_text', 'select_text_range'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation is not a supported bounded browser interaction.');
 
+    // All native keyboard and download inputs are checked before contacting
+    // any CDP endpoint. Array/string coercion could otherwise focus or act on
+    // a browser target before rejecting the caller's malformed arguments.
+    if (operation === 'key_press' && !isSupportedBrowserNativeKey(action.input.key)) {
+      throw new OperatorError('INVALID_BROWSER_KEY', 'key_press requires one exact supported browser key string.');
+    }
+    if (operation === 'hotkey' && (!Array.isArray(action.input.keys) ||
+        action.input.keys.length < 1 || action.input.keys.length > 4 ||
+        action.input.keys.some(key => !isSupportedBrowserNativeKey(key)))) {
+      throw new OperatorError('INVALID_BROWSER_KEY', 'hotkey requires 1-4 exact supported browser key strings.');
+    }
+    if (operation === 'select_text_range' && (
+      typeof action.input.start !== 'number' || !Number.isSafeInteger(action.input.start) ||
+      typeof action.input.end !== 'number' || !Number.isSafeInteger(action.input.end) ||
+      action.input.start < 0 || action.input.end < action.input.start || action.input.end > 100_000
+    )) {
+      throw new OperatorError('INVALID_BROWSER_TEXT_RANGE', 'Text range requires exact bounded start/end integer offsets.');
+    }
+    const downloadPreference = action.input.expectDownload;
+    if (downloadPreference !== undefined && typeof downloadPreference !== 'boolean') {
+      throw new OperatorError('INVALID_DOWNLOAD_INTERACTION', 'expectDownload must be an exact Boolean.');
+    }
+    const expectDownload = downloadPreference === true;
+    const timeoutInput = action.input.downloadTimeoutMs;
+    if ((expectDownload && operation !== 'click') ||
+        (timeoutInput !== undefined && !expectDownload) ||
+        (timeoutInput !== undefined &&
+          (typeof timeoutInput !== 'number' || !Number.isSafeInteger(timeoutInput) ||
+           timeoutInput < 1_000 || timeoutInput > 600_000))) {
+      throw new OperatorError('INVALID_DOWNLOAD_INTERACTION', 'Downloads require click, expectDownload=true and an optional exact timeout from 1000 to 600000 ms.');
+    }
+    const downloadTimeoutMs = timeoutInput === undefined ? 30_000 : timeoutInput as number;
+
     const targetSpec = normalizeTargetSpec(action.input.target);
     if (!targetSpec.ref && !targetSpec.css && !targetSpec.text && !targetSpec.renderedColor && !(targetSpec.role && targetSpec.name)) {
       throw new OperatorError('INVALID_BROWSER_TARGET', 'Provide an observed ref, css, text, renderedColor, or role+name for semantic targeting.');
@@ -601,7 +634,6 @@ export class BrowserCdpProvider implements CapabilityProvider {
     const target = requireTarget(tabs, targetId);
     const session = this.#sessions.get(target);
     const diagnostics = await collectDiagnostics(session);
-    const expectDownload = action.input.expectDownload === true;
     let download: DownloadTracker | undefined;
     let interactionDispatched = false;
     try {
@@ -612,7 +644,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
         const frameIds = collectFrameIds(frameTree.frameTree);
         if (frameIds.size === 0) throw new OperatorError('BROWSER_DOWNLOAD_CORRELATION_UNAVAILABLE', 'The initiating target did not expose a frame identity for download correlation.');
         download = await this.#prepareDownload(
-          Math.min(Math.max(Number(action.input.downloadTimeoutMs ?? 30_000), 1_000), 10 * 60_000),
+          downloadTimeoutMs,
           targetId,
           frameIds,
           signal
@@ -628,9 +660,9 @@ export class BrowserCdpProvider implements CapabilityProvider {
         ...(deltaOperation ? { deltaX, deltaY } : {}),
         ...(operation === 'click_relative' && hasRatioPoint ? { xRatio, yRatio } : {}),
         ...(operation === 'click_relative' && hasPixelPoint ? { xPx, yPx } : {}),
-        ...(operation === 'key_press' ? { key: String(action.input.key ?? '') } : {}),
-        ...(operation === 'hotkey' ? { keys: Array.isArray(action.input.keys) ? action.input.keys.map(String) : [] } : {}),
-        ...(operation === 'select_text_range' ? { start: Number(action.input.start), end: Number(action.input.end) } : {})
+        ...(operation === 'key_press' ? { key: action.input.key as string } : {}),
+        ...(operation === 'hotkey' ? { keys: action.input.keys as string[] } : {}),
+        ...(operation === 'select_text_range' ? { start: action.input.start as number, end: action.input.end as number } : {})
       }, signal);
       const value = interaction.value;
       if (value.ok !== true) {
