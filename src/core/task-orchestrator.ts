@@ -427,7 +427,7 @@ export class TaskOrchestrator {
           // refusal and crashes never silently refund an uncertain call.
           current.modelCallCount = (current.modelCallCount ?? 0) + 1;
           current.modelReservedTokens = (current.modelReservedTokens ?? 0) + maxTokens;
-          let control: TaskRecord | undefined;
+          let control: 'PAUSED' | 'CANCELLED' | undefined;
           try {
             control = await this.#persistRunState(task, assertLease);
           } catch (error) {
