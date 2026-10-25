@@ -122,7 +122,7 @@ export class FilesystemProvider implements CapabilityProvider {
 
   resolveRisk(action: ActionRequest): ActionRisk {
     if (action.capability !== 'file.manage') throw new OperatorError('CAPABILITY_RISK_UNRESOLVED', 'Filesystem dynamic risk applies only to file.manage.');
-    const operation = String(action.input.operation ?? '');
+    const operation = action.input.operation;
     if (operation === 'mkdir' || operation === 'copy') return 'write';
     if (operation === 'move' || operation === 'remove') return 'destructive';
     throw new OperatorError('FILESYSTEM_INPUT_INVALID', 'file.manage operation must be mkdir, copy, move, or remove.');
@@ -191,7 +191,7 @@ export class FilesystemProvider implements CapabilityProvider {
     }
 
     if (action.capability === 'file.manage') {
-      const operation = String(action.input.operation ?? '');
+      const operation = action.input.operation;
       if (operation === 'mkdir') {
         const requested = requiredString(action.input.path, 'path');
         try {
@@ -376,7 +376,14 @@ export class FilesystemProvider implements CapabilityProvider {
   }
 
   async #manage(action: ActionRequest, started: number): Promise<ActionResult> {
-    const operation = String(action.input.operation ?? '');
+    const operation = action.input.operation;
+    if (typeof operation !== 'string' ||
+        !['mkdir', 'copy', 'move', 'remove'].includes(operation)) {
+      throw new OperatorError('FILESYSTEM_INPUT_INVALID', 'file.manage operation must be an exact supported string.');
+    }
+    if (action.input.recursive !== undefined && typeof action.input.recursive !== 'boolean') {
+      throw new OperatorError('FILESYSTEM_INPUT_INVALID', 'file.manage recursive must be an exact Boolean.');
+    }
     if (operation === 'mkdir') {
       const requested = requiredString(action.input.path, 'path');
       return await this.#scope.withForWrite(requested, async (target) => {
