@@ -27,7 +27,7 @@ export interface ModelTaskIntakeAuthority {
    * and run each dispatched action through the original kernel; this API
    * cannot execute or grant authority itself.
    */
-  submitReviewedTask(options: SubmitTaskOptions): Promise<{ id: string }>;
+  submitReviewedTask(options: SubmitTaskOptions): Promise<{ id: string; executionStarted: false }>;
 }
 export interface ReviewedModelTaskDraft {
   proposalId: string;
@@ -103,6 +103,13 @@ export class TrustedReviewedModelTaskIntake {
     const response = await this.#model.propose({
       scope: input.request, allowModelTransmission: true, signal: input.signal
     });
+    // A long inference may finish after Stop, scope revocation, or intent replacement.
+    // Discard its valid JSON rather than issuing a review against stale rights.
+    const refreshed = await this.#authority.currentApprovedScope(input.principal);
+    if (!refreshed || normalizedScope(refreshed) !== normalizedScope(input.request)) {
+      denied('TASK_MODEL_INTAKE_SCOPE_DENIED',
+        'Approved model objective or resource scope changed while inference was running.');
+    }
     const issued = this.#review.propose({
       principal: input.principal,
       request: input.request,
@@ -143,7 +150,8 @@ export class TrustedReviewedModelTaskIntake {
     // Receipt was consumed BEFORE submitting, including reentrant calls.
     // A failed/uncertain submit remains failed; confirmation is not replayed.
     const submitted = await this.#authority.submitReviewedTask(options);
-    if (!submitted || typeof submitted.id !== 'string' || !submitted.id.trim()) {
+    if (!submitted || typeof submitted.id !== 'string' || !submitted.id.trim() ||
+        submitted.executionStarted !== false) {
       denied('TASK_MODEL_SUBMIT_NOT_CONFIRMED',
         'Canonical task store did not confirm a persisted task identity.');
     }
