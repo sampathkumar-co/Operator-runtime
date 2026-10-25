@@ -122,3 +122,44 @@ test('Control Center fetches and renders the authoritative runtime projection', 
   assert.equal(html.includes('Authoritative runtime projection'), true);
   assert.equal(html.includes('JSON.stringify(projection,null,2)'), true);
 });
+
+test('C10 projection follows latest operation, not an older blocked action', () => {
+  const task = createTask({
+    userObjective: 'Inspect after a recoverable failed step',
+    interpretedObjective: 'Inspect safe state',
+    authorizedScope: ['local'], prohibitedScope: [], successConditions: ['state inspected'],
+    execution: {
+      schemaVersion: 1, plannerId: 'test', goalKind: 'test', plannerState: {},
+      maxSteps: 5, maxAttemptsPerStep: 2, timeoutMs: 30_000, stepCount: 2,
+      records: [
+        {
+          stepKey: 'earlier', actionId: 'blocked-action', capability: 'file.replace',
+          risk: 'write', inputHash: 'a'.repeat(64), attempt: 0, state: 'BLOCKED',
+          startedAt: '2026-10-25T01:00:00.000Z',
+          executionPhase: 'dispatched', sideEffectState: 'uncertain',
+          evidence: []
+        },
+        {
+          stepKey: 'later', actionId: 'newest-action', capability: 'file.info',
+          risk: 'read', inputHash: 'b'.repeat(64), attempt: 0, state: 'SUCCEEDED',
+          startedAt: '2026-10-25T01:00:01.000Z',
+          finishedAt: '2026-10-25T01:00:02.000Z',
+          evidence: []
+        }
+      ],
+      plannerEvents: [{
+        kind: 'RECONCILIATION_REQUIRED', decision: 'RECONCILE',
+        code: 'UNCERTAIN', at: '2026-10-25T01:00:00.000Z',
+        provider: 'test', capability: 'file.replace'
+      }]
+    }
+  });
+  task.state = 'VERIFIED';
+  const projection = projectTaskRuntime(task);
+  assert.equal(projection.currentAction?.actionId, 'newest-action');
+  assert.equal(projection.currentAction?.state, 'SUCCEEDED');
+  assert.equal(projection.reconciliationRequired, false);
+  assert.equal(projection.blocker, undefined);
+  task.state = 'BLOCKED';
+  assert.equal(projectTaskRuntime(task).reconciliationRequired, true);
+});
