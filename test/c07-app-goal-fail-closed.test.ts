@@ -111,3 +111,18 @@ test('C07 a newer failed UIA verification cannot reuse a previously successful o
   task.execution!.records.push(mutation('verify-app-target', 500, 'FAILED'));
   assert.equal(verifyGoalOutcomeTruth(task).ok, false);
 });
+
+test('C07 a later failed goal attempt supersedes earlier physical fallback proof', () => {
+  const task = fixture();
+  const physical = mutation('operate-app-physical-fallback', 200, 'SUCCEEDED', true);
+  if (physical.observation?.schemaVersion === 2) {
+    physical.observation.importantState = { postcondition: {
+      dispatched: true, captureLeaseConsumed: true, afterCaptured: true,
+      afterSha256: 'c'.repeat(64)
+    } };
+  }
+  task.execution!.records.push(physical);
+  assert.equal(verifyGoalOutcomeTruth(task).ok, true);
+  task.execution!.records.push(mutation('verify-app-target', 300, 'FAILED'));
+  assert.equal(verifyGoalOutcomeTruth(task).ok, false);
+});
