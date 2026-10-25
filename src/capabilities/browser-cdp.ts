@@ -103,6 +103,34 @@ export function normalizeBrowserVerificationExpectations(value: unknown): JsonMa
   return record;
 }
 
+/** Browser recovery cannot infer which tab was navigated from a URL match:
+ * any preexisting tab may already have the requested URL. */
+export function exactNavigationReconciliationTarget(
+  targets: readonly Pick<CdpTarget,'id'|'type'|'url'>[],
+  requestedTargetId: unknown,
+  requestedUrl: string
+): Pick<CdpTarget,'id'|'type'|'url'> | undefined {
+  if (typeof requestedTargetId !== 'string' || !requestedTargetId) return undefined;
+  return targets.find(item => item.id === requestedTargetId && item.type === 'page' &&
+    typeof item.url === 'string' && sameDestination(item.url,requestedUrl));
+}
+export function browserFocusActuallyProven(observed: unknown): boolean {
+  return Boolean(observed && typeof observed === 'object' &&
+    !Array.isArray(observed) &&
+    (observed as Record<string,unknown>).visible === true &&
+    (observed as Record<string,unknown>).focused === true);
+}
+export function absentBrowserTargetChecks(expect: JsonMap):
+  Array<{field:string;expected:unknown;actual:unknown;pass:boolean}> {
+  const checks: Array<{field:string;expected:unknown;actual:unknown;pass:boolean}>=[{field:'exists',expected:expect.exists??true,actual:false,
+    pass:expect.exists===false}];
+  for(const field of ['value','checked','selected','expanded','current','active']) {
+    if (expect[field] !== undefined) checks.push({
+      field,expected:expect[field],actual:undefined,pass:false
+    });
+  }
+  return checks;
+}
 const MAX_TABS = 100;
 const MAX_CDP_DISCOVERY_BYTES = 1024 * 1024;
 
@@ -237,25 +265,15 @@ export class BrowserCdpProvider implements CapabilityProvider {
         const requestedUrl = validateNavigationUrl(action.input.url);
         const tabs = await this.#listTargets(context.signal);
         const requestedTargetId = optionalTargetId(action.input.targetId);
-        if (requestedTargetId) {
-          const target = tabs.find((item) => item.id === requestedTargetId);
-          if (target && typeof target.url === 'string' && sameDestination(target.url, requestedUrl)) {
-            return browserReconciled(action, this.name, 'Fresh target discovery proves the requested browser destination.', {
-              targetId: target.id, url: target.url, title: target.title
-            });
-          }
-          return browserReconciliation('uncertain', 'The requested browser target does not currently prove the navigation outcome.');
-        }
-        const matches = tabs.filter((item) => item.type === 'page' && typeof item.url === 'string' && sameDestination(item.url, requestedUrl));
-        if (matches.length === 1) {
-          const target = matches[0]!;
-          return browserReconciled(action, this.name, 'Fresh browser discovery found one page at the requested destination.', {
-            targetId: target.id, url: target.url, title: target.title
+        const target = exactNavigationReconciliationTarget(tabs,requestedTargetId,requestedUrl);
+        if (target) {
+          return browserReconciled(action, this.name, 'Fresh inspection proves the exact requested browser target is at its destination.', {
+            targetId: target.id, url: target.url
           });
         }
-        return browserReconciliation('uncertain', matches.length === 0
-          ? 'No current page proves the requested navigation outcome.'
-          : 'Multiple pages match the requested destination, so the original navigation target is ambiguous.');
+        return browserReconciliation('uncertain', requestedTargetId
+          ? 'The exact requested browser target does not prove navigation succeeded.'
+          : 'No originally bound targetId exists; a coincidental URL match in another tab cannot prove navigation or new-tab creation.');
       }
 
       if (action.capability === 'browser.tab.close') {
@@ -274,11 +292,14 @@ export class BrowserCdpProvider implements CapabilityProvider {
         const target = tabs.find((item) => item.id === targetId);
         if (!target) return browserReconciliation('uncertain', 'Focused target no longer exists.');
         const session = this.#sessions.get(target);
-        const evaluated = await session.send('Runtime.evaluate', { expression: 'document.visibilityState', returnByValue: true });
-        const visibilityState = unwrapRuntimeValue(evaluated);
-        return visibilityState === 'visible'
-          ? browserReconciled(action, this.name, 'Target document reports visible state during reconciliation.', { targetId, visibilityState })
-          : browserReconciliation('not_applied', 'Target document is not visible during reconciliation.');
+        const evaluated = await session.send('Runtime.evaluate', {
+          expression: '({visible: document.visibilityState === "visible", focused: document.hasFocus() === true})',
+          returnByValue: true
+        });
+        const observed = unwrapRuntimeValue(evaluated);
+        return browserFocusActuallyProven(observed)
+          ? browserReconciled(action, this.name, 'Target document is both visible and actually keyboard-focused.', { targetId, focused: true, visible: true })
+          : browserReconciliation('uncertain', 'Visibility alone cannot prove browser tab focus; the current document did not prove both conditions.');
       }
 
       if (action.capability === 'browser.interact') {
@@ -495,7 +516,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
         inconclusive = true;
         checks.push({ field: 'target', expected: 'unique', actual: 'ambiguous', pass: false });
       } else if (observed.status === 'stale') {
-        checks.push({ field: 'exists', expected: rawExpect.exists ?? true, actual: false, pass: rawExpect.exists === false });
+        checks.push(...absentBrowserTargetChecks(rawExpect));
       } else {
         const sample = observed.sample ?? {};
         if (rawExpect.exists !== undefined) checks.push({ field: 'exists', expected: Boolean(rawExpect.exists), actual: true, pass: Boolean(rawExpect.exists) });
