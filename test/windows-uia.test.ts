@@ -355,3 +355,50 @@ test('C04 native invoke dispatch is not falsely labeled as verified application 
   assert.equal(verified.evidence.find(x=>x.kind==='postcondition')?.status,'pass');
   assert.equal(verified.evidence.find(x=>x.kind==='postcondition')?.data?.verified,true);
 });
+
+test('C04 native error codes cannot smuggle arbitrary secret-shaped strings', async () => {
+  const secret = 'PRIVATE_API_KEY_0123456789';
+  const provider = new WindowsUiaProvider({
+    platform: 'win32',
+    client: {
+      async call() {
+        throw new OperatorError('UIA_' + secret, 'secret=' + secret, { retryable: true });
+      },
+      close() {}
+    }
+  });
+  const result = await provider.execute({
+    id: 'uia-error-code-injection',
+    capability: 'app.operate',
+    risk: 'external',
+    provenance,
+    input: { operation: 'invoke', selector: { automationId: 'save' } }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'UIA_PROVIDER_FAILED');
+  assert.equal(result.error?.retryable, false);
+  assert.equal(result.error?.sideEffectState, 'uncertain');
+  assert.equal(JSON.stringify(result).includes(secret), false);
+  await provider.close();
+});
+
+test('C04 unrecognized native mutation failures are uncertain, while input validation stays definite', async () => {
+  const unknown = new WindowsUiaProvider({
+    platform: 'win32',
+    client: { async call() { throw new OperatorError('NOT_A_NATIVE_CODE', 'private', { retryable: true }); }, close() {} }
+  });
+  const mutation = await unknown.execute({
+    id: 'uia-native-unknown', capability: 'app.operate', risk: 'external',
+    provenance, input: { operation: 'focus', selector: { automationId: 'editor' } }
+  });
+  assert.equal(mutation.error?.sideEffectState, 'uncertain');
+  assert.equal(mutation.error?.retryable, false);
+  assert.equal(mutation.error?.code, 'UIA_PROVIDER_FAILED');
+  const invalid = await unknown.execute({
+    id: 'uia-invalid-scope', capability: 'app.operate', risk: 'external',
+    provenance, input: { operation: 'focus', selector: {} }
+  });
+  assert.equal(invalid.error?.code, 'INVALID_UIA_SELECTOR');
+  assert.equal(invalid.error?.sideEffectState, undefined);
+  await unknown.close();
+});
