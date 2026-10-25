@@ -227,7 +227,7 @@ export function summarizeOperationSlo(eventsInput: OperationTraceEvent[]): Opera
     // Verification must causally precede the terminal completion. A late
     // VERIFY or a same-timestamp reordering is not evidence for the claimed
     // COMPLETE, regardless of its outcome.
-    const verifiedBeforeCompletion = Boolean(complete && verify && verify.outcome === 'OK'
+    const verifiedBeforeCompletion = Boolean(complete?.outcome === 'OK' && verify?.outcome === 'OK'
       && Date.parse(verify.at) < Date.parse(complete.at));
     if (complete?.outcome === 'OK') completed += 1;
     if (rows.some((event) => event.outcome === 'BLOCKED')) blocked += 1;
