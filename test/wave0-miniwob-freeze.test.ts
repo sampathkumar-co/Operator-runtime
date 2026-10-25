@@ -39,11 +39,13 @@ test('execution configuration must be reproducibly pinned before even describing
     browserVersion: 'chromium-pinned', promptSha256: 'c'.repeat(64),
     controllerSha256: 'd'.repeat(64), modelConfigSha256: 'e'.repeat(64),
     scorerSha256: 'f'.repeat(64), maxModelCallsPerEpisode: 12,
-    maxCostMicrosTotal: 200000, seeds: [1, 2, 3]
+    maxCostMicrosTotal: 200000, seeds: [0, 42, 2026]
   };
   assert.equal(verifyFrozenMiniwobRoster(r, cfg).execution.status, 'CONFIG_LOCKED_NOT_EXECUTED');
   assert.equal(verifyFrozenMiniwobRoster(r, cfg).nativeScorerOutcome, 'NOT_RUN');
   assert.throws(() => verifyFrozenMiniwobRoster(r, { ...cfg, promptSha256: 'unhashed' }), /must be SHA256/);
-  assert.throws(() => verifyFrozenMiniwobRoster(r, { ...cfg, seeds: [1, 1] }), /multiple unique frozen seeds/);
+  assert.throws(() => verifyFrozenMiniwobRoster(r, { ...cfg, seeds: [0, 42] }), /at least one additional/);
+  assert.throws(() => verifyFrozenMiniwobRoster(r, { ...cfg, seeds: [0, 1, 2] }), /include 0, 42/);
+  assert.throws(() => verifyFrozenMiniwobRoster(r, { ...cfg, seeds: [0, 42, 42] }), /additional preregistered seed/);
   assert.throws(() => verifyFrozenMiniwobRoster(r, { ...cfg, maxCostMicrosTotal: 0 }), /bounded model spend/);
 });

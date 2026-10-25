@@ -77,15 +77,30 @@ function percentile(numbers, p) {
   const sorted = [...numbers].sort((a, b) => a - b);
   return sorted[Math.max(0, Math.ceil(sorted.length * p) - 1)];
 }
+function wilson95(successes, trials) {
+  if (!Number.isSafeInteger(successes) || !Number.isSafeInteger(trials) ||
+      trials < 1 || successes < 0 || successes > trials) fail('confidence interval inputs invalid');
+  const z = 1.959963984540054;
+  const z2 = z * z;
+  const proportion = successes / trials;
+  const denominator = 1 + z2 / trials;
+  const center = (proportion + z2 / (2 * trials)) / denominator;
+  const margin = z * Math.sqrt((proportion * (1 - proportion) + z2 / (4 * trials)) / trials) / denominator;
+  const stable = value => Number(Math.max(0, Math.min(1, value)).toFixed(12));
+  return { method: 'wilson', confidenceLevel: 0.95,
+    lower: stable(center - margin), upper: stable(center + margin) };
+}
 function summarize(records) {
   if (!records.length) return null;
+  const verifiedSuccesses = records.filter(x => x.verifiedSuccess).length;
   return {
-    runs: records.length, verifiedSuccesses: records.filter(x => x.verifiedSuccess).length,
+    runs: records.length, verifiedSuccesses,
     claimedSuccesses: records.filter(x => x.claimedSuccess).length,
     falseCompletions: records.filter(x => x.claimedSuccess && !x.verifiedSuccess).length,
     unsafeEffects: safeSum(records, 'unauthorizedEffects'),
     humanInterventions: safeSum(records, 'humanInterventions'),
-    verifiedCompletionRate: records.filter(x => x.verifiedSuccess).length / records.length,
+    verifiedCompletionRate: verifiedSuccesses / records.length,
+    verifiedCompletionConfidence95: wilson95(verifiedSuccesses, records.length),
     p50LatencyMs: percentile(records.map(x => x.latencyMs), 0.5),
     p95LatencyMs: percentile(records.map(x => x.latencyMs), 0.95),
     modelAndToolCostMicros: safeSum(records, 'costMicros'),
@@ -113,19 +128,28 @@ export function buildWave0EvaluationReport({ sourceCommit, records = [], preregi
     if (!preregistered || !SHA.test(preregistered.suiteDigest ?? '') ||
       !Array.isArray(preregistered.expectedScenarioIds) || preregistered.expectedScenarioIds.length < 50 ||
       new Set(preregistered.expectedScenarioIds).size !== preregistered.expectedScenarioIds.length ||
-      !preregistered.expectedScenarioIds.every(id => typeof id === 'string' && id.length <= 128 && DOMAIN.test(id))) {
+      !preregistered.expectedScenarioIds.every(id => typeof id === 'string' && id.length <= 128 && DOMAIN.test(id)) ||
+      !Array.isArray(preregistered.expectedSeeds) || preregistered.expectedSeeds.length < 3 ||
+      new Set(preregistered.expectedSeeds).size !== preregistered.expectedSeeds.length ||
+      !preregistered.expectedSeeds.every(seed => Number.isSafeInteger(seed) && seed >= 0) ||
+      !preregistered.expectedSeeds.includes(0) || !preregistered.expectedSeeds.includes(42)) {
       fail('complete campaign requires preregistered suite digest and >=50 unique scenarios');
     }
   }
   const expectedIds = preregistered?.expectedScenarioIds ?? [];
+  const expectedSeeds = preregistered?.expectedSeeds ?? [];
   const laneSummaries = {};
   for (const lane of LANES) {
     const inLane = valid.filter(x => x.lane === lane);
     const expected = new Set(expectedIds);
+    const seeds = new Set(expectedSeeds);
     const attributionComplete = inLane.every(x => x.verifiedSuccess || x.failureStage !== 'unattributed');
     const hasFullSuite = preregistered !== null &&
-      expectedIds.every(id => inLane.some(x => x.scenarioId === id)) &&
-      inLane.every(x => expected.has(x.scenarioId));
+      expectedIds.every(id => expectedSeeds.every(seed =>
+        inLane.some(x => x.scenarioId === id && x.seed === seed))) &&
+      inLane.every(x => expected.has(x.scenarioId) && seeds.has(x.seed));
+    const coveredPairs = preregistered === null ? 0 : expectedIds.reduce((count, id) =>
+      count + expectedSeeds.filter(seed => inLane.some(x => x.scenarioId === id && x.seed === seed)).length, 0);
     let paired = false;
     if (lane === 'C' && inLane.length) {
       const left = new Map(), right = new Map();
@@ -159,11 +183,19 @@ export function buildWave0EvaluationReport({ sourceCommit, records = [], preregi
         : hasFullSuite
           ? 'Recorded suite coverage exists; provenance and physical release qualification remain independent.'
           : 'Partial evidence only; do not infer a completed 50-workflow campaign.',
+      seedCoverage: preregistered === null ? null : {
+        preregisteredSeeds: [...expectedSeeds],
+        expectedScenarioSeedPairs: expectedIds.length * expectedSeeds.length,
+        coveredScenarioSeedPairs: coveredPairs,
+        missingScenarioSeedPairs: expectedIds.length * expectedSeeds.length - coveredPairs,
+        complete: hasFullSuite
+      },
       evidence: sourceEvidence
     };
   }
   const report = { schemaVersion: 1, sourceCommit,
-    suite: preregistered ? { digest: preregistered.suiteDigest, scenarios: expectedIds.length } : { status: 'NOT_REGISTERED' },
+    suite: preregistered ? { digest: preregistered.suiteDigest, scenarios: expectedIds.length,
+      seeds: [...expectedSeeds], expectedRunsPerLane: expectedIds.length * expectedSeeds.length } : { status: 'NOT_REGISTERED' },
     lanes: laneSummaries, full125MiniWob: 'NOT_RUN',
     sourcePhysicalAcceptance: 'NOT_VERIFIED',
     releaseAcceptance: 'NOT_ACCEPTED',
