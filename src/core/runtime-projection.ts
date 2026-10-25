@@ -38,10 +38,17 @@ export function projectTaskRuntime(
     ? verificationEvidence.data.digest.toLowerCase() : undefined;
   const lastFailure = task.failures.at(-1);
   const latestPlannerEvent = task.execution?.plannerEvents?.at(-1);
+  const actionJournal = new Map((options.journal ?? []).map(item => [item.actionId, item]));
+  // Never conceal an older unresolved side effect merely because a newer
+  // read succeeded. Only a matching action journal with reconciled/completed
+  // state can demonstrate that its uncertainty was subsequently settled.
+  const uncertainActionRemains = records.some(record => {
+    if (record.sideEffectState !== 'uncertain') return false;
+    const persisted = actionJournal.get(record.actionId);
+    return persisted?.state !== 'RECONCILED' && persisted?.state !== 'COMPLETED';
+  });
   const reconciliationRequired = journal?.state === 'UNCERTAIN'
-    || current?.sideEffectState === 'uncertain'
-    // Historical reconciliation events remain auditable, but do not declare
-    // a verified task permanently stuck once later work has settled.
+    || uncertainActionRemains
     || (task.state === 'BLOCKED' && latestPlannerEvent?.decision === 'RECONCILE');
   const blocker = task.state === 'BLOCKED' || task.state === 'FAILED' || reconciliationRequired
     ? {
