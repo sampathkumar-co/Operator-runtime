@@ -66,9 +66,10 @@ function dimension(usedInput: number, limitInput: number): TaskDecisionBudgetDim
     return { used: 1, limit: 1, remaining: 0 };
   }
   const limit = limitInput;
-  // NaN and infinities in durable counters are not a free allowance.
-  const used = !Number.isFinite(usedInput) || usedInput < 0
+  // Invalid or fractional persisted counters must never be rounded down,
+  // granting an extra action, model call, reobserve or planning iteration.
+  const used = !Number.isSafeInteger(usedInput) || usedInput < 0
     ? limit
-    : Math.floor(usedInput);
+    : usedInput;
   return { used, limit, remaining: Math.max(0, limit - used) };
 }
