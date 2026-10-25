@@ -561,3 +561,20 @@ test('same owner label may share read leases but cannot escalate to exclusive', 
   await two.release();
   await one.release();
 });
+
+test('C08 even empty leases reject an invalid mode and lose ownership after release', async (t) => {
+  const state = await temp(t);
+  const store = new ResourceLeaseStore(state);
+  await assert.rejects(
+    () => store.acquire('owner', [], 'unexpected-mode' as any),
+    (error: any) => error?.code === 'RESOURCE_LEASE_INPUT_INVALID'
+  );
+  const lease = await store.acquire('owner', [], 'shared');
+  await lease.assertOwned();
+  await lease.release();
+  await lease.release(); // release remains idempotent
+  await assert.rejects(
+    () => lease.assertOwned(),
+    (error: any) => error?.code === 'RESOURCE_LEASE_LOST'
+  );
+});
