@@ -118,7 +118,10 @@ export class GitProvider implements CapabilityProvider {
     }, context);
     const output = inspected.output as { exitCode?: number | null; stdout?: string; stderr?: string } | undefined;
     if (!inspected.ok && output?.exitCode !== 1) {
-      return gitFailure(action, 'GIT_CONFIG_INSPECTION_FAILED', String(output?.stderr ?? inspected.error?.message ?? 'Unable to inspect Git content-filter configuration.').trim());
+      // Git stderr may contain repository paths, private file names or
+      // untrusted configuration text; do not reflect it to public tools.
+      return gitFailure(action, 'GIT_CONFIG_INSPECTION_FAILED',
+        'Git content-filter policy could not be safely inspected.');
     }
     const keys = String(output?.stdout ?? '').split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
     if (keys.length > 0) {
@@ -165,7 +168,7 @@ export function boundedGitDiff(result: ActionResult, input: Record<string, unkno
   const truncated = nextOffset < bytes.length || raw?.truncated === true;
   return {
     ...result,
-    output: { stdout: chunk.toString('utf8'), stderr: String(raw?.stderr ?? '').slice(0, 16_384), offset, returnedBytes: chunk.byteLength, truncated, ...(truncated ? { nextOffset } : {}) }
+    output: { stdout: chunk.toString('utf8'), stderr: String(raw?.stderr ?? '') ? 'GIT_STDERR_REDACTED' : '', offset, returnedBytes: chunk.byteLength, truncated, ...(truncated ? { nextOffset } : {}) }
   };
 }
 
