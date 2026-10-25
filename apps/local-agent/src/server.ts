@@ -2043,7 +2043,8 @@ export function createLocalAgentServer(options: {
           principal,
           proposalId: body.proposalId as string,
           proposalDigest: body.proposalDigest as string,
-          reviewProof: body.reviewProof
+          reviewProof: body.reviewProof,
+          signal: emergencyExecutionGeneration.signal
         });
         send(res, 202, { ok: true, ...confirmation, executionStarted: false });
       } catch {
