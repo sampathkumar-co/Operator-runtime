@@ -96,3 +96,39 @@ test('C09 CLI refuses oversized evidence before reading arbitrary JSON into memo
   assert.notEqual(run.status, 0);
   assert.match(run.stderr, /input campaign file size invalid/);
 });
+
+test('C09 refuses aggregate success swaps that hide regressions on a previously verified user journey', () => {
+  const baseline = make(100, { records: [
+    sample(100, { scenarioId: 'previously-verified', claimedSuccess: true, verifiedSuccess: true }),
+    sample(100, { scenarioId: 'unverified', claimedSuccess: false, verifiedSuccess: false })
+  ] });
+  const candidate = make(80, { sourceCommit: '9'.repeat(40), records: [
+    sample(80, { scenarioId: 'previously-verified', claimedSuccess: false, verifiedSuccess: false }),
+    sample(80, { scenarioId: 'unverified', claimedSuccess: true, verifiedSuccess: true })
+  ] });
+  const r = compareMatchedPerformance({ baseline, candidate });
+  assert.equal(r.baseline.verifiedSuccesses, r.candidate.verifiedSuccesses);
+  assert.equal(r.candidate.falseCompletionCount, 0);
+  assert.equal(r.candidate.p95Ms < r.baseline.p95Ms, true);
+  assert.equal(r.observedCandidateNotWorse, false);
+});
+
+test('C09 p95 improvements cannot hide a worse p99 or increased human interventions', () => {
+  const records = Array.from({ length: 100 }, (_, i) =>
+    sample(100, { scenarioId: 'scenario_' + i }));
+  const slowerTail = records.map((record, index) => index >= 98
+    ? sample(200, { scenarioId: record.scenarioId })
+    : sample(80, { scenarioId: record.scenarioId }));
+  const r = compareMatchedPerformance({
+    baseline: make(100, { records }),
+    candidate: make(80, { sourceCommit: '9'.repeat(40), records: slowerTail })
+  });
+  assert.ok(r.candidate.p95Ms < r.baseline.p95Ms);
+  assert.ok(r.candidate.p99Ms > r.baseline.p99Ms);
+  assert.equal(r.observedCandidateNotWorse, false);
+  const increasedCorrections = compareMatchedPerformance({
+    baseline: make(100),
+    candidate: make(80, { sourceCommit: '9'.repeat(40), records: [sample(80, { humanInterventions: 1 })] })
+  });
+  assert.equal(increasedCorrections.observedCandidateNotWorse, false);
+});
