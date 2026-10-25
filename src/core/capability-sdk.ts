@@ -125,7 +125,7 @@ class ManifestBoundProvider implements CapabilityProvider {
           retryable: false,
           sideEffectState: action.risk === 'read' ? 'none' : 'uncertain'
         },
-        durationMs: result.durationMs
+        durationMs: result && Number.isFinite(result.durationMs) && result.durationMs >= 0 ? result.durationMs : 0
       };
     }
     return { ...result, provider: this.name };
@@ -141,7 +141,15 @@ class ManifestBoundProvider implements CapabilityProvider {
     if (!outcome || !['completed', 'not_applied', 'uncertain'].includes(outcome.status) || !Array.isArray(outcome.evidence)) {
       throw new OperatorError('CAPABILITY_EXTENSION_RECONCILIATION_INVALID', 'Extension returned an invalid reconciliation result.');
     }
-    if (outcome.result && jsonBytes(outcome.result.output) > contract.outputMaxBytes) throw new OperatorError('CAPABILITY_EXTENSION_RESULT_INVALID', 'Reconciled extension output exceeds its declared bound.');
+    // A reconciliation is potentially the only evidence that a previously
+    // dispatched mutation completed. Never relabel a foreign or malformed
+    // provider result as an authorized result for this action.
+    if (outcome.result && (!validResult(outcome.result)
+      || outcome.result.capability !== request.action.capability
+      || outcome.result.provider !== this.#provider.name
+      || jsonBytes(outcome.result.output) > contract.outputMaxBytes)) {
+      throw new OperatorError('CAPABILITY_EXTENSION_RECONCILIATION_INVALID', 'Reconciled extension result violated capability, provider identity, schema, or output-bound contract.');
+    }
     return outcome.result ? { ...outcome, result: { ...outcome.result, provider: this.name } } : outcome;
   }
 
