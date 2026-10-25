@@ -99,8 +99,9 @@ export class ResourceLeaseStore {
   ): Promise<ResourceLease> {
     const ownerId = bounded(ownerIdInput, 256, 'ownerId');
     const keys = normalizeKeys(keysInput);
-    if (keys.length === 0) return noOpLease(ownerId, mode);
+    // Even an empty key set must never bypass typed authorization contracts.
     if (mode !== 'shared' && mode !== 'exclusive') throw new OperatorError('RESOURCE_LEASE_INPUT_INVALID', 'Resource lease mode is invalid.');
+    if (keys.length === 0) return noOpLease(ownerId, mode);
 
     const leaseId = crypto.randomUUID();
     const mutationActionId = options.mutationActionId === undefined ? undefined : bounded(options.mutationActionId, 512, 'mutationActionId');
@@ -249,13 +250,16 @@ export class ResourceLeaseStore {
 }
 
 function noOpLease(ownerId: string, mode: ResourceLeaseMode): ResourceLease {
+  let released = false;
   return {
     id: crypto.randomUUID(),
     ownerId,
     keys: [],
     mode,
-    async assertOwned() {},
-    async release() {}
+    async assertOwned() {
+      if (released) throw new OperatorError('RESOURCE_LEASE_LOST', 'Resource lease has already been released.');
+    },
+    async release() { released = true; }
   };
 }
 
