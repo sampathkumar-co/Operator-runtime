@@ -64,8 +64,17 @@ export async function discoverBuiltInCapabilities(
       || new Set(names).size !== names.length) {
     throw new Error('CAPABILITY_DISCOVERY_INVALID_PROVIDER_REGISTRY');
   }
-  const entries: CapabilityDiscoveryEntry[] = [];
-  for (const [capability, canonicalRisk] of Object.entries(CAPABILITY_RISK_RULES).sort(([a], [b]) => a.localeCompare(b))) {
+  // Discovery is declaration-only. A single missing/hung provider must not
+  // serialize every capability probe and delay the full Control Center listing.
+  // Keep fixed upper concurrency and deterministic indexed output order.
+  const definitions=Object.entries(CAPABILITY_RISK_RULES).sort(([a],[b])=>a.localeCompare(b));
+  const entries: CapabilityDiscoveryEntry[]=new Array(definitions.length);
+  let cursor=0;
+  const worker=async (): Promise<void>=>{
+    while(true){
+      const index=cursor++;
+      if(index>=definitions.length)return;
+      const [capability,canonicalRisk]=definitions[index]!;
     const action: ActionRequest = {
       id: 'discovery:' + capability,
       capability,
@@ -90,15 +99,18 @@ export async function discoverBuiltInCapabilities(
     const status: CapabilityProbeStatus = indeterminate ? 'PROBE_INDETERMINATE'
       : providersAdvertising.length > 0 ? 'DECLARED_NOT_EXECUTED'
       : 'NOT_ADVERTISED_WITH_EMPTY_INPUT';
-    entries.push({
+    entries[index]={
       capability, canonicalRisk, status,
       providerNames: [...providersAdvertising].sort(),
       mayRequireTypedInput: status !== 'DECLARED_NOT_EXECUTED' || canonicalRisk === 'dynamic',
       authorizationStatus: 'NOT_CHECKED', operationalStatus: 'NOT_TESTED',
       outputVerificationStatus: 'NOT_TESTED',
       ...(canonicalRisk === 'dynamic' ? { dynamicRiskStatus: 'REQUIRES_TYPED_INPUT_AND_FRESH_AUTHORIZATION' as const } : {})
-    });
-  }
+    };
+    }
+  };
+  const MAX_DISCOVERY_WORKERS=8;
+  await Promise.all(Array.from({length:Math.min(MAX_DISCOVERY_WORKERS,definitions.length)},()=>worker()));
   return {
     schemaVersion: 1, provenance: 'CURRENT_REGISTERED_PROVIDER_DECLARATIONS',
     probeMode: 'BOUNDED_EMPTY_INPUT_NO_DISPATCH',
