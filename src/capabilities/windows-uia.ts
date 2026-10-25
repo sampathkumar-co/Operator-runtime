@@ -606,9 +606,17 @@ function normalizeSelector(input: unknown, exactMutationTarget = false) {
   const text = (key: string) => {
     const candidate = raw[key];
     if (candidate === undefined) return undefined;
-    if (typeof candidate !== 'string' || !candidate.trim() || (exactMutationTarget && candidate.trim().length > 512)) {
+    if (typeof candidate !== 'string' || !candidate.trim()) {
       if (exactMutationTarget) throw new OperatorError('INVALID_UIA_SELECTOR', 'UIA mutation selector must have exact bounded string fields.');
       return undefined;
+    }
+    // An exact mutation identity must not be silently trimmed or shortened:
+    // " Save " and "Save" may select different controls.
+    if (exactMutationTarget) {
+      if (candidate !== candidate.trim() || candidate.length > 512) {
+        throw new OperatorError('INVALID_UIA_SELECTOR', 'UIA mutation selector must preserve exact bounded identity text.');
+      }
+      return candidate;
     }
     return candidate.trim().slice(0, 512) || undefined;
   };
