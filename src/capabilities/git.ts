@@ -60,8 +60,26 @@ export class GitProvider implements CapabilityProvider {
         : new OperatorError('GIT_VERSION_CHECK_FAILED', error instanceof Error ? error.message : String(error));
       return gitFailure(action, op.code, op.message);
     }
-    const cwd = String(action.input.cwd ?? '');
-    const paths = Array.isArray(action.input.paths) ? action.input.paths.map(String) : [];
+    // Neither object-coercing path values nor malformed pagination inputs may
+    // broaden a Git read to a different file or invoke attacker-owned toString.
+    const cwd = action.input.cwd;
+    if (typeof cwd !== 'string' || !cwd || cwd.length > 4096 || hasGitForbiddenControl(cwd)) {
+      return gitFailure(action, 'GIT_INPUT_INVALID', 'Git working directory must be an exact bounded path.');
+    }
+    const suppliedPaths = action.input.paths;
+    if (suppliedPaths !== undefined && (
+      action.capability !== 'git.diff' || !Array.isArray(suppliedPaths) ||
+      suppliedPaths.length > 128 || suppliedPaths.some(item =>
+        typeof item !== 'string' || item.length < 1 || item.length > 4096 || hasGitForbiddenControl(item))
+    )) {
+      return gitFailure(action, 'GIT_INPUT_INVALID', 'Git paths must be a bounded array of literal string values.');
+    }
+    const paths: string[] = Array.isArray(suppliedPaths) ? suppliedPaths as string[] : [];
+    if (action.input.publicLiteralFiles !== undefined && (
+      action.capability !== 'git.diff' || typeof action.input.publicLiteralFiles !== 'boolean'
+    )) {
+      return gitFailure(action, 'GIT_INPUT_INVALID', 'Git public literal mode must be a typed Boolean on diff only.');
+    }
     const publicLiteral = action.capability === 'git.diff' && action.input.publicLiteralFiles === true;
 
     if (action.capability !== 'git.rev-parse') {
@@ -175,9 +193,18 @@ export function boundedGitDiff(result: ActionResult, input: Record<string, unkno
   };
 }
 
+function hasGitForbiddenControl(value: string): boolean {
+  return [...value].some(character => {
+    const code = character.charCodeAt(0);
+    return code === 0 || code === 10 || code === 13;
+  });
+}
+
 function boundedGitInteger(value: unknown, fallback: number, min: number, max: number): number {
-  const number = value === undefined ? fallback : Number(value);
-  if (!Number.isSafeInteger(number) || number < min || number > max) throw new OperatorError('GIT_INPUT_INVALID', 'Git output range is invalid.');
+  const number = value === undefined ? fallback : value;
+  if (typeof number !== 'number' || !Number.isSafeInteger(number) || number < min || number > max) {
+    throw new OperatorError('GIT_INPUT_INVALID', 'Git output range must be an exact bounded number.');
+  }
   return number;
 }
 

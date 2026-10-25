@@ -126,3 +126,20 @@ test('C06 a forged offset beyond available Git source cannot certify an empty te
   );
   assert.equal((structuredGitStatus(status, { offset: 1 }).output as any).truncated, false);
 });
+
+test('C06 Git pagination rejects string, Boolean, object or null budgets without coercion', () => {
+  for (const [label,value] of [
+    ['string','1024'], ['boolean',true], ['null',null], ['object',{valueOf:()=>1024}],
+    ['fraction',3.1], ['negative',-1]
+  ] as const) {
+    assert.throws(
+      () => boundedGitDiff(result('x'.repeat(2048)),{offset:value,maxBytes:1024}),
+      (error:any)=>error?.code==='GIT_INPUT_INVALID',label
+    );
+    assert.throws(
+      () => structuredGitStatus({...result(''),capability:'git.status',
+        output:{stdout:'## main\\0?? file.txt\\0'}},{maxBytes:value}),
+      (error:any)=>error?.code==='GIT_INPUT_INVALID',label
+    );
+  }
+});
