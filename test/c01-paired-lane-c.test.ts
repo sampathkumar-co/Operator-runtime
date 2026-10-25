@@ -138,3 +138,14 @@ test('C01 Lane C rejects duplicated or malformed paired cases before running',as
  cfg.cases=[{...scenario,prompt:'\0secret'}];
  await assert.rejects(runPairedLaneC(cfg),/source-pinned model/);
 });
+
+
+test('C01 rejects coercible numeric scenario IDs before reset or external tool effects',async()=>{
+  const {cfg,events}=setup();
+  cfg.cases=[{...scenario,id:12 as never}];
+  await assert.rejects(runPairedLaneC(cfg),/source-pinned model/);
+  assert.deepEqual(events,[]);
+  cfg.cases=[{...scenario,version:23 as never}];
+  await assert.rejects(runPairedLaneC(cfg),/source-pinned model/);
+  assert.deepEqual(events,[]);
+});
