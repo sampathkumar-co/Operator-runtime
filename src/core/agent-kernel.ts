@@ -347,7 +347,10 @@ export class AgentKernel {
     if (!this.#operationTrace) return;
     try {
       await this.#operationTrace.append({
-        traceId: action.taskId ?? action.id,
+        // A task can contain multiple actions. Using taskId here merged those
+        // independent executions into one causal trace with duplicate
+        // REQUEST/COMPLETE stages and made the resulting SLO report invalid.
+        traceId: action.id,
         executionContextDigest: executionContextDigest(executionContextIdentityFrom({
           ...(action.taskId ? { taskId: action.taskId } : {}),
           actionId: action.id,

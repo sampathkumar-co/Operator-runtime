@@ -9,6 +9,7 @@ import { AccountDeviceRegistry } from '../../../src/core/account-device-registry
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { DeviceRegistryStore, answerPairingChallenge } from '../../../src/core/device-registry.ts';
 import { DeviceRoutingStore } from '../../../src/core/device-routing.ts';
+import { OperationTraceStore } from '../../../src/core/operation-trace.ts';
 import { RelayClient, type RelaySocketLike } from '../../../src/core/relay-client.ts';
 import { RelayDeliveryStore } from '../../../src/core/relay-delivery-store.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
@@ -131,6 +132,7 @@ test('real relay routes paired device delivery, durably ACKs it, and reconnects 
   const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
   const accounts = new AccountDeviceRegistry(authorityState, devices);
   const deliveries = new RelayDeliveryStore(authorityState);
+  const operationTrace = new OperationTraceStore(authorityState);
   const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'relay-e2e-user' });
   await accounts.bindDevice(account.accountId, device.deviceId);
 
@@ -140,7 +142,8 @@ test('real relay routes paired device delivery, durably ACKs it, and reconnects 
     devices,
     sessions,
     accounts,
-    deliveries
+    deliveries,
+    operationTrace
   });
   t.after(() => hub.close());
   t.after(() => cleanupTempDirs(t));
@@ -176,10 +179,13 @@ test('real relay routes paired device delivery, durably ACKs it, and reconnects 
     projectKey: 'project-main',
     requiredCapabilities: ['git.write'],
     kind: 'task.dispatch',
-    payload: { taskId: 'task-1', action: 'git.write' }
+    payload: { traceId: 'relay-action-trace-1', taskId: 'task-1', action: 'git.write' }
   });
   assert.equal(dispatched.route.deviceId, device.deviceId);
   assert.equal(dispatched.route.reason, 'project-binding');
+  const traceEvents = await operationTrace.list({ traceId: 'relay-action-trace-1', limit: 100 });
+  assert.deepEqual(traceEvents.map((event) => event.stage), ['REQUEST', 'ROUTE', 'DISPATCH']);
+  assert.equal(new Set(traceEvents.map((event) => event.executionContextDigest)).size, 1);
 
   await waitFor(async () => (await hub.deliveryCursor(device.deviceId)).lastAckedSeq === 1);
   assert.deepEqual(firstDeliveries, [dispatched.delivery.id]);
