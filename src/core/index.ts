@@ -40,6 +40,7 @@ export * from './evidence-pack.ts';
 export * from './workspace-graph.ts';
 export * from './developer-session.ts';
 export * from './control-center-model.ts';
+export * from './control-center-runtime-status.ts';
 export * from './control-center-ux.ts';
 export * from './r4-human-study.ts';
 export * from './operation-trace.ts';
