@@ -184,3 +184,35 @@ test('C09 successful trace completion requires latest verifier to be OK and stri
   ];
   assert.equal(evaluateOperationTraceCoverage(simultaneous).complete, false);
 });
+
+test('C09 100 exact synthetic traces expose p50, p95 and p99 completion tails without inventing measurements', () => {
+  const rows: OperationTraceEvent[] = [];
+  const baseline = Date.parse('2026-10-25T00:00:00.000Z');
+  for (let i = 0; i < 100; i++) {
+    const started = baseline + i * 1_000;
+    const duration = i + 1;
+    const traceId = 'trace-percentile-' + i;
+    rows.push({
+      ...e('REQUEST', new Date(started).toISOString()),
+      id: 'request-' + i, traceId
+    });
+    rows.push({
+      ...e('COMPLETE', new Date(started + duration).toISOString()),
+      id: 'complete-' + i, traceId
+    });
+  }
+  const summary = summarizeOperationSlo(rows);
+  assert.equal(summary.traces, 100);
+  assert.equal(summary.completed, 100);
+  assert.equal(summary.p50CompletionMs, 50);
+  assert.equal(summary.p95CompletionMs, 95);
+  assert.equal(summary.p99CompletionMs, 99);
+});
+
+test('C09 empty operation sample exposes zero p99 rather than fabricated latency', () => {
+  const empty = summarizeOperationSlo([]);
+  assert.equal(empty.traces, 0);
+  assert.equal(empty.p50CompletionMs, 0);
+  assert.equal(empty.p95CompletionMs, 0);
+  assert.equal(empty.p99CompletionMs, 0);
+});
