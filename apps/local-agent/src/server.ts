@@ -42,6 +42,7 @@ import type { StudioWorkflowExecutor } from '../../../src/core/studio-executor.t
 import { semanticCheckpointDigest, type SemanticCheckpointManager, type SignedSemanticCheckpoint } from '../../../src/core/semantic-checkpoint.ts';
 import { projectTaskRuntime } from '../../../src/core/runtime-projection.ts';
 import { buildApprovalCenterModel, buildGuidedOnboardingModel, buildRecoveryCenterModel, type RecoveryCandidateInput } from '../../../src/core/control-center-ux.ts';
+import { buildSafeControlCenterDiagnosticExport } from '../../../src/core/control-center-diagnostic-export.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import type { UniversalAgentGateway } from '../../../src/core/universal-agent-gateway.ts';
 import {
@@ -860,7 +861,7 @@ export function createLocalAgentServer(options: {
       return;
     }
 
-    if (pathname === '/v1/control-center/diagnostics' && req.method === 'GET') {
+    if ((pathname === '/v1/control-center/diagnostics' || pathname === '/v1/control-center/diagnostics/export') && req.method === 'GET') {
       const [runtime, emergency, local, peers, summaries, approvals] = await Promise.all([
         options.getRuntimeStatus ? options.getRuntimeStatus() : Promise.resolve({}),
         options.emergencyStop ? options.emergencyStop.status() : Promise.resolve({ version: 1, engaged: false }),
@@ -885,9 +886,7 @@ export function createLocalAgentServer(options: {
       if ((emergency as { engaged?: boolean }).engaged) issues.push({ code: 'EMERGENCY_STOP_ENGAGED', severity: 'critical', guidance: 'Review the stop reason and clear it only through local recovery authority.' });
       if (relayState === 'DEGRADED' || relayState === 'OFFLINE') issues.push({ code: 'RELAY_DEGRADED', severity: 'warning', guidance: 'Remote continuity is degraded; local runtime remains authoritative.' });
       if (approvalModel.counts.pending > 0) issues.push({ code: 'APPROVALS_PENDING', severity: 'info', guidance: 'Review pending effects in Approval Center.' });
-      send(res, 200, {
-        ok: true,
-        diagnostics: {
+      const diagnosticProjection = {
           schemaVersion: 1,
           service: 'operator-local-agent',
           productVersion: PRODUCT_VERSION,
@@ -904,8 +903,15 @@ export function createLocalAgentServer(options: {
           approvalCounts: approvalModel.counts,
           runtime,
           issues
-        }
-      });
+      };
+      if (pathname === '/v1/control-center/diagnostics/export') {
+        // Only the fixed, primitive allowlist enters an exported support file.
+        // Never JSON stringify the raw runtime projection or protected receipts.
+        const bundle = buildSafeControlCenterDiagnosticExport(diagnosticProjection);
+        send(res, 200, { ok: true, export: bundle });
+      } else {
+        send(res, 200, { ok: true, diagnostics: diagnosticProjection });
+      }
       return;
     }
 
