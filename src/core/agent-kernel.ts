@@ -254,6 +254,12 @@ export class AgentKernel {
           }
           await this.#beforeProviderDispatch?.(action, providerName, permissions);
           await assertDispatchLease();
+          const afterHookIntent = await this.#intentFailure(action, context.recoveryMode);
+          if (afterHookIntent) {
+            throw new OperatorError(afterHookIntent.error?.code ?? 'INTENT_STALE',
+              'Task intent changed during the dispatch-authorization hook.',
+              { retryable: false, details: { executionPhase: 'pre_dispatch', sideEffectState: 'none' } });
+          }
           if (action.risk !== 'read') {
             await this.#leases.quarantine(action.id, resourceKeys);
             quarantineArmed = true;
