@@ -53,6 +53,29 @@ function exactId(value: unknown, name: string): string {
   if (typeof value !== 'string' || !ID.test(value)) throw invalid(name + ' is invalid.');
   return value;
 }
+function assertJsonData(value: unknown, depth = 0, seen = new Set<object>()): void {
+  if (depth > 16) throw invalid('Frozen observation exceeds JSON nesting boundary.');
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number' && Number.isFinite(value)) return;
+  if (typeof value !== 'object') throw invalid('Frozen observation must contain JSON values only.');
+  if (seen.has(value)) throw invalid('Frozen observation must not contain cycles.');
+  seen.add(value);
+  if (Array.isArray(value)) {
+    if (value.length > 2000) throw invalid('Frozen observation array is too large.');
+    for (const element of value) assertJsonData(element, depth + 1, seen);
+  } else {
+    if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
+      throw invalid('Frozen observation must be a plain JSON object.');
+    }
+    const entries = Object.getOwnPropertyDescriptors(value);
+    if (Object.keys(entries).length > 500) throw invalid('Frozen observation has too many fields.');
+    for (const descriptor of Object.values(entries)) {
+      if (!('value' in descriptor)) throw invalid('Frozen observation cannot contain getters.');
+      assertJsonData(descriptor.value, depth + 1, seen);
+    }
+  }
+  seen.delete(value);
+}
 function validateChoice(input: FrozenModelChoice): FrozenModelChoice {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw invalid('Choice is invalid.');
   const id = exactId(input.id, 'id');
@@ -68,6 +91,7 @@ function validateChoice(input: FrozenModelChoice): FrozenModelChoice {
   }
   if (input.observation === null || typeof input.observation !== 'object'
     || Array.isArray(input.observation)) throw invalid('Observation must be a JSON object.');
+  assertJsonData(input.observation);
   let observationJson: string;
   try { observationJson = canonicalJson(input.observation); }
   catch { throw invalid('Observation is not canonical JSON.'); }
