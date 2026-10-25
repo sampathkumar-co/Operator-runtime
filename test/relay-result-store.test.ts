@@ -33,6 +33,31 @@ test('relay results persist idempotently and reject conflicting rewrites', async
   assert.deepEqual((await reloaded.get(deviceId, 1))?.result, { ok: true, output: { value: 42 } });
 });
 
+test('relay result wait wakes after the durable commit and preserves exact delivery identity', async (t) => {
+  const state = await temp(t);
+  const deviceId = crypto.randomUUID();
+  const deliveryId = crypto.randomUUID();
+  const store = new RelayResultStore(state);
+  const waiting = store.waitFor(deviceId, 1, deliveryId, 2_000);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await store.put(deviceId, 1, deliveryId, { ok: true });
+  assert.equal((await waiting)?.deliveryId, deliveryId);
+  assert.equal(await store.waitFor(deviceId, 1, crypto.randomUUID(), 10), null);
+  const controller = new AbortController();
+  const aborted = store.waitFor(deviceId, 2, crypto.randomUUID(), 2_000, controller.signal);
+  controller.abort();
+  assert.equal(await aborted, null);
+});
+
+test('relay result wait returns immediately for an already-aborted signal', async (t) => {
+  const state = await temp(t);
+  const controller = new AbortController();
+  controller.abort();
+  assert.equal(await new RelayResultStore(state).waitFor(
+    crypto.randomUUID(), 1, crypto.randomUUID(), 60_000, controller.signal
+  ), null);
+});
+
 test('relay result payloads are bounded and stored hashes are corruption-detecting', async (t) => {
   const state = await temp(t);
   const deviceId = crypto.randomUUID();
@@ -129,4 +154,18 @@ test('unconsumed replay authority remains available until acknowledged, even aft
   assert.equal(await store.findByIdempotencyKey(key), null);
   now = new Date('2026-09-13T00:02:50.002Z');
   assert.equal(await store.pruneExpired(), 1);
+});
+
+test('C09 result wait rejects coercible timeout values before registering listeners', async t => {
+  const state = await temp(t);
+  const store = new RelayResultStore(state);
+  let coerced = 0;
+  const attacker = { valueOf() { coerced++; return 1_000; } };
+  for (const unsafe of ['1000', [1000], attacker, null]) {
+    await assert.rejects(
+      store.waitFor(crypto.randomUUID(), 1, crypto.randomUUID(), unsafe as number),
+      (error: any) => error?.code === 'RELAY_RESULT_WAIT_INVALID'
+    );
+  }
+  assert.equal(coerced, 0);
 });

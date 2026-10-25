@@ -1432,3 +1432,46 @@ test('device listing and removal never cross account boundaries', async (t) => {
   assert.equal(allowed.status, 200);
   assert.deepEqual(removed, [DEVICE_ID]);
 });
+
+test('C09 relay control prefers a source-bound durable-result wakeup to polling', async t => {
+  let waited = 0;
+  let polled = 0;
+  const service = new RelayControlService({
+    hub: {
+      recoverIdempotent: async () => null,
+      dispatch: async () => ({
+        route: { deviceId: DEVICE_ID },
+        delivery: { id: 'durable-wakeup-delivery', seq: 7 }
+      })
+    } as any,
+    results: {
+      findByIdempotencyKey: async () => null,
+      get: async () => { polled++; throw new Error('legacy result poll should not run'); },
+      waitFor: async (deviceId: string, seq: number, deliveryId: string) => {
+        waited++;
+        assert.equal(deviceId, DEVICE_ID);
+        assert.equal(seq, 7);
+        assert.equal(deliveryId, 'durable-wakeup-delivery');
+        return {
+          seq, deliveryId, result: {
+            ok: true, capability: 'computer.inspect', provider: 'fixture',
+            evidence: [], durationMs: 1
+          },
+          replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+        };
+      }
+    } as any,
+    accounts: {
+      activeMembershipForDevice: async () => ({
+        accountId: ACCOUNT_A, deviceId: DEVICE_ID,
+        status: 'active', authorityGeneration: 1
+      })
+    } as any, token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+  const response = await post(port, { accountId: ACCOUNT_A, action: action(), waitMs: 1000 });
+  assert.equal(response.status, 200, await response.text());
+  assert.equal(waited, 1);
+  assert.equal(polled, 0);
+});
