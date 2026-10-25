@@ -319,6 +319,19 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
       : `Fresh Docker inspection does not prove every requested service reached ${expectedState}.`, versions(record));
   }
   if (kind === 'postgres-select') {
+    // A typed goal must remain typed through verification. Coercing arrays,
+    // objects or numeric strings here can make malformed requests appear to
+    // match a previously recorded SELECT, or execute attacker toString hooks.
+    const stringFields = ['root', 'profileId', 'table'] as const;
+    const optionalStrings = ['schema'] as const;
+    const numericFields = ['limit', 'offset', 'timeoutMs'] as const;
+    const valid = stringFields.every(key => typeof goal[key] === 'string' && (goal[key] as string).length > 0)
+      && optionalStrings.every(key => goal[key] === undefined || (typeof goal[key] === 'string' && (goal[key] as string).length > 0))
+      && numericFields.every(key => goal[key] === undefined || (typeof goal[key] === 'number' && Number.isSafeInteger(goal[key]) && (goal[key] as number) >= 0))
+      && (goal.columns === undefined || (Array.isArray(goal.columns) && goal.columns.every(value => typeof value === 'string' && value.length > 0)))
+      && (goal.filters === undefined || Array.isArray(goal.filters))
+      && (goal.orderBy === undefined || Array.isArray(goal.orderBy));
+    if (!valid) return outcome(true, false, 'PostgreSQL goal has malformed input types; no SELECT result can certify it.', []);
     const record = lastSucceeded(records, `${prefix}select-postgres-rows`);
     const state = observationState(record);
     const expectedInput = postgresSelectActionInput({
