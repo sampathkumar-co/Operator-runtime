@@ -27,6 +27,29 @@ const DEFAULT_MAX_WINDOWS = 50;
 const MAX_WINDOWS = 200;
 const UIA_OPERATIONS = ['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll', 'activate_window'] as const;
 const PHYSICAL_INPUT_OPERATIONS = ['move', 'click', 'double_click', 'drag', 'scroll', 'type_text', 'key_press', 'hotkey'] as const;
+// Only runtime-defined or vetted native protocol error codes may cross the
+ // public boundary. A regex allows native/page-owned secret text in an error code.
+const PUBLIC_UIA_ERROR_CODES = new Set([
+  'EXECUTION_ABORTED', 'UIA_PROVIDER_FAILED', 'UIA_OPERATION_FAILED',
+  'UIA_SIDECAR_CLOSED', 'UIA_SIDECAR_EXITED', 'UIA_SIDECAR_TIMEOUT',
+  'UIA_SIDECAR_UNAVAILABLE', 'UIA_SIDECAR_WRITE_FAILED',
+  'UIA_SIDECAR_START_FAILED', 'UIA_SIDECAR_START_TIMEOUT',
+  'UIA_SIDECAR_TERMINATE_FAILED', 'UIA_REQUEST_TOO_LARGE',
+  'INVALID_UIA_OPERATION', 'INVALID_UIA_SCROLL_AMOUNT',
+  'INVALID_UIA_SELECTOR', 'INVALID_UIA_VALUE',
+  'INPUT_AFTER_CAPTURE_INVALID', 'INPUT_AFTER_CAPTURE_FAILED',
+  'INPUT_AFTER_WINDOW_CHANGED', 'INPUT_CAPTURE_INVALID',
+  'INPUT_CAPTURE_MISMATCH', 'INPUT_CAPTURE_REVALIDATION_FAILED',
+  'INPUT_CAPTURE_STALE', 'INPUT_KEYS_INVALID',
+  'INPUT_OPERATION_INVALID', 'INPUT_POINT_OUTSIDE_CAPTURE',
+  'VISUAL_CAPTURE_INVALID', 'VISUAL_INPUT_INVALID'
+]);
+const UNCERTAIN_UIA_MUTATION_ERRORS = new Set([
+  'UIA_SIDECAR_TIMEOUT', 'UIA_SIDECAR_CLOSED', 'UIA_SIDECAR_EXITED',
+  'UIA_SIDECAR_WRITE_FAILED', 'EXECUTION_ABORTED', 'UIA_OPERATION_FAILED',
+  'INPUT_AFTER_CAPTURE_FAILED', 'INPUT_AFTER_CAPTURE_INVALID',
+  'UIA_PROVIDER_FAILED'
+]);
 const CAPTURE_LEASE_MS = 90_000;
 const MAX_CAPTURE_LEASES = 32;
 const AFTER_CAPTURE_SETTLE_MS = 200;
@@ -306,13 +329,14 @@ export class WindowsUiaProvider implements CapabilityProvider {
       const op = error instanceof OperatorError
         ? error
         : new OperatorError('UIA_PROVIDER_FAILED', 'Windows UIA operation failed.', { retryable: true });
+      const knownCode = PUBLIC_UIA_ERROR_CODES.has(op.code);
+      // A native error outside the validated protocol could have followed a
+      // dispatch. It is never grounds to retry a mutating action.
       const ambiguousMutation = action.risk !== 'read'
-        && ['UIA_SIDECAR_TIMEOUT', 'UIA_SIDECAR_CLOSED', 'UIA_SIDECAR_EXITED',
-          'UIA_SIDECAR_WRITE_FAILED', 'EXECUTION_ABORTED', 'UIA_OPERATION_FAILED',
-          'INPUT_AFTER_CAPTURE_FAILED', 'INPUT_AFTER_CAPTURE_INVALID'].includes(op.code);
-      // Native error messages can include target names, input values or
-      // process paths. Return the closed error class only, never raw stderr.
-      const publicCode = /^[A-Z][A-Z0-9_]{2,100}$/.test(op.code) ? op.code : 'UIA_PROVIDER_FAILED';
+        && (!knownCode || UNCERTAIN_UIA_MUTATION_ERRORS.has(op.code));
+      // Messages and even syntactically plausible error codes can originate
+      // outside our trusted boundary. Never reflect arbitrary code text.
+      const publicCode = knownCode ? op.code : 'UIA_PROVIDER_FAILED';
       const publicMessage = `Windows UIA operation failed (${publicCode}).`;
       return {
         ok: false,
