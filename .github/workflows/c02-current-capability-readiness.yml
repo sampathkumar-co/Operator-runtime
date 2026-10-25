@@ -1,0 +1,34 @@
+name: C02 Current Scoped Capability Readiness
+on:
+  pull_request:
+    paths:
+      - 'src/core/capability-readiness.ts'
+      - 'src/core/capability-discovery.ts'
+      - 'apps/local-agent/src/server.ts'
+      - 'test/c02-current-capability-readiness.test.ts'
+      - '.github/workflows/c02-current-capability-readiness.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/core/capability-readiness.ts'
+      - 'src/core/capability-discovery.ts'
+      - 'apps/local-agent/src/server.ts'
+      - 'test/c02-current-capability-readiness.test.ts'
+      - '.github/workflows/c02-current-capability-readiness.yml'
+permissions:
+  contents: read
+jobs:
+  scoped-source-capability-truth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - run: node --experimental-strip-types --test test/c02-current-capability-readiness.test.ts test/capability-discovery.test.ts
+      - name: Disclose no authority granted by registry
+        run: echo 'CAPABILITY_REGISTRY=DECLARATIONS_NOT_EXECUTION;PHYSICAL_DEVICE_SESSION=NOT_VERIFIED;MODEL_AUTHORITY=NOT_GRANTED;NPM_RELEASE=UNCHANGED'
