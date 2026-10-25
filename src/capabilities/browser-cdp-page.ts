@@ -315,23 +315,34 @@ export async function collectDiagnostics(session: CdpConnection): Promise<{
 }> {
   const consoleErrors: string[] = [];
   const networkFailures: Array<{ url?: string; errorText?: string; blockedReason?: string }> = [];
+  // CDP error strings and failed URLs originate in arbitrary websites. A page
+  // can deliberately place OAuth codes, passwords or private document names in
+  // them. Preserve actionable failure *classes*, never raw page-owned text.
+  const safeNetworkCode = (value: unknown): string => (
+    typeof value === 'string' && /^net::ERR_[A-Z0-9_]{1,80}$/.test(value)
+      ? value : 'NETWORK_ERROR_DETAILS_REDACTED'
+  );
+  const safeBlockedReason = (value: unknown): string | undefined => (
+    typeof value === 'string' && /^(?:csp|mixed-content|origin|inspector|subresource-filter|content-type|other)$/.test(value)
+      ? value : value === undefined ? undefined : 'BLOCKED_REASON_REDACTED'
+  );
   await Promise.allSettled([session.send('Runtime.enable'), session.send('Network.enable'), session.send('Log.enable')]);
   const off = [
-    session.on('Runtime.exceptionThrown', (params) => {
-      const details = params.exceptionDetails as JsonMap | undefined;
-      const text = typeof details?.text === 'string' ? details.text : 'Uncaught page exception';
-      if (consoleErrors.length < 50) consoleErrors.push(text.slice(0, 500));
+    session.on('Runtime.exceptionThrown', () => {
+      if (consoleErrors.length < 50) consoleErrors.push('RUNTIME_EXCEPTION_DETAILS_REDACTED');
     }),
     session.on('Log.entryAdded', (params) => {
       const entry = params.entry as JsonMap | undefined;
-      if (entry?.level === 'error' && typeof entry.text === 'string' && consoleErrors.length < 50) consoleErrors.push(entry.text.slice(0, 500));
+      if (entry?.level === 'error' && consoleErrors.length < 50) consoleErrors.push('BROWSER_LOG_ERROR_DETAILS_REDACTED');
     }),
     session.on('Network.loadingFailed', (params) => {
       if (networkFailures.length >= 50) return;
       networkFailures.push({
-        url: typeof params.url === 'string' ? params.url.slice(0, 1000) : undefined,
-        errorText: typeof params.errorText === 'string' ? params.errorText.slice(0, 500) : undefined,
-        blockedReason: typeof params.blockedReason === 'string' ? params.blockedReason : undefined
+        // The URL itself is untrusted (including its path, query, fragments and
+        // possible userinfo) and must not be carried into audit/agent output.
+        url: typeof params.url === 'string' ? 'URL_REDACTED' : undefined,
+        errorText: safeNetworkCode(params.errorText),
+        blockedReason: safeBlockedReason(params.blockedReason)
       });
     })
   ];
