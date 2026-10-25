@@ -1,0 +1,47 @@
+name: C00 Complete Source Operation Inventory
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/c00-source-operation-inventory.ts'
+      - 'test/c00-source-operation-inventory.test.ts'
+      - 'scripts/wave0-provider-census.ts'
+      - 'src/core/capability-policy.ts'
+      - '.github/workflows/c00-source-inventory.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/c00-source-operation-inventory.ts'
+      - 'test/c00-source-operation-inventory.test.ts'
+      - 'scripts/wave0-provider-census.ts'
+      - 'src/core/capability-policy.ts'
+      - '.github/workflows/c00-source-inventory.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  provider-risk-source-test-inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Test source inventory and truthful uncertified gates
+        run: node --experimental-strip-types --test test/c00-source-operation-inventory.test.ts
+      - name: Generate exact-checkout read-only evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types scripts/c00-source-operation-inventory.ts > "$RUNNER_TEMP/c00-source-inventory.json"
+          node -e "const fs=require('fs');const r=JSON.parse(fs.readFileSync(process.argv[1]));if(r.sourceCommit!==process.env.GITHUB_SHA||r.declaredCanonicalCapabilityCount!==52||r.releaseAcceptance!=='NOT_ACCEPTED'||r.operations.some(o=>o.actualOsSupport!=='NOT_PHYSICALLY_VERIFIED'))throw Error('C00 inventory provenance/uncertainty contract violated')" "$RUNNER_TEMP/c00-source-inventory.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: c00-source-inventory-${{ github.sha }}
+          path: ${{ runner.temp }}/c00-source-inventory.json
+          retention-days: 30
