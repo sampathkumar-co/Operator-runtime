@@ -222,7 +222,7 @@ function normalizeRecord(input: unknown, expectedId?: string): ArtifactRecord {
   if (raw.schemaVersion !== 1) throw new OperatorError('ARTIFACT_RECORD_INVALID', 'Artifact record schema version is invalid.');
   const blobDigest = normalizeDigest(raw.blobDigest, 'blobDigest');
   const bytes = raw.bytes;
-  if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > MAX_ARTIFACT_BYTES) {
+  if (typeof bytes !== 'number' || !Number.isSafeInteger(bytes) || bytes < 1 || bytes > MAX_ARTIFACT_BYTES) {
     throw new OperatorError('ARTIFACT_RECORD_INVALID', 'Artifact record byte length is invalid.');
   }
   const kind = normalizeKind(raw.kind);
