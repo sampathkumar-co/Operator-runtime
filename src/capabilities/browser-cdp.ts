@@ -265,8 +265,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
   }
 
   async #inspect(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
-    const tabs = await this.#listTargets(signal);
     const targetId = optionalTargetId(action.input.targetId);
+    const tabs = await this.#listTargets(signal);
     if (!targetId) {
       return {
         ok: true,
