@@ -46,7 +46,7 @@ test('C09 omitting observed relay timings cannot falsely improve performance', (
   assert.equal(x.candidate.stageMs.relay.missing, 1);
   assert.equal(x.candidate.stageMs.relay.p50, null);
   assert.deepEqual(x.regressionDiagnostics.missingStageInstrumentation, ['relay']);
-  assert.deepEqual(x.regressionDiagnostics.reasons, ['STAGE_TELEMETRY_COVERAGE_REGRESSION']);
+  assert.deepEqual(x.regressionDiagnostics.reasons, ['MATCHED_JOURNEY_STAGE_TELEMETRY_LOSS', 'STAGE_TELEMETRY_COVERAGE_REGRESSION']);
   assert.equal(x.observedCandidateNotWorse, false);
 });
 
