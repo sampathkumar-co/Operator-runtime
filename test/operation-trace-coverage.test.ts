@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   evaluateOperationTraceCoverage,
+  summarizeOperationSlo,
   type OperationTraceEvent
 } from '../src/core/operation-trace.ts';
 
@@ -68,4 +69,46 @@ test('trace coverage detects required stages that occur out of causal order',()=
   ]);
   assert.equal(coverage.complete,false);
   assert.ok(coverage.outOfOrderStages.includes('VERIFY'));
+});
+
+test('C09 operation SLO rejects verification that occurs after an already claimed completion',()=>{
+  const trace=[
+    e('REQUEST','2026-10-07T00:00:00.000Z'),
+    e('ROUTE','2026-10-07T00:00:00.100Z'),
+    e('POLICY','2026-10-07T00:00:00.200Z'),
+    e('DISPATCH','2026-10-07T00:00:00.300Z'),
+    e('COMPLETE','2026-10-07T00:00:00.400Z'),
+    e('VERIFY','2026-10-07T00:00:00.500Z')
+  ];
+  const report=summarizeOperationSlo(trace);
+  assert.equal(report.completed,1);
+  assert.equal(report.verified,0);
+  assert.equal(report.falseCompletionCount,1);
+});
+
+test('C09 operation SLO preserves verified claim only when last verification precedes completion',()=>{
+  const valid=[
+    e('REQUEST','2026-10-07T00:00:00.000Z'),
+    e('VERIFY','2026-10-07T00:00:00.100Z'),
+    e('COMPLETE','2026-10-07T00:00:00.200Z')
+  ];
+  const good=summarizeOperationSlo(valid);
+  assert.equal(good.verified,1);
+  assert.equal(good.falseCompletionCount,0);
+  const stale=[...valid,e('VERIFY','2026-10-07T00:00:00.300Z','FAILED')];
+  const bad=summarizeOperationSlo(stale);
+  assert.equal(bad.verified,0);
+  assert.equal(bad.falseCompletionCount,1);
+});
+
+test('C09 a failed terminal outcome must not be counted as verified task success',()=>{
+  const report=summarizeOperationSlo([
+    e('REQUEST','2026-10-07T00:00:00.000Z'),
+    e('VERIFY','2026-10-07T00:00:00.100Z'),
+    e('COMPLETE','2026-10-07T00:00:00.200Z','FAILED')
+  ]);
+  assert.equal(report.completed,0);
+  assert.equal(report.verified,0);
+  assert.equal(report.falseCompletionCount,0);
+  assert.equal(report.failed,1);
 });
