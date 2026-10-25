@@ -130,3 +130,47 @@ test('C04 unchanged pixels cannot authorize input after source, window or geomet
     }
   }
 });
+
+test('C04 capture refuses pixels outside the exact requested region or missing window identity', async () => {
+  const bytes = Buffer.alloc(160 * 1024, 9);
+  const variants = [
+    {
+      name: 'wrong region origin',
+      input: { source: 'region', region: { x: 0, y: 0, width: 400, height: 300 } },
+      native: { ...nativeCapture(bytes), origin_x: 7 }
+    },
+    {
+      name: 'wrong region size',
+      input: { source: 'region', region: { x: 0, y: 0, width: 400, height: 300 } },
+      native: { ...nativeCapture(bytes), source_width: 500 }
+    },
+    {
+      name: 'unidentified window',
+      input: { source: 'window', selector: { name: 'Contract App' } },
+      native: { ...nativeCapture(bytes, 'window', ''), window_id: '' }
+    }
+  ];
+  for (const variant of variants) {
+    let artifactWrites = 0;
+    const provider = new WindowsUiaProvider({
+      platform: 'win32',
+      artifactStore: {
+        async put() { artifactWrites++; throw new Error('Unexpected persistence of out-of-scope pixels'); }
+      } as any,
+      client: { async call() { return variant.native; }, close() {} }
+    });
+    try {
+      const result = await provider.execute({
+        id: 'capture-' + variant.name, capability: 'visual.capture', risk: 'read',
+        provenance: { kind: 'runtime' }, input: variant.input
+      } as any);
+      assert.equal(result.ok, false, variant.name);
+      assert.equal(result.error?.code, 'VISUAL_CAPTURE_INVALID', variant.name);
+      assert.equal(result.error?.sideEffectState, 'none', variant.name);
+      assert.equal(result.output, undefined, variant.name);
+      assert.equal(artifactWrites, 0, variant.name);
+    } finally {
+      await provider.close();
+    }
+  }
+});
