@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import {
   validateModelGoalProposal, type ModelGoalProposalRequest,
@@ -111,6 +112,26 @@ export class BoundedModelGoalInference {
       refused('TASK_MODEL_INFERENCE_INVALID', 'Explicit bounded approved resource scope required.');
     }
     requiredText(scope.objective, 4096, 'objective');
+    for (const root of scope.approvedRoots) {
+      if (typeof root !== 'string' || root.length > 4096 || root.includes('\\0') ||
+          !path.isAbsolute(root)) {
+        refused('TASK_MODEL_INFERENCE_INVALID', 'Approved model project roots must be absolute and bounded.');
+      }
+    }
+    for (const origin of scope.approvedBrowserOrigins) {
+      if (typeof origin !== 'string' || origin.length > 2048) {
+        refused('TASK_MODEL_INFERENCE_INVALID', 'Model browser origins must be bounded.');
+      }
+      let parsed: URL;
+      try { parsed = new URL(origin); }
+      catch { refused('TASK_MODEL_INFERENCE_INVALID', 'Model browser origin is invalid.'); }
+      if (!['http:', 'https:'].includes(parsed!.protocol) || parsed!.username ||
+          parsed!.password || parsed!.origin !== origin || parsed!.pathname !== '/' ||
+          parsed!.search || parsed!.hash) {
+        refused('TASK_MODEL_INFERENCE_INVALID',
+          'Model may see only credential-free exact approved browser origins.');
+      }
+    }
     const prompt = JSON.stringify({
       instruction: 'Return JSON only: {goal, successConditions}. Allowed typed goals: browser-navigation with url; trusted-project-command with root and commandKind lint/test/build; project-quality-gate with root, checks, requireAll:true; or semantic-workflow with 2-4 allowed atomic steps. Propose only within the given scope. Never claim actions were executed or grant permissions.',
       objective: scope.objective,
@@ -143,9 +164,9 @@ export class BoundedModelGoalInference {
         try {
           const timed = new Promise<never>((_resolve, reject) => {
             timer = setTimeout(() => {
-              controller.abort();
               reject(new OperatorError('TASK_MODEL_INFERENCE_TIMEOUT',
                 'Model exceeded its bounded inference deadline.'));
+              controller.abort();
             }, this.#timeoutMs);
             controller.signal.addEventListener('abort', () => reject(new OperatorError(
               'TASK_MODEL_INFERENCE_ABORTED', 'Model inference was cancelled.'
