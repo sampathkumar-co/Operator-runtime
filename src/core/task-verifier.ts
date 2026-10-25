@@ -195,7 +195,12 @@ function structuredOutcomeTruth(task: TaskCapsule): TaskOutcomeTruth {
   if (!execution) return outcome(false, false, 'Execution metadata is missing.', []);
   const goal = asRecord(execution.plannerState.goal);
   if (execution.plannerId === 'operator.semantic.v1') {
-    return evaluateAtomicGoal(goal, execution.records, '');
+    const verified = evaluateAtomicGoal(goal, execution.records, '');
+    // An unrecognised built-in goal is not an extensible custom planner.
+    // Otherwise successful provider evidence could bypass typed outcome truth.
+    return verified.supported ? verified : outcome(true, false,
+      `Semantic goal outcome is not independently verifiable: ${verified.detail}`,
+      verified.stateVersions);
   }
   if (execution.plannerId === 'operator.semantic-workflow.v1') {
     const steps = Array.isArray(goal.steps) ? goal.steps.map(asRecord) : [];
@@ -248,7 +253,7 @@ function structuredOutcomeTruth(task: TaskCapsule): TaskOutcomeTruth {
 }
 
 function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRecord[], prefix: string): TaskOutcomeTruth {
-  const kind = String(goal.kind ?? '');
+  const kind = typeof goal.kind === 'string' ? goal.kind : '';
   if (kind === 'controlled-file-change') {
     const fileRecord = lastSucceeded(records, `${prefix}verify-file`);
     const gitRecord = lastSucceeded(records, `${prefix}inspect-git`);
@@ -293,12 +298,20 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
   if (kind === 'docker-lifecycle') {
     const record = lastSucceededAny(records, [`${prefix}verify-docker-project`, `${prefix}inspect-docker-project`]);
     const state = observationState(record);
-    const services = Array.isArray(goal.services) ? goal.services.map(String) : [];
+    // A malformed action cannot be reinterpreted as 'start'. Likewise,
+    // String(array/object) must not turn a forged service or state into a
+    // genuine successful Docker lifecycle observation.
+    const validOperation = goal.operation === 'start' || goal.operation === 'stop' || goal.operation === 'restart';
+    const services = Array.isArray(goal.services) && goal.services.length > 0 &&
+      goal.services.every((service) => typeof service === 'string' && service.length > 0)
+      ? goal.services as string[] : [];
     const expectedState = goal.operation === 'stop' ? 'exited' : 'running';
     const observed = Array.isArray(state.services) ? state.services.map(asRecord) : [];
-    const ok = Boolean(record && state.scope === 'project' && services.length > 0 && services.every((service) => {
+    const ok = Boolean(record && validOperation && state.scope === 'project' && services.length > 0 && services.every((service) => {
       const item = observed.find((candidate) => candidate.service === service);
-      const states = Array.isArray(item?.states) ? item!.states.map(String) : [];
+      const states = Array.isArray(item?.states) && item.states.length > 0 &&
+        item.states.every((value) => typeof value === 'string')
+        ? item.states as string[] : [];
       return states.length > 0 && states.every((value) => value === expectedState);
     }));
     return outcome(true, ok, ok
