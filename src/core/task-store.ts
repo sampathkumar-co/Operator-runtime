@@ -385,15 +385,22 @@ function validateExecution(input: unknown): TaskExecution {
   const preDispatchReobserves = raw.preDispatchReobserves === undefined
     ? 0
     : boundedInteger(raw.preDispatchReobserves, 0, 1_000_000, 'execution preDispatchReobserves');
+  // Unlike legacy stored counters, model spend is security-relevant new
+  // authority: never coerce strings, null, booleans or arrays into charges.
+  const typedModelCount = (value: unknown, max: number, field: string): number => {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) ||
+      value < 0 || value > max) throw corrupt(`execution ${field} is invalid.`);
+    return value;
+  };
   const modelCallCount = raw.modelCallCount === undefined
     ? 0
-    : boundedInteger(raw.modelCallCount, 0, maxSteps * 2, 'execution modelCallCount');
+    : typedModelCount(raw.modelCallCount, maxSteps * 2, 'modelCallCount');
   const modelReservedTokens = raw.modelReservedTokens === undefined
     ? 0
-    : boundedInteger(raw.modelReservedTokens, 0, maxSteps * 100_000, 'execution modelReservedTokens');
+    : typedModelCount(raw.modelReservedTokens, maxSteps * 100_000, 'modelReservedTokens');
   const modelReservedCostMicros = raw.modelReservedCostMicros === undefined
     ? 0
-    : boundedInteger(raw.modelReservedCostMicros, 0, maxSteps * 1_000_000, 'execution modelReservedCostMicros');
+    : typedModelCount(raw.modelReservedCostMicros, maxSteps * 1_000_000, 'modelReservedCostMicros');
   if ((modelCallCount === 0 && (modelReservedTokens !== 0 || modelReservedCostMicros !== 0))
     || (modelCallCount > 0 && modelReservedTokens < modelCallCount)) {
     throw corrupt('execution model reservations must match a charged model call and its minimum token allowance.');
