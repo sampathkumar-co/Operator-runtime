@@ -10,6 +10,8 @@ import { PathScope } from './path-scope.ts';
 type DocFormat='pdf'|'docx'|'xlsx'|'pptx'|'csv'|'json'|'png'|'jpeg'|'webp';
 const MAX_FILE_BYTES=32*1024*1024;
 const MAX_EXTRACT_BYTES=4*1024*1024;
+const MAX_PUBLIC_OUTPUT_BYTES=256*1024;
+const DEFAULT_PUBLIC_OUTPUT_BYTES=128*1024;
 const MAX_ARCHIVE_ENTRIES=2048;
 const MAX_ARCHIVE_UNCOMPRESSED=64*1024*1024;
 const SCORE:CapabilityScore={reliability:.96,latency:.88,determinism:.98,security:.98,reversibility:1,informationQuality:.9,interactionCost:.02};
@@ -44,13 +46,27 @@ export class DocumentDataProvider implements CapabilityProvider{
         // Document routes also accept structured formats for transport-neutral clients.
       }
       const base={path:resolved,format,mimeType:mime(format),size:bytes.byteLength,sha256:sha(bytes)};
+      const maxBytes=boundedPublicOutputBytes(action.input.maxBytes);
+      if(action.input.offset !== undefined && !(format==='csv' && action.capability.endsWith('.extract'))) {
+        throw new OperatorError('DOCUMENT_PAGINATION_INVALID','Only CSV extraction supports row-offset pagination.');
+      }
       let output:Record<string,unknown>;
       if(action.capability.endsWith('.inspect')){
         output={...base,metadata:inspectMetadata(format,bytes)};
       }else{
         const extracted=extract(format,bytes);
-        if(action.capability.endsWith('.extract')) output={...base,...extracted};
+        if(action.capability.endsWith('.extract')) {
+          if(format==='csv'){
+            const complete={...base,...extracted};
+            output=action.input.offset===undefined && Buffer.byteLength(JSON.stringify(complete),'utf8')<=maxBytes
+              ? complete : boundCsvExtract(base,extracted,action.input.offset,maxBytes);
+          }else output={...base,...extracted};
+        }
         else output={...base,...render(format,bytes,extracted)};
+      }
+      if(Buffer.byteLength(JSON.stringify(output),'utf8')>maxBytes) {
+        throw new OperatorError('DOCUMENT_OUTPUT_TOO_LARGE',
+          'Document output exceeds the authorized response budget. Use a narrower source or an artifact-backed workflow; no incomplete result was returned.');
       }
       return {
         ok:true,
@@ -62,6 +78,56 @@ export class DocumentDataProvider implements CapabilityProvider{
       };
     });
   }
+}
+
+function boundedPublicOutputBytes(input:unknown):number {
+  if(input===undefined)return DEFAULT_PUBLIC_OUTPUT_BYTES;
+  if(typeof input!=='number'||!Number.isSafeInteger(input)||
+    input<1024||input>MAX_PUBLIC_OUTPUT_BYTES) {
+    throw new OperatorError('DOCUMENT_PAGINATION_INVALID',
+      'Document maxBytes must be an exact integer from 1024 to 262144.');
+  }
+  return input;
+}
+function boundedCsvOffset(input:unknown):number {
+  if(input===undefined)return 0;
+  if(typeof input!=='number'||!Number.isSafeInteger(input)||input<0||input>10_000) {
+    throw new OperatorError('DOCUMENT_PAGINATION_INVALID','CSV row offset must be an exact bounded integer.');
+  }
+  return input;
+}
+/** Byte-bounded, forward-moving CSV pagination with explicit omission of the
+ * original raw text, not a silently clipped successful extraction. */
+function boundCsvExtract(
+  base:Record<string,unknown>,extracted:Record<string,unknown>,
+  offsetInput:unknown,maxBytes:number
+):Record<string,unknown>{
+  const rows=extracted.rows as string[][];
+  const offset=boundedCsvOffset(offsetInput);
+  const outputRows:string[][]=[];
+  const totalObservedRows=rows.length;
+  const sourceTruncated=Boolean((extracted as Record<string,unknown>).sourceTruncated);
+  const wrapper=(nextOffset:number|null)=>({
+    ...base,rows:outputRows,
+    page:{offset,nextOffset,totalObservedRows,sourceTruncated,
+      sourceSha256:base.sha256},textOmitted:true
+  });
+  if(offset>totalObservedRows)throw new OperatorError('DOCUMENT_PAGINATION_INVALID',
+    'CSV row offset exceeds the available bounded extraction.');
+  let next=offset;
+  for(;next<totalObservedRows && outputRows.length<500;next++){
+    outputRows.push(rows[next]!);
+    if(Buffer.byteLength(JSON.stringify(wrapper(next+1<totalObservedRows?next+1:null)),'utf8')>maxBytes){
+      outputRows.pop();
+      if(!outputRows.length)throw new OperatorError('DOCUMENT_OUTPUT_TOO_LARGE',
+        'A single CSV row exceeds the response limit; use a narrower source.');
+      break;
+    }
+  }
+  const result=wrapper(next<totalObservedRows?next:null);
+  if(Buffer.byteLength(JSON.stringify(result),'utf8')>maxBytes)throw new OperatorError(
+    'DOCUMENT_OUTPUT_TOO_LARGE','CSV pagination metadata exceeds response budget.');
+  return result;
 }
 
 async function readStableBoundedDocument(
@@ -144,8 +210,11 @@ function inspectMetadata(f:DocFormat,b:Buffer):Record<string,unknown>{
 
 function extract(f:DocFormat,b:Buffer):Record<string,unknown>{
   if(f==='csv'){
-    const text=boundedText(utf8(b));const rows=text.split(/\r?\n/).filter(Boolean).slice(0,10000).map(parseCsvLine);
-    return{text,rows};
+    const decoded=utf8(b);
+    const text=boundedText(decoded);
+    const sourceLines=text.split(/\r?\n/).filter(Boolean);
+    const rows=sourceLines.slice(0,10000).map(parseCsvLine);
+    return{text,rows,sourceTruncated:Buffer.byteLength(decoded,'utf8')>MAX_EXTRACT_BYTES||sourceLines.length>10000};
   }
   if(f==='json'){
     const value=safeJson(b);return{text:boundedText(JSON.stringify(value,null,2)),value};
