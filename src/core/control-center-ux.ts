@@ -283,7 +283,20 @@ function recoveryItem(candidate: RecoveryCandidateInput): RecoveryCenterItem {
     };
   }
 
-  if (candidate.reconciliationStatus === 'completed' && candidate.verificationStatus === 'passed') {
+  // Contradictory adjudication must never be presented as an approved recovery
+  // action. If reconciliation says no effect but the local runtime says one
+  // exists, neither retry nor rollback is justified by this projection.
+  if (candidate.reconciliationStatus === 'not_applied' && candidate.sideEffectState === 'known') {
+    return {
+      ...base,
+      disposition: 'BLOCKED',
+      recommendedAction: 'ESCALATE',
+      requiresFreshApproval: false,
+      reason: 'Recovery evidence conflicts about whether an effect happened; obtain independent reconciliation before retry or rollback.'
+    };
+  }
+
+  if (candidate.reconciliationStatus === 'completed' && candidate.verificationStatus === 'passed' && candidate.sideEffectState === 'known') {
     return {
       ...base,
       disposition: 'TERMINAL',
@@ -293,7 +306,7 @@ function recoveryItem(candidate: RecoveryCandidateInput): RecoveryCenterItem {
     };
   }
 
-  if (candidate.verificationStatus === 'failed' && candidate.rollbackAvailable) {
+  if (candidate.verificationStatus === 'failed' && candidate.rollbackAvailable && candidate.sideEffectState === 'known') {
     return {
       ...base,
       disposition: 'REVERSIBLE',
@@ -443,9 +456,12 @@ function boolean(value: unknown, label: string): boolean {
 }
 
 function boundedId(value: unknown, label: string): string {
-  const text = String(value ?? '');
-  if (!/^[A-Za-z0-9._:@/+\-=]{1,512}$/.test(text)) throw invalid(label + ' is invalid.');
-  return text;
+  // Identity fields are owned by the runtime. Never allow object-coercion to
+  // fabricate a plausible approval, lease or recovery action identifier.
+  if (typeof value !== 'string' || !/^[A-Za-z0-9._:@/+\-=]{1,512}$/.test(value)) {
+    throw invalid(label + ' is invalid.');
+  }
+  return value;
 }
 
 function boundedText(value: unknown, maxBytes: number, label: string): string {
@@ -456,7 +472,8 @@ function boundedText(value: unknown, maxBytes: number, label: string): string {
 }
 
 function canonicalIso(value: unknown, label: string): string {
-  const text = String(value ?? '');
+  if (typeof value !== 'string') throw invalid(label + ' must be canonical ISO.');
+  const text = value;
   if (!text || !Number.isFinite(Date.parse(text)) || new Date(text).toISOString() !== text) throw invalid(label + ' must be canonical ISO.');
   return text;
 }

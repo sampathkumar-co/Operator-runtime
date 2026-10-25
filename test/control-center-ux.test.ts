@@ -243,3 +243,68 @@ test('C10 confirmed pre-dispatch failure and proven not-applied effects can requ
   assert.equal(model.items.find(x => x.actionId === 'inconsistent-completed')?.recommendedAction, 'ESCALATE');
   assert.equal(model.items.find(x => x.actionId === 'pre-dispatch')?.requiresFreshApproval, true);
 });
+
+test('C10 contradictory proof cannot silently close or authorize an uncertain recovery', () => {
+  const cases = [
+    { actionId:'no-effect-but-complete', capability:'file.replace', retryable:false,
+      sideEffectState:'none' as const, reconciliationStatus:'completed' as const,
+      verificationStatus:'passed' as const, updatedAt:NOW },
+    { actionId:'not-applied-but-known', capability:'file.replace', retryable:true,
+      sideEffectState:'known' as const, reconciliationStatus:'not_applied' as const,
+      verificationStatus:'failed' as const, rollbackAvailable:true, updatedAt:NOW },
+    { actionId:'no-effect-failed-verify', capability:'file.replace', retryable:false,
+      sideEffectState:'none' as const, verificationStatus:'failed' as const,
+      rollbackAvailable:true, updatedAt:NOW }
+  ];
+  const model = buildRecoveryCenterModel(cases);
+  for (const candidate of cases) {
+    const item = model.items.find(entry => entry.actionId === candidate.actionId)!;
+    assert.notEqual(item.recommendedAction, 'NONE', candidate.actionId);
+    assert.notEqual(item.recommendedAction, 'ROLLBACK', candidate.actionId);
+    assert.notEqual(item.recommendedAction, 'RETRY', candidate.actionId);
+    assert.equal(item.requiresFreshApproval, false, candidate.actionId);
+  }
+  assert.equal(model.items.find(x => x.actionId === 'not-applied-but-known')?.disposition, 'BLOCKED');
+});
+
+test('C10 known applied effect with failed independent proof still offers fresh-authority rollback', () => {
+  const model = buildRecoveryCenterModel([{
+    actionId:'known-failure',
+    capability:'workspace.edit',
+    retryable:false,
+    sideEffectState:'known',
+    reconciliationStatus:'completed',
+    verificationStatus:'failed',
+    rollbackAvailable:true,
+    updatedAt:NOW
+  }]);
+  assert.equal(model.items[0]?.recommendedAction, 'ROLLBACK');
+  assert.equal(model.items[0]?.requiresFreshApproval, true);
+});
+
+test('C10 forged object identifiers cannot acquire an approval or recovery display identity', () => {
+  const fake = { toString: () => 'legitimate-action' };
+  const approval = {
+    actionId:'legitimate-action', approvalRequestId:'request-1',
+    capability:'file.replace', risk:'write', status:'pending',
+    createdAt:'2026-10-06T11:59:00.000Z', pendingExpiresAt:'2026-10-06T12:05:00.000Z'
+  };
+  for (const key of ['actionId','approvalRequestId','capability','createdAt','pendingExpiresAt'] as const) {
+    assert.throws(
+      () => buildApprovalCenterModel([{...approval,[key]:fake} as any],NOW),
+      (e:any)=>e?.code==='CONTROL_CENTER_UX_INVALID',
+      key
+    );
+  }
+  const recovery = {
+    actionId:'legitimate-action', capability:'file.replace',
+    retryable:true, sideEffectState:'none', executionPhase:'pre_dispatch', updatedAt:NOW
+  };
+  for (const key of ['actionId','capability','updatedAt'] as const) {
+    assert.throws(
+      () => buildRecoveryCenterModel([{...recovery,[key]:fake} as any]),
+      (e:any)=>e?.code==='CONTROL_CENTER_UX_INVALID',
+      key
+    );
+  }
+});
