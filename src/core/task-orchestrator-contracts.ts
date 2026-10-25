@@ -73,6 +73,8 @@ export interface TaskPlannerContext {
   recentEvents: TaskPlannerEvent[];
   intelligence: TaskIntelligenceContext;
   decisionBudget: TaskDecisionBudget;
+  /** Bound current planning to Stop/Pause/Cancel; never grants model authority. */
+  signal?: AbortSignal;
 }
 
 export interface TaskIntelligenceContext {
@@ -150,8 +152,8 @@ export type PlannerDecision =
 export interface TaskPlanner {
   readonly id: string;
   supports(goal: SemanticTaskGoal): boolean;
-  next(context: TaskPlannerContext): PlannerDecision;
-  repair?(context: TaskPlannerContext, invalidDecision: unknown, issue: string): PlannerDecision;
+  next(context: TaskPlannerContext): PlannerDecision | Promise<PlannerDecision>;
+  repair?(context: TaskPlannerContext, invalidDecision: unknown, issue: string): PlannerDecision | Promise<PlannerDecision>;
   accept(context: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void;
   fallback?(context: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean;
 }
