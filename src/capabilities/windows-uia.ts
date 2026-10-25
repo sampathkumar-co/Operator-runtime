@@ -530,9 +530,23 @@ export class WindowsUiaProvider implements CapabilityProvider {
     }
     const currentSha256 = crypto.createHash('sha256').update(currentPng).digest('hex');
     const currentWindowId = typeof currentRaw.window_id === 'string' ? currentRaw.window_id : undefined;
-    if (currentSha256 !== lease.sha256 || (lease.windowId && currentWindowId !== lease.windowId)) {
+    // An unchanged screenshot hash cannot prove stable physical coordinates.
+    // A window can move or DPI/monitor scaling can change over identical pixels.
+    // Reject mismatched native geometry/source *before* dispatching any input.
+    const sameGeometry =
+      currentRaw.source === lease.captureParams.source &&
+      currentRaw.origin_x === lease.originX &&
+      currentRaw.origin_y === lease.originY &&
+      currentRaw.source_width === lease.sourceWidth &&
+      currentRaw.source_height === lease.sourceHeight &&
+      currentRaw.returned_width === lease.returnedWidth &&
+      currentRaw.returned_height === lease.returnedHeight &&
+      currentRaw.scale_x === lease.scaleX &&
+      currentRaw.scale_y === lease.scaleY;
+    if (currentSha256 !== lease.sha256 || !sameGeometry ||
+        (lease.windowId && currentWindowId !== lease.windowId)) {
       this.#captureLeases.delete(captureId);
-      throw new OperatorError('INPUT_CAPTURE_STALE', 'Visual state changed after reasoning; capture fresh state before physical input.', { retryable: true });
+      throw new OperatorError('INPUT_CAPTURE_STALE', 'Visual state or physical geometry changed after reasoning; capture fresh state before input.', { retryable: true });
     }
 
     const before = {
