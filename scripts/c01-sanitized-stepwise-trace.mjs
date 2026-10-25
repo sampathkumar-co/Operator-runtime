@@ -23,7 +23,7 @@ function recordStep(value,index){
     !SIDE_EFFECTS.has(value.sideEffectState)||!STAGES.has(value.failureStage)||
     !PROVIDERS.has(value.providerClass)||!count(value.durationMs,120000)||
     !DIGEST.test(value.evidenceDigest??'')||
-    !textId(value.actionOrdinal??'')){
+    !count(value.actionOrdinal,1000)){
    deny('Each step must have exact sequence, bounded categorical fields and an evidence SHA; raw user content is forbidden.');
  }
  if(value.result==='PASS'&&value.failureStage!=='none')deny('A successful step cannot declare a failure stage.');
