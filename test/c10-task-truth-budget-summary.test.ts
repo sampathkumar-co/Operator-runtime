@@ -20,12 +20,12 @@ test('C10 task details separate goal verification and pre-call model reservation
 });
 
 test('C10 generated Control Center exactly matches maintained source files', async () => {
-  const [shell,style,script] = await Promise.all(['shell.html','styles.css','app.js']
+  const [shell,style,script,runtimeStatus] = await Promise.all(['shell.html','styles.css','app.js','runtime-status.js']
     .map(file=>fs.readFile(path.join(source,file),'utf8')));
   const norm = (value:string)=>value.replace(/\r\n?/g,'\n');
   const expected=norm(shell)
     .replace('__MECORD_STYLE__',norm(style).trim())
-    .replace('__MECORD_SCRIPT__',norm(script).trim())
+    .replace('__MECORD_SCRIPT__',norm(script).trim() + '\n' + norm(runtimeStatus).trim())
     .replaceAll('__MECORD_NONCE__','safe_nonce');
   const rendered=renderControlCenter('safe_nonce');
   assert.equal(rendered,expected);
