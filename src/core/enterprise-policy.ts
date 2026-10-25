@@ -100,6 +100,15 @@ export class EnterprisePolicyStore {
   }
 
   async narrow(base: PermissionProfile, contextInput: EnterpriseAuthorizationContext): Promise<EnterprisePermissionDecision> {
+    // A malformed parent ceiling cannot be intersected safely. In particular
+    // an unknown string or prototype key produces an undefined rank, and
+    // passing that value onward as maxRisk can accidentally disable the
+    // downstream policy's ceiling check.
+    if (base.maxRisk !== undefined && (
+      typeof base.maxRisk !== 'string' || !Object.hasOwn(RISK_ORDER, base.maxRisk)
+    )) {
+      throw new OperatorError('ENTERPRISE_AUTHORITY_INVALID', 'Parent risk ceiling must be a canonical risk value.');
+    }
     await this.#serial;
     const state = await this.#read();
     const policyDigest = enterprisePolicyDigest(state);
