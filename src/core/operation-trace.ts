@@ -142,6 +142,8 @@ export interface OperationTraceCoverage {
   requiredStages: OperationTraceStage[];
   missingStages: OperationTraceStage[];
   outOfOrderStages: OperationTraceStage[];
+  /** Invalid or cross-context lineage cannot certify stage coverage. */
+  invalidCausalTrace: boolean;
   terminalOutcome?: OperationTraceOutcome;
 }
 
@@ -167,6 +169,12 @@ export function evaluateOperationTraceCoverage(
     'COMPLETE'
   ];
   const ordered = events.slice().sort((a,b)=>a.at.localeCompare(b.at)||a.id.localeCompare(b.id));
+  const requests = ordered.filter((event) => event.stage === 'REQUEST');
+  const terminals = ordered.filter((event) => event.stage === 'COMPLETE');
+  const invalidCausalTrace = requests.length !== 1 || terminals.length > 1
+    || ordered[0] !== requests[0] || (terminals.length === 1 && ordered.at(-1) !== terminals[0])
+    || ordered.some((event) => event.executionContextDigest !== ordered[0]!.executionContextDigest)
+    || new Set(ordered.map((event) => event.id)).size !== ordered.length;
   const firstIndex = new Map<OperationTraceStage, number>();
   for (let i=0;i<ordered.length;i+=1) {
     const stage=ordered[i]!.stage;
@@ -195,10 +203,11 @@ export function evaluateOperationTraceCoverage(
   }
   return {
     traceId: ordered[0]!.traceId,
-    complete: missingStages.length===0 && outOfOrderStages.length===0,
+    complete: !invalidCausalTrace && missingStages.length===0 && outOfOrderStages.length===0,
     requiredStages,
     missingStages,
     outOfOrderStages:[...new Set(outOfOrderStages)],
+    invalidCausalTrace,
     ...(terminal ? { terminalOutcome: terminal.outcome } : {})
   };
 }
@@ -255,7 +264,7 @@ export function summarizeOperationSlo(eventsInput: OperationTraceEvent[]): Opera
     // even if COMPLETE claims success.
     const verifiedBeforeCompletion = Boolean(causal && complete?.outcome === 'OK' && verify?.outcome === 'OK'
       && Date.parse(verify.at) < Date.parse(complete.at)
-      && (!lastDispatch || Date.parse(lastDispatch.at) < Date.parse(verify.at)));
+      && lastDispatch !== undefined && Date.parse(lastDispatch.at) < Date.parse(verify.at));
     if (complete?.outcome === 'OK') completed += 1;
     if (rows.some((event) => event.outcome === 'BLOCKED')) blocked += 1;
     if (rows.some((event) => event.outcome === 'FAILED')) failed += 1;
