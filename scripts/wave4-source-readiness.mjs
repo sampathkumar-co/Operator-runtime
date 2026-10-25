@@ -40,7 +40,11 @@ export function evaluateWave4Readiness({ candidateSha, issues, parentState = 'op
     }
     const target = 'C' + String(i).padStart(2, '0');
     const checklist = [...issue.body.matchAll(CHECKBOX)];
-    const exact = checklist.filter(match => match[2].startsWith(target + '-'));
+    // Check every recognized task before counting: a foreign ID must not vanish
+    // from the 134-task release census simply because it belongs to another issue.
+    const foreign = checklist.find(match => !match[2].startsWith(target + '-'));
+    if (foreign) invalid('task ' + foreign[2] + ' is assigned outside ' + target + ' in issue #' + issue.number);
+    const exact = checklist;
     const expected = WORKSTREAM_TASK_COUNTS[i];
     const ids = new Set();
     for (const match of exact) {
