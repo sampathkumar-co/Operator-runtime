@@ -118,7 +118,10 @@ export class GitProvider implements CapabilityProvider {
     }, context);
     const output = inspected.output as { exitCode?: number | null; stdout?: string; stderr?: string } | undefined;
     if (!inspected.ok && output?.exitCode !== 1) {
-      return gitFailure(action, 'GIT_CONFIG_INSPECTION_FAILED', String(output?.stderr ?? inspected.error?.message ?? 'Unable to inspect Git content-filter configuration.').trim());
+      // Git stderr may contain repository paths, private file names or
+      // untrusted configuration text; do not reflect it to public tools.
+      return gitFailure(action, 'GIT_CONFIG_INSPECTION_FAILED',
+        'Git content-filter policy could not be safely inspected.');
     }
     const keys = String(output?.stdout ?? '').split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
     if (keys.length > 0) {
@@ -151,6 +154,9 @@ export function boundedGitDiff(result: ActionResult, input: Record<string, unkno
     };
   }
   const bytes = Buffer.from(String(raw?.stdout ?? ''), 'utf8');
+  if (offset > bytes.length) {
+    throw new OperatorError('GIT_INPUT_INVALID', 'Git diff offset exceeds available source bytes.');
+  }
   // Offsets count UTF-8 bytes. Cutting through a code point silently replaces
   // its bytes with U+FFFD, corrupting diffs and preventing exact reconstruction.
   const boundary = (index: number) =>
@@ -165,7 +171,7 @@ export function boundedGitDiff(result: ActionResult, input: Record<string, unkno
   const truncated = nextOffset < bytes.length || raw?.truncated === true;
   return {
     ...result,
-    output: { stdout: chunk.toString('utf8'), stderr: String(raw?.stderr ?? '').slice(0, 16_384), offset, returnedBytes: chunk.byteLength, truncated, ...(truncated ? { nextOffset } : {}) }
+    output: { stdout: chunk.toString('utf8'), stderr: String(raw?.stderr ?? '') ? 'GIT_STDERR_REDACTED' : '', offset, returnedBytes: chunk.byteLength, truncated, ...(truncated ? { nextOffset } : {}) }
   };
 }
 
@@ -217,6 +223,9 @@ export function structuredGitStatus(result: ActionResult, input: Record<string, 
     entries.push(entry);
   }
   const offset = boundedGitInteger(input.offset, 0, 0, 1_000_000);
+  if (offset > entries.length) {
+    throw new OperatorError('GIT_INPUT_INVALID', 'Git status offset exceeds available entries.');
+  }
   const maxBytes = boundedGitInteger(input.maxBytes, 64 * 1024, 1024, 128 * 1024);
   const page: Array<Record<string, unknown>> = [];
   let bytes = 2;
