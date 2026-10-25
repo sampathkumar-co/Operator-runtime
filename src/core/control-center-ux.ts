@@ -332,12 +332,17 @@ function recoveryItem(candidate: RecoveryCandidateInput): RecoveryCenterItem {
   }
 
   if (candidate.sideEffectState === 'known' && candidate.rollbackAvailable) {
+    // A rollback is another mutation: merely seeing an effect and an available
+    // undo implementation does not prove that the user wanted it reversed.
+    // Only failed independent verification may recommend owner-approved rollback.
     return {
       ...base,
-      disposition: 'REVERSIBLE',
-      recommendedAction: 'ROLLBACK',
-      requiresFreshApproval: true,
-      reason: 'A known side effect exists and a bounded rollback is available.'
+      disposition: 'BLOCKED',
+      recommendedAction: 'ESCALATE',
+      requiresFreshApproval: false,
+      reason: candidate.verificationStatus === 'passed'
+        ? 'Verification passed but reconciliation has not confirmed completion; do not undo a potentially successful task.'
+        : 'The effect exists but independent verification has not failed; investigate before authorizing rollback.'
     };
   }
 
