@@ -299,7 +299,9 @@ export class WindowsUiaProvider implements CapabilityProvider {
         ? error
         : new OperatorError('UIA_PROVIDER_FAILED', error instanceof Error ? error.message : String(error), { retryable: true });
       const ambiguousMutation = action.risk !== 'read'
-        && ['UIA_SIDECAR_TIMEOUT', 'UIA_SIDECAR_CLOSED', 'UIA_SIDECAR_EXITED', 'EXECUTION_ABORTED'].includes(op.code);
+        && ['UIA_SIDECAR_TIMEOUT', 'UIA_SIDECAR_CLOSED', 'UIA_SIDECAR_EXITED',
+          'UIA_SIDECAR_WRITE_FAILED', 'EXECUTION_ABORTED', 'UIA_OPERATION_FAILED',
+          'INPUT_AFTER_CAPTURE_FAILED', 'INPUT_AFTER_CAPTURE_INVALID'].includes(op.code);
       return {
         ok: false,
         capability: action.capability,
