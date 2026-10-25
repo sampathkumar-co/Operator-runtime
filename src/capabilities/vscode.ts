@@ -51,6 +51,7 @@ export class VsCodeProvider implements CapabilityProvider {
   async execute(action: ActionRequest): Promise<ActionResult> {
     const started = performance.now();
     try {
+      if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'VS Code provider does not support this capability.');
       await this.#assertDataDirOutsideProjects();
       if (action.capability === 'vscode.inspect') {
         const operation = String(action.input.operation ?? 'status');
