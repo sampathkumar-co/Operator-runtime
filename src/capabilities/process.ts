@@ -1199,7 +1199,11 @@ async function runProcess(executable: string, args: string[], cwd: string, timeo
 
 
 function requiredSessionId(value: unknown): string {
-  const sessionId = String(value ?? '').toLowerCase();
+  // Session authority is a literal identity, not a string-coercion target.
+  if (typeof value !== 'string') {
+    throw new OperatorError('PROCESS_INPUT_INVALID', 'sessionId must be a UUID created by terminal.session start.');
+  }
+  const sessionId = value.toLowerCase();
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(sessionId)) {
     throw new OperatorError('PROCESS_INPUT_INVALID', 'sessionId must be a UUID created by terminal.session start.');
   }
