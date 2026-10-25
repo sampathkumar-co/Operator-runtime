@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 export const WORKSTREAM_TASK_COUNTS = Object.freeze([9, 10, 10, 12, 10, 12, 12, 11, 13, 11, 11, 13]);
 const WAVE_STREAMS = Object.freeze([[0, 1], [2, 3, 4, 6], [5, 7], [8, 9, 10], [11]]);
 const SHA = /^[0-9a-f]{40}$/;
-const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const CANONICAL_REPOSITORY = 'sampathkumar-co/Operator-runtime';
 const CHECKBOX = /^- \[([ x])\] (C\d{2}-\d{2})\b/gm;
 const INDEPENDENT_GATES = Object.freeze([
   'three_lane_real_model_scoring',
@@ -111,8 +111,10 @@ async function fetchIssue(repository, number, token) {
 }
 
 export async function checkpointCurrentCheckout({ repository, token }) {
-  if (!REPOSITORY.test(repository ?? '') || typeof token !== 'string' || !token.trim()) {
-    invalid('read-only repo and GITHUB_TOKEN are required');
+  // GitHub issue IDs are only meaningful inside the canonical owner workboard.
+  // Do not accept a lookalike fork with 134 forged "complete" checkboxes.
+  if (repository !== CANONICAL_REPOSITORY || typeof token !== 'string' || !token.trim()) {
+    invalid('canonical read-only repository and GITHUB_TOKEN are required');
   }
   const cwd = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
   const candidateSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim().toLowerCase();
