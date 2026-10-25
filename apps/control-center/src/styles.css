@@ -10,3 +10,7 @@
 .supportGuide details[open] summary{border-bottom:1px solid #293442}
 .supportGuide details p{font-size:13px;line-height:1.65;color:#b6c2d1;overflow-wrap:anywhere;margin:11px 3px 14px}
 .supportGuide code{font-size:12px;overflow-wrap:anywhere}
+
+.safeExportLink{display:inline-block;margin-top:12px;border:1px solid #6889aa;border-radius:8px;padding:10px 14px;color:#dbeaff;background:#17263a;font-size:13px;text-decoration:none;font-weight:600}
+.safeExportLink:hover{border-color:#a4bfdf;background:#203249}
+.safeExportLink:focus-visible{outline:3px solid #b5d2ff;outline-offset:3px}

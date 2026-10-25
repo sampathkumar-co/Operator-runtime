@@ -29,6 +29,7 @@ import type { SessionApprovalStore } from './session-approval.ts';
 import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
 import { renderControlCenter } from './control-center.ts';
+import { buildRedactedControlCenterDiagnostics } from '../../../src/core/control-center-diagnostic-export.ts';
 import { ControlCenterSessions, browserUiRouteAllowed, controlCenterBrowserRequestAllowed } from './control-center-session.ts';
 import { resourceKeysForAction } from '../../../src/core/resource-identity.ts';
 import { capabilityRiskRule } from '../../../src/core/capability-policy.ts';
@@ -860,7 +861,7 @@ export function createLocalAgentServer(options: {
       return;
     }
 
-    if (pathname === '/v1/control-center/diagnostics' && req.method === 'GET') {
+    if ((pathname === '/v1/control-center/diagnostics' || pathname === '/v1/control-center/diagnostics/export') && req.method === 'GET') {
       const [runtime, emergency, local, peers, summaries, approvals] = await Promise.all([
         options.getRuntimeStatus ? options.getRuntimeStatus() : Promise.resolve({}),
         options.emergencyStop ? options.emergencyStop.status() : Promise.resolve({ version: 1, engaged: false }),
@@ -885,9 +886,7 @@ export function createLocalAgentServer(options: {
       if ((emergency as { engaged?: boolean }).engaged) issues.push({ code: 'EMERGENCY_STOP_ENGAGED', severity: 'critical', guidance: 'Review the stop reason and clear it only through local recovery authority.' });
       if (relayState === 'DEGRADED' || relayState === 'OFFLINE') issues.push({ code: 'RELAY_DEGRADED', severity: 'warning', guidance: 'Remote continuity is degraded; local runtime remains authoritative.' });
       if (approvalModel.counts.pending > 0) issues.push({ code: 'APPROVALS_PENDING', severity: 'info', guidance: 'Review pending effects in Approval Center.' });
-      send(res, 200, {
-        ok: true,
-        diagnostics: {
+      const diagnosticProjection = {
           schemaVersion: 1,
           service: 'operator-local-agent',
           productVersion: PRODUCT_VERSION,
@@ -904,8 +903,14 @@ export function createLocalAgentServer(options: {
           approvalCounts: approvalModel.counts,
           runtime,
           issues
-        }
-      });
+      };
+      if (pathname === '/v1/control-center/diagnostics/export') {
+        res.setHeader('content-disposition', 'attachment; filename="mecord-support-redacted.json"');
+        res.setHeader('referrer-policy', 'no-referrer');
+        send(res, 200, buildRedactedControlCenterDiagnostics(diagnosticProjection));
+      } else {
+        send(res, 200, { ok: true, diagnostics: diagnosticProjection });
+      }
       return;
     }
 
