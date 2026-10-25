@@ -51,6 +51,11 @@ function capabilityAllowed(capability: string, allowed: readonly string[]): bool
   return allowed.some((rule) => rule === capability || (rule.endsWith('.*') && capability.startsWith(rule.slice(0, -1))));
 }
 
+function isKnownRisk(value: unknown): value is ActionRisk {
+  return typeof value === 'string' && Object.hasOwn(RISK_ORDER, value) &&
+    Number.isSafeInteger(RISK_ORDER[value as ActionRisk]);
+}
+
 function pathWithin(child: string, root: string): boolean {
   const rel = path.relative(path.resolve(root), path.resolve(child));
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
@@ -162,8 +167,17 @@ export class AuthorityKernel {
       throw new PolicyError('AUTHORITY_ACTION_ID_INVALID', 'Capability token action IDs are invalid.');
     }
 
+    if ((permissions.maxRisk !== undefined && !isKnownRisk(permissions.maxRisk))
+      || (request.maxRisk !== undefined && !isKnownRisk(request.maxRisk))) {
+      throw new PolicyError('AUTHORITY_RISK_INVALID', 'Capability token risk must be an exact known canonical risk.');
+    }
     const parentMaxRisk = permissions.maxRisk ?? 'destructive';
     const requestedMaxRisk = request.maxRisk ?? parentMaxRisk;
+    // Object prototype names, typos and coercible values can otherwise yield
+    // an undefined risk rank, silently disabling the token's attenuation.
+    if (!isKnownRisk(parentMaxRisk) || !isKnownRisk(requestedMaxRisk)) {
+      throw new PolicyError('AUTHORITY_RISK_INVALID', 'Capability token risk must be an exact known canonical risk.');
+    }
     if (RISK_ORDER[requestedMaxRisk] > RISK_ORDER[parentMaxRisk]) {
       throw new PolicyError('AUTHORITY_RISK_ESCALATION', 'Capability token risk ceiling exceeds the parent authority.', {
         parentMaxRisk,
@@ -192,6 +206,10 @@ export class AuthorityKernel {
     const expected = this.#sign(token.claims);
     if (!safeEqualHex(token.mac, expected)) throw new PolicyError('AUTHORITY_TOKEN_TAMPERED', 'Capability token integrity check failed.');
 
+    if (!isKnownRisk(token.claims.maxRisk) ||
+        (permissions.maxRisk !== undefined && !isKnownRisk(permissions.maxRisk))) {
+      throw new PolicyError('AUTHORITY_TOKEN_INVALID', 'Capability token risk ceiling is invalid.');
+    }
     const now = this.#clock().getTime();
     const issuedAt = Date.parse(token.claims.issuedAt);
     const expiresAt = Date.parse(token.claims.expiresAt);
