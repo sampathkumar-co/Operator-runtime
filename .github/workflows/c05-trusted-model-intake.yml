@@ -1,0 +1,34 @@
+name: C05 Trusted Model Review to Task Queue
+
+on:
+  pull_request:
+    paths:
+      - 'src/core/trusted-reviewed-model-task-intake.ts'
+      - 'test/trusted-reviewed-model-task-intake.test.ts'
+      - '.github/workflows/c05-trusted-model-intake.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/core/trusted-reviewed-model-task-intake.ts'
+      - 'test/trusted-reviewed-model-task-intake.test.ts'
+      - '.github/workflows/c05-trusted-model-intake.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  principal-review-authority:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Test one-use reviewed task submission, freshness and no authority escalation
+        run: node --experimental-strip-types --test test/trusted-reviewed-model-task-intake.test.ts test/reviewed-model-goal.test.ts test/bounded-model-goal-inference.test.ts
+      - name: Disclose source integration scope
+        run: echo 'C05_PRODUCTION_INTAKE=NOT_WIRED;REAL_MODEL=NOT_RUN;USER_TASK_EXECUTION=NOT_RUN;NPM_UNCHANGED'
