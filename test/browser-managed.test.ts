@@ -316,3 +316,23 @@ test('managed browser emergency lifecycle still closes owned child when delegate
   await assert.rejects(provider.emergencyStop(), /delegate close failed/);
   assert.equal(launcherClosed, true);
 });
+
+test('C03 managed browser discovery refuses oversized forged CDP version responses', async (t) => {
+  const profileDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-cdp-oversized-'));
+  t.after(() => fs.rm(profileDir, { recursive: true, force: true }));
+  const endpoint = await listen(t, (req, res) => {
+    if (req.url === '/json/version') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        ...chromiumVersionResponse(req),
+        padded: 'x'.repeat(1024 * 1024 + 100)
+      }));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  const port = Number(new URL(endpoint).port);
+  await fs.writeFile(path.join(profileDir, 'DevToolsActivePort'),
+    `${port}\n/devtools/browser/test-browser\n`);
+  assert.equal(await discoverDevToolsEndpoint([profileDir]), undefined);
+});
