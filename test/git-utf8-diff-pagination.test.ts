@@ -118,7 +118,7 @@ test('C06 a forged offset beyond available Git source cannot certify an empty te
     (error: any) => error?.code === 'GIT_INPUT_INVALID'
   );
   const status = { ...result(''), capability: 'git.status', output: {
-    stdout: '## main\\0?? file.txt\\0', truncated: false
+    stdout: '## main\0?? file.txt\0', truncated: false
   } };
   assert.throws(
     () => structuredGitStatus(status, { offset: 2 }),
