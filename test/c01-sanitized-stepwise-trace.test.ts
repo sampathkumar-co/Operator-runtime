@@ -98,3 +98,15 @@ test('C01 symlinked output directory cannot receive evaluation trace',async t=>{
  catch(e){if(['EPERM','EACCES'].includes((e as NodeJS.ErrnoException).code??''))return t.skip('No symlink privilege');throw e;}
  await assert.rejects(persistSanitizedEvaluationTrace({...fixture(),dir:linked}),/not a symlink/);
 });
+
+test('C01 rejects coercible object digests before any protected data can enter JSONL',()=>{
+  const poison = { toString(){ return h('a'); }, protectedReceipt:hidden.receipt, token:hidden.secret };
+  const cases=[
+    {...fixture(),sourceCommit:{toString(){return source;},protectedReceipt:hidden.receipt}},
+    {...fixture(),suiteDigest:poison},
+    {...fixture(),steps:[{...fixture().steps[0],evidenceDigest:poison}]}
+  ];
+  for(const bad of cases){
+    assert.throws(()=>createSanitizedEvaluationTrace(bad),/C01_TRACE_INVALID/);
+  }
+});
