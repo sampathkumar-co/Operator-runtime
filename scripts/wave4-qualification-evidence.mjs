@@ -147,7 +147,9 @@ export async function buildWave4QualificationEvidence({ candidateSha, evidenceRo
     fail: gates.filter(gate => gate.status === 'FAIL').length,
     notRun: gates.filter(gate => gate.status === 'NOT_RUN').length
   };
-  const qualificationStatus = counts.fail ? 'FAILED' : counts.notRun ? 'INCOMPLETE' : 'QUALIFIED';
+  // Supplied SHA-matching artifacts attest bytes, not issuer authority or independent gate approval.
+  // A caller may self-declare every gate PASS; never elevate that to QUALIFIED.
+  const qualificationStatus = counts.fail ? 'FAILED' : counts.notRun ? 'INCOMPLETE' : 'ALL_GATES_DECLARED_PASS_UNVERIFIED';
   const manifest = {
     schemaVersion: 1,
     candidateSha,
