@@ -230,12 +230,30 @@ export class AgentKernel {
       if (preDispatchIntentFailure) return preDispatchIntentFailure;
       if (executionSignal?.aborted) return abortedBeforeDispatch(action);
 
+      // A lease acquired before provider ranking is not an authority grant
+      // for dispatch if its owner/generation changed while ranking occurred.
+      const assertDispatchLease = async () => {
+        try { await lease.assertOwned(); }
+        catch {
+          throw new OperatorError('RESOURCE_LEASE_LOST',
+            'The resource lease changed before provider dispatch; no effect may be issued.',
+            { retryable: false, details: { executionPhase: 'pre_dispatch', sideEffectState: 'none' } });
+        }
+      };
       let dispatched = false;
       let result = await this.#runtime.execute(action, permissions, {
         ...context,
         ...(executionSignal ? { signal: executionSignal } : {}),
         onProviderDispatch: async (providerName) => {
+          await assertDispatchLease();
+          const changedIntent = await this.#intentFailure(action, context.recoveryMode);
+          if (changedIntent) {
+            throw new OperatorError(changedIntent.error?.code ?? 'INTENT_STALE',
+              'Task intent changed before provider dispatch; re-observe under current authority.',
+              { retryable: false, details: { executionPhase: 'pre_dispatch', sideEffectState: 'none' } });
+          }
           await this.#beforeProviderDispatch?.(action, providerName, permissions);
+          await assertDispatchLease();
           if (action.risk !== 'read') {
             await this.#leases.quarantine(action.id, resourceKeys);
             quarantineArmed = true;
