@@ -24,6 +24,8 @@ export interface OperationLatencyBreakdown {
   terminalTraces: number;
   incompleteTraces: number;
   invalidCausalTraces: number;
+  // Zero completed samples is "not observed", never a measured 0ms latency.
+  endToEndMeasurement: 'MEASURED' | 'NOT_OBSERVED';
   p50EndToEndMs: number;
   p95EndToEndMs: number;
   p99EndToEndMs: number;
@@ -116,6 +118,7 @@ export function summarizeOperationStageLatency(eventsInput: OperationTraceEvent[
   return {
     traces: grouped.size, terminalTraces: fullDurations.length,
     incompleteTraces, invalidCausalTraces,
+    endToEndMeasurement: fullDurations.length ? 'MEASURED' : 'NOT_OBSERVED',
     p50EndToEndMs: percentile(fullDurations, .5),
     p95EndToEndMs: percentile(fullDurations, .95),
     p99EndToEndMs: percentile(fullDurations, .99),
