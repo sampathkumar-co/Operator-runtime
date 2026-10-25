@@ -175,12 +175,13 @@ export async function recordWave0Bundle({ inputPath, outputDirectory, sourceComm
   // Never overwrite evidence from a distinct prior run, even when IDs happen to match.
   const destination = path.join(outputDirectory, basename);
   await fs.mkdir(destination);
-  await Promise.all([
-    fs.writeFile(path.join(destination, 'steps.jsonl'), bundle.traceJsonl, { flag: 'wx', mode: 0o600 }),
-    fs.writeFile(path.join(destination, 'scorecards.jsonl'), bundle.scorecardJsonl, { flag: 'wx', mode: 0o600 }),
-    fs.writeFile(path.join(destination, 'manifest.json'), JSON.stringify(bundle.manifest, null, 2) + '\n',
-      { flag: 'wx', mode: 0o600 })
-  ]);
+  // Publish the manifest last: an interrupted record must never expose a
+  // completed evidence manifest while a steps/scorecards file is still missing.
+  // The exclusive destination mkdir preserves all existing hashed bundles.
+  await fs.writeFile(path.join(destination, 'steps.jsonl'), bundle.traceJsonl, { flag: 'wx', mode: 0o600 });
+  await fs.writeFile(path.join(destination, 'scorecards.jsonl'), bundle.scorecardJsonl, { flag: 'wx', mode: 0o600 });
+  await fs.writeFile(path.join(destination, 'manifest.json'), JSON.stringify(bundle.manifest, null, 2) + '\n',
+    { flag: 'wx', mode: 0o600 });
   return { directory: destination, ...bundle.manifest };
 }
 
