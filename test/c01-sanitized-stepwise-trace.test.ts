@@ -16,6 +16,7 @@ const run={
   model:'local-model',provider:'mecord',claimedSuccess:false,verifiedSuccess:false,
   failureStage:'verifier',
   runnerDigest:h('b'),modelConfigDigest:h('c'),environmentDigest:h('d'),
+  promptDigest:h('1'),budgetDigest:h('2'),
   independentOracleDigest:h('e'),resultEvidenceDigest:h('f'),
   latencyMs:150,costMicros:45,humanInterventions:0,unauthorizedEffects:0
 };

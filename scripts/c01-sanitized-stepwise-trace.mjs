@@ -83,6 +83,7 @@ export function createSanitizedEvaluationTrace(input) {
    runnerDigest:run.runnerDigest,
    environmentDigest:run.environmentDigest,
    modelConfigDigest:run.modelConfigDigest,
+   ...(run.lane==='C'?{promptDigest:run.promptDigest,budgetDigest:run.budgetDigest}:{}),
    independentOracleDigest:run.independentOracleDigest
  };
  const lines=[JSON.stringify(header)];
