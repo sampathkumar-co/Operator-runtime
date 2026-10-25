@@ -30,7 +30,7 @@ const PHYSICAL_INPUT_OPERATIONS = ['move', 'click', 'double_click', 'drag', 'scr
 // Only runtime-defined or vetted native protocol error codes may cross the
  // public boundary. A regex allows native/page-owned secret text in an error code.
 const PUBLIC_UIA_ERROR_CODES = new Set([
-  'EXECUTION_ABORTED', 'UIA_PROVIDER_FAILED', 'UIA_OPERATION_FAILED',
+  'UNSUPPORTED_ACTION', 'EXECUTION_ABORTED', 'UIA_PROVIDER_FAILED', 'UIA_OPERATION_FAILED',
   'UIA_SIDECAR_CLOSED', 'UIA_SIDECAR_EXITED', 'UIA_SIDECAR_TIMEOUT',
   'UIA_SIDECAR_UNAVAILABLE', 'UIA_SIDECAR_WRITE_FAILED',
   'UIA_SIDECAR_START_FAILED', 'UIA_SIDECAR_START_TIMEOUT',
