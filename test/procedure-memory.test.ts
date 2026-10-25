@@ -11,7 +11,7 @@ async function tempDir(t: test.TestContext): Promise<string> {
   return dir;
 }
 
-test('stage5 reuses only active unexpired procedures whose verified assumptions still match', async (t) => {
+test('C07 procedure reuse requires independently repeated success with matching current assumptions', async (t) => {
   const state = await tempDir(t);
   const store = new ProcedureMemoryStore(state);
   const node = assumptionFingerprint({ runtime: 'node-22', lock: 'abc' });
@@ -30,6 +30,30 @@ test('stage5 reuses only active unexpired procedures whose verified assumptions 
     verificationDigest: 'a'.repeat(64),
     verifierEvidenceDigest: 'b'.repeat(64)
   });
+
+  const firstSuccessOnly = await store.findReusable({
+    objectiveKind: 'deployment',
+    scopeKey: 'project:shop',
+    assumptions: [{ key: 'runtime', fingerprint: node }, { key: 'git', fingerprint: git }]
+  });
+  assert.equal(firstSuccessOnly.length, 0, 'one verified capture must remain a non-reusable candidate');
+
+  const promoted = await store.recordVerified({
+    key: 'deploy-next',
+    title: 'Deploy verified Next app',
+    objectiveKind: 'deployment',
+    scopeKey: 'project:shop',
+    steps: [
+      { capability: 'project.command.run', risk: 'read', summary: 'Run trusted build.' },
+      { capability: 'project.transaction.run', risk: 'destructive', summary: 'Run bounded release transaction.' }
+    ],
+    assumptions: [{ key: 'runtime', fingerprint: node }, { key: 'git', fingerprint: git }],
+    resources: ['repo:shop'],
+    verificationDigest: 'c'.repeat(64),
+    verifierEvidenceDigest: 'd'.repeat(64)
+  });
+  assert.equal(promoted.id, procedure.id);
+  assert.equal(promoted.verifiedRuns, 2);
 
   const reusable = await store.findReusable({
     objectiveKind: 'deployment',
@@ -131,6 +155,16 @@ test('stage5 required capabilities filter procedure selection without granting a
     verificationDigest: '5'.repeat(64),
     verifierEvidenceDigest: '6'.repeat(64)
   });
+  await store.recordVerified({
+    key: 'inspect-only',
+    title: 'Inspect',
+    objectiveKind: 'maintenance',
+    scopeKey: 'project:m',
+    steps: [{ capability: 'file.read', risk: 'read', summary: 'Read.' }],
+    assumptions: [],
+    verificationDigest: '7'.repeat(64),
+    verifierEvidenceDigest: '8'.repeat(64)
+  });
   assert.equal((await store.findReusable({
     objectiveKind: 'maintenance', scopeKey: 'project:m', assumptions: [], requiredCapabilities: ['file.read']
   })).length, 1);
@@ -158,12 +192,23 @@ test('stage5 verified procedure and outcome receipts are idempotent across retry
   assert.equal(replay.id, first.id);
   assert.equal(replay.version, 1);
   assert.equal(replay.verifiedRuns, 1);
+  assert.equal((await store.findReusable({
+    objectiveKind: 'maintenance', scopeKey: 'project:idempotent', assumptions: []
+  })).length, 0, 'replaying the same proof must not promote procedure reuse');
+
+  await store.recordOutcome(first.id, 'verified');
+  assert.equal((await store.findReusable({
+    objectiveKind: 'maintenance', scopeKey: 'project:idempotent', assumptions: []
+  })).length, 0, 'an unreceipted legacy counter must not promote procedure reuse');
 
   const receipt = '9'.repeat(64);
   await store.recordOutcome(first.id, 'verified', receipt);
   const duplicated = await store.recordOutcome(first.id, 'verified', receipt);
-  assert.equal(duplicated.verifiedRuns, 2);
+  assert.equal(duplicated.verifiedRuns, 3);
   assert.deepEqual(duplicated.outcomeReceipts, [receipt]);
+  assert.equal((await store.findReusable({
+    objectiveKind: 'maintenance', scopeKey: 'project:idempotent', assumptions: []
+  })).length, 1, 'a distinct durable verified outcome receipt unlocks reuse');
 });
 
 test('stage5 procedure receipt saturation refuses new receipts while preserving old replay identity across restart', async (t) => {

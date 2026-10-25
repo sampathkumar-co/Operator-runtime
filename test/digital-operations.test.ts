@@ -83,6 +83,9 @@ test('stage10 binds preconditions, verified procedure memory, team verifier and 
     verificationDigest: 'b'.repeat(64),
     verifierEvidenceDigest: 'c'.repeat(64)
   });
+  // Seed a second independently receipted historical success: a single
+  // capture is intentionally not eligible for planning reuse.
+  await procedures.recordOutcome(procedure.id, 'verified', 'd'.repeat(64));
 
   const operation = await ops.submit({
     objective: 'Restore checkout and verify it',
@@ -114,7 +117,7 @@ test('stage10 binds preconditions, verified procedure memory, team verifier and 
   assert.equal(verified.outcomeRecorded, true);
 
   const remembered = (await procedures.list()).find((item) => item.id === procedure.id)!;
-  assert.equal(remembered.verifiedRuns, 2);
+  assert.equal(remembered.verifiedRuns, 3);
   const learned = await optimizer.inspect();
   assert.ok(learned.some((item) => item.strategy === 'procedure:' + procedure.id && item.verified === 1));
 });
@@ -537,6 +540,7 @@ test('stage10 final outcome replay after a crash does not double-learn or double
     verificationDigest: 'a'.repeat(64),
     verifierEvidenceDigest: 'b'.repeat(64)
   });
+  await procedures.recordOutcome(procedure.id, 'verified', 'c'.repeat(64));
   await world.observe({
     entity: { key: 'service:retry-learning', type: 'service', scopeKey: scope, label: 'Retry service' },
     source: 'trusted-check', domain: 'application', evidenceDigest: 'c'.repeat(64),
@@ -563,7 +567,7 @@ test('stage10 final outcome replay after a crash does not double-learn or double
 
   const procedureAfterFirst = (await procedures.list()).find((item) => item.id === procedure.id)!;
   const optimizerAfterFirst = (await optimizer.inspect()).find((item) => item.strategy === 'procedure:' + procedure.id)!;
-  assert.equal(procedureAfterFirst.verifiedRuns, 2);
+  assert.equal(procedureAfterFirst.verifiedRuns, 3);
   assert.equal(optimizerAfterFirst.verified, 1);
 
   const operationFile = path.join(state, 'digital-operations.json');
@@ -576,7 +580,7 @@ test('stage10 final outcome replay after a crash does not double-learn or double
   assert.equal(replay.outcomeRecorded, true);
   const procedureAfterReplay = (await procedures.list()).find((item) => item.id === procedure.id)!;
   const optimizerAfterReplay = (await optimizer.inspect()).find((item) => item.strategy === 'procedure:' + procedure.id)!;
-  assert.equal(procedureAfterReplay.verifiedRuns, 2);
+  assert.equal(procedureAfterReplay.verifiedRuns, 3);
   assert.equal(optimizerAfterReplay.verified, 1);
   assert.equal(optimizerAfterReplay.samples, 1);
 });
