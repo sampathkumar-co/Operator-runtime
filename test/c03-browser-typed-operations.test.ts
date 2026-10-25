@@ -1,0 +1,57 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { BrowserCdpInspectProvider } from '../src/capabilities/browser-cdp.ts';
+import { validateNavigationUrl } from '../src/capabilities/browser-cdp-page.ts';
+
+test('C03 browser URL validation never stringifies forged array or object destinations', () => {
+  const good = validateNavigationUrl('https://example.com/form?mode=edit#step-2');
+  assert.equal(good, 'https://example.com/form?mode=edit#step-2');
+  let sideEffects = 0;
+  const hostile = { toString() { sideEffects += 1; return 'https://example.com/'; } };
+  for(const bad of [
+    ['https://example.com/'], hostile, 42, true, null, undefined,
+    'https://example.com/' + String.fromCharCode(0),
+    'https://example.com/' + String.fromCharCode(10),
+    'https://example.com/' + String.fromCharCode(13),
+    'https://example.com/' + 'x'.repeat(4096)
+  ]) {
+    assert.throws(() => validateNavigationUrl(bad), (error:any) => error?.code === 'INVALID_URL');
+  }
+  assert.equal(sideEffects,0);
+});
+
+test('C03 rejects malformed browser operations before contacting any CDP endpoint', async () => {
+  const provider = new BrowserCdpInspectProvider('http://127.0.0.1:65534');
+  const provenance = { kind: 'runtime' as const };
+  const cases: Array<{ capability: string; input: Record<string,unknown>; error: string }> = [
+    { capability:'browser.inspect', input:{targetId:['tab1']}, error:'INVALID_BROWSER_TARGET' },
+    { capability:'browser.verify', input:{targetId:['tab1'],expect:{exists:true}}, error:'INVALID_BROWSER_TARGET' },
+    { capability:'browser.navigate', input:{url:['https://example.com/']}, error:'INVALID_URL' },
+    { capability:'browser.navigate', input:{url:'https://example.com/',newTab:'true'}, error:'INVALID_BROWSER_TAB_MODE' },
+    { capability:'browser.navigate', input:{url:'https://example.com/',newTab:true,targetId:'tab1'}, error:'INVALID_BROWSER_TAB_MODE' },
+    { capability:'browser.navigate', input:{url:'https://example.com/',targetId:['tab1']}, error:'INVALID_BROWSER_TARGET' },
+    { capability:'browser.tab.close', input:{targetId:['tab1']}, error:'INVALID_BROWSER_TARGET' },
+    { capability:'browser.tab.focus', input:{targetId:{value:'tab1'}}, error:'INVALID_BROWSER_TARGET' },
+    { capability:'browser.interact', input:{targetId:['tab1'],operation:'click',target:{ref:'b-1'}}, error:'INVALID_BROWSER_TARGET' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:['click'],target:{ref:'b-1'}}, error:'INVALID_BROWSER_OPERATION' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'scroll',target:{ref:'b-1'},deltaX:'0',deltaY:100}, error:'INVALID_BROWSER_SCROLL' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'drag',target:{ref:'b-1'},deltaX:[50],deltaY:0}, error:'INVALID_BROWSER_DRAG' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'click_relative',target:{ref:'b-1'},xRatio:'0.25',yRatio:0.3}, error:'INVALID_BROWSER_POINT' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'click_relative',target:{ref:'b-1'},xPx:true,yPx:40}, error:'INVALID_BROWSER_POINT' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'keyboard_text',target:{ref:'b-1'},value:['hello']}, error:'INVALID_BROWSER_TEXT' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'select_date',target:{ref:'b-1'},value:['2026-10-25']}, error:'INVALID_BROWSER_DATE' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'format_text',target:{ref:'b-1'},value:['bold']}, error:'INVALID_BROWSER_FORMAT' }
+  ];
+  try {
+    for (const [index, entry] of cases.entries()) {
+      const result = await provider.execute({
+        id:'pre-dispatch-invalid-'+index, capability:entry.capability,
+        risk:entry.capability === 'browser.inspect' || entry.capability === 'browser.verify' ? 'read' : 'external',
+        input:entry.input, provenance
+      } as any);
+      assert.equal(result.ok, false, entry.capability+' '+JSON.stringify(entry.input));
+      assert.equal(result.error?.code, entry.error, entry.capability+' '+JSON.stringify(entry.input));
+      assert.notEqual(result.error?.code,'ECONNREFUSED','input validation must precede CDP');
+    }
+  } finally { provider.close(); }
+});
