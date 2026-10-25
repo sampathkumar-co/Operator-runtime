@@ -232,6 +232,9 @@ export function createLocalAgentServer(options: {
     }
     const teamActions = abortTeamActions(() => true);
     const taskIds = options.taskOrchestrator?.emergencyStopActive() ?? [];
+    // Pending model proposals are not execution authority and must never
+    // outlive an emergency Stop then become executable after its clearance.
+    options.modelTaskIntake?.clear();
     clearApprovalWaiters();
     return { teamActions, taskIds };
   };
