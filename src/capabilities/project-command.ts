@@ -123,6 +123,7 @@ export class ProjectCommandProvider implements CapabilityProvider {
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
+      if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Project command provider does not support this capability.');
       const projectRoot = await this.#scope.resolveExisting(String(action.input.path ?? action.input.cwd ?? ''));
       const registry = await this.#readRegistry();
       const project = await this.#matchProject(registry, projectRoot);
