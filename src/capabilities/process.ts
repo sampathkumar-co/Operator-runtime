@@ -122,6 +122,9 @@ export class ProcessProvider implements CapabilityProvider {
   resolveRisk(action: ActionRequest): ActionRisk {
     if (action.capability !== 'terminal.session') throw new OperatorError('CAPABILITY_RISK_UNRESOLVED', 'Process dynamic risk applies only to terminal.session.');
     const operation = action.input.operation;
+    if (typeof operation !== 'string') {
+      throw new OperatorError('PROCESS_INPUT_INVALID', 'terminal.session operation must be an exact literal string.');
+    }
     if (operation === 'list' || operation === 'read') return 'read';
     if (['start', 'write', 'terminate'].includes(operation)) return 'destructive';
     throw new OperatorError('PROCESS_INPUT_INVALID', 'terminal.session operation must be start, list, read, write, or terminate.');
