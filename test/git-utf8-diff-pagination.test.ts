@@ -66,7 +66,7 @@ test('C06 incomplete subprocess diff cannot masquerade as a paginated complete r
 
 test('C06 a truncated status subprocess cannot falsely declare success or paginate forever', () => {
   const incomplete = { ...result(''), capability: 'git.status', output: {
-    stdout: '## main\\0?? partial', truncated: true, stderr: 'sensitive data'
+    stdout: '## main\0?? partial', truncated: true, stderr: 'sensitive data'
   } };
   for (const offset of [0, 1, 1000]) {
     const answer = structuredGitStatus(incomplete, { offset, maxBytes: 1024 });
@@ -84,7 +84,7 @@ test('C06 a truncated status subprocess cannot falsely declare success or pagina
 test('C06 an oversized status record cannot return a non-progressing page cursor', () => {
   const longName = 'x'.repeat(3000);
   const source = { ...result(''), capability: 'git.status', output: {
-    stdout: '## main\\0?? ' + longName + '\\0', truncated: false
+    stdout: '## main\0?? ' + longName + '\0', truncated: false
   } };
   const answer = structuredGitStatus(source, { offset: 0, maxBytes: 1024 });
   assert.equal(answer.ok, false);
