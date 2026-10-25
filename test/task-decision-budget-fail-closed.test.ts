@@ -60,3 +60,18 @@ test('normal finite task budgets retain their prior accounting', () => {
   assert.deepEqual(budget.environmentActions, { used: 1, limit: 3, remaining: 2 });
   assert.deepEqual(budget.plannerIterations, { used: 1, limit: 12, remaining: 11 });
 });
+
+test('C05 fractional or unsafe persisted usage never rounds down into extra model or action budget', () => {
+  for (const field of ['plannerIterations', 'dispatchedActions', 'preDispatchReobserves'] as const) {
+    for (const value of [0.5, 1.75, Number.MAX_SAFE_INTEGER + 1]) {
+      const task = execution();
+      task[field] = value;
+      const budget = taskDecisionBudget(task, 1000);
+      const dimension = field === 'plannerIterations' ? budget.plannerIterations
+        : field === 'dispatchedActions' ? budget.environmentActions : budget.reobserves;
+      assert.equal(dimension.remaining, 0, `${field}=${value}`);
+      assert.equal(dimension.used, dimension.limit);
+      assert.ok(decisionBudgetExhaustion(budget), `${field}=${value}`);
+    }
+  }
+});
