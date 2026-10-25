@@ -1,6 +1,7 @@
 import os from 'node:os';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
+import { OperatorError } from '../core/errors.ts';
 
 const SCORE: CapabilityScore = {
   reliability: 1,
