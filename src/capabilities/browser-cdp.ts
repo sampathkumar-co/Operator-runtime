@@ -597,6 +597,39 @@ export class BrowserCdpProvider implements CapabilityProvider {
       throw new OperatorError('INVALID_BROWSER_POINT', 'click_relative requires an observed ref and exactly one bounded coordinate pair: xRatio/yRatio in [0,1] or non-negative xPx/yPx within 2000 CSS pixels.');
     }
 
+    // Validate every key/range/download parameter before establishing CDP
+    // sessions or evaluating a page. Object/array coercion must never generate
+    // an authorized keyboard gesture or change the download accounting window.
+    if (action.input.expectDownload !== undefined && typeof action.input.expectDownload !== 'boolean') {
+      throw new OperatorError('INVALID_DOWNLOAD_INTERACTION', 'expectDownload must be an exact Boolean.');
+    }
+    if (action.input.downloadTimeoutMs !== undefined &&
+        (typeof action.input.downloadTimeoutMs !== 'number' ||
+         !Number.isSafeInteger(action.input.downloadTimeoutMs) ||
+         action.input.downloadTimeoutMs < 1_000 || action.input.downloadTimeoutMs > 600_000)) {
+      throw new OperatorError('INVALID_DOWNLOAD_TIMEOUT', 'downloadTimeoutMs must be an exact integer from 1000 to 600000.');
+    }
+    if (operation === 'key_press' &&
+        (typeof action.input.key !== 'string' || !action.input.key.trim() ||
+         action.input.key.length > 64 || action.input.key.includes('\0'))) {
+      throw new OperatorError('INVALID_BROWSER_KEY', 'key_press requires an exact bounded key string.');
+    }
+    if (operation === 'hotkey' &&
+        (!Array.isArray(action.input.keys) || action.input.keys.length < 1 ||
+         action.input.keys.length > 4 ||
+         action.input.keys.some(key => typeof key !== 'string' || !key.trim() ||
+           key.length > 64 || key.includes('\0')))) {
+      throw new OperatorError('INVALID_BROWSER_HOTKEY', 'hotkey requires 1-4 exact bounded key names.');
+    }
+    if (operation === 'select_text_range' &&
+        (typeof action.input.start !== 'number' ||
+         typeof action.input.end !== 'number' ||
+         !Number.isSafeInteger(action.input.start) ||
+         !Number.isSafeInteger(action.input.end) ||
+         action.input.start < 0 || action.input.end < action.input.start ||
+         action.input.end > 1_000_000)) {
+      throw new OperatorError('INVALID_BROWSER_TEXT_RANGE', 'Text range must use 0-based bounded exact integers, start <= end.');
+    }
     const tabs = await this.#listTargets(signal);
     const target = requireTarget(tabs, targetId);
     const session = this.#sessions.get(target);
@@ -612,7 +645,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
         const frameIds = collectFrameIds(frameTree.frameTree);
         if (frameIds.size === 0) throw new OperatorError('BROWSER_DOWNLOAD_CORRELATION_UNAVAILABLE', 'The initiating target did not expose a frame identity for download correlation.');
         download = await this.#prepareDownload(
-          Math.min(Math.max(Number(action.input.downloadTimeoutMs ?? 30_000), 1_000), 10 * 60_000),
+          (action.input.downloadTimeoutMs as number | undefined) ?? 30_000,
           targetId,
           frameIds,
           signal
@@ -624,13 +657,13 @@ export class BrowserCdpProvider implements CapabilityProvider {
         target: targetSpec,
         ...(toTargetSpec ? { toTarget: toTargetSpec } : {}),
         value: action.input.value ?? null,
-        ...(operation === 'format_text' ? { scope: String(action.input.scope ?? 'all') } : {}),
+        ...(operation === 'format_text' ? { scope: (action.input.scope as string | undefined) ?? 'all' } : {}),
         ...(deltaOperation ? { deltaX, deltaY } : {}),
         ...(operation === 'click_relative' && hasRatioPoint ? { xRatio, yRatio } : {}),
         ...(operation === 'click_relative' && hasPixelPoint ? { xPx, yPx } : {}),
-        ...(operation === 'key_press' ? { key: String(action.input.key ?? '') } : {}),
-        ...(operation === 'hotkey' ? { keys: Array.isArray(action.input.keys) ? action.input.keys.map(String) : [] } : {}),
-        ...(operation === 'select_text_range' ? { start: Number(action.input.start), end: Number(action.input.end) } : {})
+        ...(operation === 'key_press' ? { key: action.input.key as string } : {}),
+        ...(operation === 'hotkey' ? { keys: action.input.keys as string[] } : {}),
+        ...(operation === 'select_text_range' ? { start: action.input.start as number, end: action.input.end as number } : {})
       }, signal);
       const value = interaction.value;
       if (value.ok !== true) {
