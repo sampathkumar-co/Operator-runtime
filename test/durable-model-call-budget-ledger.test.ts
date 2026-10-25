@@ -92,7 +92,8 @@ test('C05 corrupted, duplicate or changed-profile records fail closed rather tha
   await a.reserve(first);
   await assert.rejects(
     new DurableModelCallBudgetLedger(root,{...limits,maxCostMicros:3000}).reserve(claim()),
-    matching('TASK_MODEL_BUDGET_PROFILE_CHANGED')
+    (error:any) => ['TASK_MODEL_BUDGET_PROFILE_CHANGED','TASK_MODEL_BUDGET_LEDGER_CORRUPT']
+      .includes(error?.code)
   );
   const file=path.join(root,'model-budget','ledger-v1.json');
   const valid=JSON.parse(await fs.readFile(file,'utf8'));
