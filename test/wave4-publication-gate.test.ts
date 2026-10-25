@@ -39,12 +39,15 @@ function verify(input: any = {}) {
 test('C11 requires all 134 accepted source checklist items before any owner assertion is considered', () => {
   for (const candidate of [
     { ...readiness, sourceChecklistPending: 1, sourceChecklistAccepted: 133 },
-    { ...readiness, candidateSha: 'b'.repeat(40) },
     { ...readiness, totalTasks: 133 }
   ]) {
     assert.throws(() => verify({ readiness: candidate }),
       /full source workboard/);
   }
+  // The checklist is complete but the signing decision names a different SHA:
+  // this must be rejected by the *separate* exact-candidate binding.
+  assert.throws(() => verify({ readiness: { ...readiness, candidateSha: 'b'.repeat(40) } }),
+    /owner release approval does not match exact source/);
 });
 test('C11 exact-SHA one-day Ed25519 signed owner release claim can be authenticated but not replay external proofs', () => {
   const result = verify();
