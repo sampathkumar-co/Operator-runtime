@@ -31,10 +31,13 @@ test('operation trace is append-only and computes verified SLOs without raw payl
     attributes: { capability: 'file.read' }
   };
   await store.append({ ...common, stage: 'REQUEST', outcome: 'OK', at: '2026-10-06T00:00:00.000Z' });
+  // Verified success must be causally downstream from an actual dispatch,
+  // even for read-only operations. A VERIFY label alone is not execution proof.
+  await store.append({ ...common, stage: 'DISPATCH', outcome: 'OK', at: '2026-10-06T00:00:00.500Z' });
   await store.append({ ...common, stage: 'VERIFY', outcome: 'OK', at: '2026-10-06T00:00:01.000Z' });
   await store.append({ ...common, stage: 'COMPLETE', outcome: 'OK', at: '2026-10-06T00:00:02.000Z' });
   const events = await store.list({ traceId: 'trace-1' });
-  assert.equal(events.length, 3);
+  assert.equal(events.length, 4);
   const summary = summarizeOperationSlo(events);
   assert.equal(summary.traces, 1);
   assert.equal(summary.verified, 1);
