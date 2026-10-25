@@ -10,6 +10,11 @@ test('C00 inventories every canonical operation and registered provider without 
   assert.equal(report.operations.length, Object.keys(CAPABILITY_RISK_RULES).length);
   assert.ok(report.providerRegistrationCount >= 15);
   assert.equal(report.providerRegistration.length, report.providerRegistrationCount);
+  assert.ok(report.sourceDeclaredProviderClasses.length >= report.providerRegistrationCount);
+  assert.ok(report.sourceDeclaredProviderClasses.some(p => p.className === 'PerceptionProvider'
+    && p.presenceInMinimalRuntime === 'SOURCE_DECLARED_BUT_NOT_REGISTERED_WITH_MINIMAL_CONFIG'));
+  assert.ok(report.sourceDeclaredProviderClasses.some(p => p.className === 'WorkspaceEditTransactionProvider'
+    && p.presenceInMinimalRuntime === 'SOURCE_DECLARED_BUT_NOT_REGISTERED_WITH_MINIMAL_CONFIG'));
   assert.ok(report.scannedTestFileCount > 100);
   assert.equal(new Set(report.operations.map(item => item.capability)).size, report.operations.length);
   assert.ok(report.operations.every(item => item.perOperationOutputVerification === 'NOT_CERTIFIED_BY_SOURCE_INVENTORY'
