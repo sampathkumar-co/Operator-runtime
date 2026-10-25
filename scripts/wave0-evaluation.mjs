@@ -63,6 +63,13 @@ export function validateWave0Record(record, sourceCommit) {
   if (lane === 'A' && (record.model === 'scripted' || record.model === 'none')) fail('Lane A requires a named model, not scripted fixture decisions');
   if (!record.verifiedSuccess && record.failureStage === 'none') fail('failed outcome requires explicit failure attribution or unattributed');
   if (lane === 'C' && (record.model === 'scripted' || record.provider === 'none')) fail('Lane C requires a specific real model and tool provider');
+  // A shared model name/seed does not prove matched prompting or budget. A
+  // direct-tool run with a different prompt or unlimited context must not be
+  // counted as a controlled Mecord-vs-direct comparison.
+  if (lane === 'C') {
+    digest(record.promptDigest, 'promptDigest');
+    digest(record.budgetDigest, 'budgetDigest');
+  }
   return record;
 }
 function percentile(numbers, p) {
@@ -90,7 +97,8 @@ function summarize(records) {
 function identity(run) {
   return JSON.stringify([run.scenarioId, run.scenarioVersion, run.seed,
     run.runnerDigest, run.model, run.modelConfigDigest, run.environmentDigest,
-    run.independentOracleDigest]);
+    run.independentOracleDigest,
+    ...(run.lane === 'C' ? [run.promptDigest, run.budgetDigest] : [])]);
 }
 export function buildWave0EvaluationReport({ sourceCommit, records = [], preregistered = null }) {
   if (typeof sourceCommit !== 'string' || !COMMIT.test(sourceCommit)) fail('sourceCommit must be exact 40-digit git SHA');
