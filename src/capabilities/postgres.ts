@@ -79,12 +79,16 @@ export class PostgresProvider implements CapabilityProvider {
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
-      const root = await this.#scope.resolveExisting(String(action.input.path ?? ''));
+      if (typeof action.input.path !== 'string' || !action.input.path || action.input.path.length > 4096) {
+        throw new OperatorError('POSTGRES_PROJECT_SCOPE_INVALID', 'A typed, bounded authorized project path is required.');
+      }
+      const root = await this.#scope.resolveExisting(action.input.path);
       const registry = await this.#readRegistry();
       const authorized = await this.#profilesForRoot(registry, root);
 
       if (action.capability === 'postgres.inspect') {
-        const operation = String(action.input.operation ?? 'profiles');
+        const operation = action.input.operation === undefined ? 'profiles' : action.input.operation;
+        if (typeof operation !== 'string') throw new OperatorError('INVALID_POSTGRES_INSPECT_OPERATION', 'PostgreSQL inspect operation must be an exact string.');
         if (operation === 'profiles') {
           return success(action, started, {
             root,
@@ -102,7 +106,7 @@ export class PostgresProvider implements CapabilityProvider {
           })]);
         }
 
-        const profile = this.#chooseProfile(authorized, String(action.input.profileId ?? ''));
+        const profile = this.#chooseProfile(authorized, action.input.profileId);
         const timeoutMs = boundedTimeout(action.input.timeoutMs);
         if (operation === 'server') {
           const rows = await this.#query(profile, root,
@@ -117,15 +121,15 @@ export class PostgresProvider implements CapabilityProvider {
           return success(action, started, { profileId: profile.id, operation, rows }, [readOnlyEvidence(profile, operation)]);
         }
         if (operation === 'tables') {
-          const schema = identifier(String(action.input.schema ?? 'public'), 'schema');
+          const schema = identifier((action.input.schema ?? 'public'), 'schema');
           const rows = await this.#query(profile, root,
             "SELECT table_schema, table_name, table_type FROM information_schema.tables WHERE table_schema = :'op_schema' ORDER BY table_name LIMIT 500",
             { op_schema: schema }, timeoutMs, context.signal);
           return success(action, started, { profileId: profile.id, operation, schema, rows }, [readOnlyEvidence(profile, operation)]);
         }
         if (operation === 'columns') {
-          const schema = identifier(String(action.input.schema ?? 'public'), 'schema');
-          const table = identifier(String(action.input.table ?? ''), 'table');
+          const schema = identifier((action.input.schema ?? 'public'), 'schema');
+          const table = identifier(action.input.table, 'table');
           const rows = await this.#query(profile, root,
             "SELECT column_name, data_type, is_nullable, ordinal_position FROM information_schema.columns WHERE table_schema = :'op_schema' AND table_name = :'op_table' ORDER BY ordinal_position LIMIT 500",
             { op_schema: schema, op_table: table }, timeoutMs, context.signal);
@@ -134,9 +138,9 @@ export class PostgresProvider implements CapabilityProvider {
         throw new OperatorError('INVALID_POSTGRES_INSPECT_OPERATION', 'operation must be profiles, server, schemas, tables, or columns.');
       }
 
-      const profile = this.#chooseProfile(authorized, String(action.input.profileId ?? ''));
-      const schema = identifier(String(action.input.schema ?? 'public'), 'schema');
-      const table = identifier(String(action.input.table ?? ''), 'table');
+      const profile = this.#chooseProfile(authorized, action.input.profileId);
+      const schema = identifier((action.input.schema ?? 'public'), 'schema');
+      const table = identifier(action.input.table, 'table');
       const columns = validateColumns(action.input.columns);
       const filters = validateFilters(action.input.filters);
       const orderBy = validateOrder(action.input.orderBy);
@@ -147,6 +151,9 @@ export class PostgresProvider implements CapabilityProvider {
       const built = buildSelect(schema, table, columns, filters, orderBy, limit, offset);
       const rows = await this.#query(profile, root, built.sql, built.variables, timeoutMs, context.signal);
       const boundedRows = boundSerializedRows(rows, maxBytes);
+      if (rows.length > 0 && boundedRows.rows.length === 0) {
+        throw new OperatorError('POSTGRES_ROW_TOO_LARGE', 'The first PostgreSQL row cannot fit the authorized response byte budget; pagination cannot advance.');
+      }
       return success(action, started, {
         profileId: profile.id,
         schema,
@@ -240,8 +247,8 @@ export class PostgresProvider implements CapabilityProvider {
     return matched;
   }
 
-  #chooseProfile(profiles: Profile[], profileId: string): Profile {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(profileId)) {
+  #chooseProfile(profiles: Profile[], profileId: unknown): Profile {
+    if (typeof profileId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(profileId)) {
       throw new OperatorError('POSTGRES_PROFILE_ID_REQUIRED', 'A profileId from postgres.inspect profiles is required.');
     }
     const profile = profiles.find((candidate) => candidate.id === profileId);
@@ -288,22 +295,22 @@ function validateRegistry(input: unknown): Registry {
   const profiles = raw.profiles.map((entry, index): Profile => {
     if (!entry || typeof entry !== 'object') throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${index} is invalid.`);
     const value = entry as Record<string, unknown>;
-    const id = String(value.id ?? '');
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id) || seen.has(id)) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${index} id is invalid or duplicated.`);
+    const id = value.id;
+    if (typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id) || seen.has(id)) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${index} id is invalid or duplicated.`);
     seen.add(id);
-    const roots = Array.isArray(value.roots) ? value.roots.map(String) : [];
-    if (roots.length === 0 || roots.length > 20 || roots.some((root) => !path.isAbsolute(root))) {
+    const roots: string[] = Array.isArray(value.roots) && value.roots.every(root => typeof root === 'string') ? value.roots : [];
+    if (roots.length === 0 || roots.length > 20 || roots.some((root) => typeof root !== 'string' || !path.isAbsolute(root))) {
       throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${id} requires 1-20 absolute project roots.`);
     }
     const host = boundedText(value.host, 512, `Profile ${id} host`);
-    const port = Number(value.port ?? 5432);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${id} port is invalid.`);
+    const port = value.port === undefined ? 5432 : value.port;
+    if (typeof port !== 'number' || !Number.isSafeInteger(port) || port < 1 || port > 65535) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${id} port is invalid.`);
     const database = boundedText(value.database, 128, `Profile ${id} database`);
     const user = boundedText(value.user, 128, `Profile ${id} user`);
-    const passwordEnv = value.passwordEnv === undefined ? undefined : String(value.passwordEnv);
-    if (passwordEnv !== undefined && !/^[A-Z_][A-Z0-9_]{0,127}$/.test(passwordEnv)) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${id} passwordEnv is invalid.`);
-    const sslMode = String(value.sslMode ?? 'prefer');
-    if (!['disable', 'prefer', 'require'].includes(sslMode)) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${id} sslMode is invalid.`);
+    const passwordEnv = value.passwordEnv;
+    if (passwordEnv !== undefined && (typeof passwordEnv !== 'string' || !/^[A-Z_][A-Z0-9_]{0,127}$/.test(passwordEnv))) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${id} passwordEnv is invalid.`);
+    const sslMode = value.sslMode === undefined ? 'prefer' : value.sslMode;
+    if (typeof sslMode !== 'string' || !['disable', 'prefer', 'require'].includes(sslMode)) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${id} sslMode is invalid.`);
     const title = typeof value.title === 'string' ? value.title.trim().slice(0, 160) || undefined : undefined;
     return { id, title, roots: roots.map((root) => path.resolve(root)), host, port, database, user, passwordEnv, sslMode: sslMode as Profile['sslMode'] };
   });
@@ -313,7 +320,7 @@ function validateRegistry(input: unknown): Registry {
 function validateColumns(input: unknown): string[] {
   if (input === undefined) return [];
   if (!Array.isArray(input) || input.length > MAX_COLUMNS) throw new OperatorError('POSTGRES_COLUMNS_INVALID', `columns must contain at most ${MAX_COLUMNS} identifiers.`);
-  const columns = input.map((value) => identifier(String(value), 'column'));
+  const columns = input.map((value) => identifier(value, 'column'));
   if (new Set(columns).size !== columns.length) throw new OperatorError('POSTGRES_COLUMNS_INVALID', 'Duplicate selected columns are not allowed.');
   return columns;
 }
@@ -324,11 +331,17 @@ function validateFilters(input: unknown): Filter[] {
   return input.map((entry, index) => {
     if (!entry || typeof entry !== 'object') throw new OperatorError('POSTGRES_FILTERS_INVALID', `Filter ${index} is invalid.`);
     const raw = entry as Record<string, unknown>;
-    const column = identifier(String(raw.column ?? ''), `filter ${index} column`);
-    const op = String(raw.op ?? 'eq') as Filter['op'];
+    const column = identifier(raw.column, `filter ${index} column`);
+    const op = (raw.op === undefined ? 'eq' : raw.op) as Filter['op'];
     if (!['eq', 'ne', 'lt', 'lte', 'gt', 'gte', 'like', 'ilike', 'is_null', 'not_null'].includes(op)) throw new OperatorError('POSTGRES_FILTERS_INVALID', `Filter ${index} operator is invalid.`);
     if (op === 'is_null' || op === 'not_null') return { column, op };
-    const value = String(raw.value ?? '');
+    const rawValue = raw.value;
+    if (!((typeof rawValue === 'string') ||
+          (typeof rawValue === 'number' && Number.isFinite(rawValue)) ||
+          typeof rawValue === 'boolean')) {
+      throw new OperatorError('POSTGRES_PARAMETER_INVALID', `Filter ${index} requires a typed scalar value.`);
+    }
+    const value = String(rawValue);
     if (value.includes('\0') || value.length > 100_000) throw new OperatorError('POSTGRES_PARAMETER_INVALID', `Filter ${index} value exceeds bounds.`);
     return { column, op, value };
   });
@@ -340,8 +353,8 @@ function validateOrder(input: unknown): Order[] {
   return input.map((entry, index) => {
     if (!entry || typeof entry !== 'object') throw new OperatorError('POSTGRES_ORDER_INVALID', `Order ${index} is invalid.`);
     const raw = entry as Record<string, unknown>;
-    const column = identifier(String(raw.column ?? ''), `order ${index} column`);
-    const direction = String(raw.direction ?? 'asc').toLowerCase();
+    const column = identifier(raw.column, `order ${index} column`);
+    const direction = raw.direction === undefined ? 'asc' : typeof raw.direction === 'string' ? raw.direction.toLowerCase() : '';
     if (direction !== 'asc' && direction !== 'desc') throw new OperatorError('POSTGRES_ORDER_INVALID', `Order ${index} direction is invalid.`);
     return { column, direction } as Order;
   });
@@ -379,13 +392,14 @@ function buildSelect(schema: string, table: string, columns: string[], filters: 
 }
 
 function boundedText(value: unknown, max: number, label: string): string {
-  const text = String(value ?? '');
+  if (typeof value !== 'string') throw new OperatorError('POSTGRES_REGISTRY_INVALID', `${label} must be a literal string.`);
+  const text = value;
   if (!text || text.length > max || /[\0\r\n]/.test(text)) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `${label} is invalid.`);
   return text;
 }
 
-function identifier(value: string, label: string): string {
-  if (!value || value.length > 128 || /[\0\r\n]/.test(value)) throw new OperatorError('POSTGRES_IDENTIFIER_INVALID', `${label} identifier is invalid.`);
+function identifier(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !value || value.length > 128 || /[\0\r\n]/.test(value)) throw new OperatorError('POSTGRES_IDENTIFIER_INVALID', `${label} identifier is invalid.`);
   return value;
 }
 
@@ -394,9 +408,11 @@ function boundedTimeout(value: unknown): number {
 }
 
 function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
-  const parsed = Number(value ?? fallback);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(Math.max(Math.trunc(parsed), min), max);
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) {
+    throw new OperatorError('POSTGRES_BUDGET_INVALID', 'PostgreSQL row/offset/byte/timeout budget must be an exact bounded integer.');
+  }
+  return value;
 }
 
 function isLocalPostgresHost(host: string): boolean {
@@ -557,7 +573,7 @@ function parseCsvObjects(csv: string, maxRows: number): Array<Record<string, str
   if (data.length > maxRows) throw new OperatorError('POSTGRES_ROW_LIMIT_EXCEEDED', 'PostgreSQL returned more rows than the configured bound.');
   return data.map((record) => {
     if (record.length !== headers.length) throw new OperatorError('POSTGRES_CSV_INVALID', 'PostgreSQL CSV row width does not match headers.');
-    const object: Record<string, string | null> = {};
+    const object: Record<string, string | null> = Object.create(null);
     for (let index = 0; index < headers.length; index += 1) {
       const cell = record[index];
       object[headers[index]] = cell.value === '' && !cell.quoted ? null : cell.value;
