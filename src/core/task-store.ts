@@ -385,6 +385,26 @@ function validateExecution(input: unknown): TaskExecution {
   const preDispatchReobserves = raw.preDispatchReobserves === undefined
     ? 0
     : boundedInteger(raw.preDispatchReobserves, 0, 1_000_000, 'execution preDispatchReobserves');
+  // Unlike legacy stored counters, model spend is security-relevant new
+  // authority: never coerce strings, null, booleans or arrays into charges.
+  const typedModelCount = (value: unknown, max: number, field: string): number => {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) ||
+      value < 0 || value > max) throw corrupt(`execution ${field} is invalid.`);
+    return value;
+  };
+  const modelCallCount = raw.modelCallCount === undefined
+    ? 0
+    : typedModelCount(raw.modelCallCount, maxSteps * 2, 'modelCallCount');
+  const modelReservedTokens = raw.modelReservedTokens === undefined
+    ? 0
+    : typedModelCount(raw.modelReservedTokens, maxSteps * 100_000, 'modelReservedTokens');
+  const modelReservedCostMicros = raw.modelReservedCostMicros === undefined
+    ? 0
+    : typedModelCount(raw.modelReservedCostMicros, maxSteps * 1_000_000, 'modelReservedCostMicros');
+  if ((modelCallCount === 0 && (modelReservedTokens !== 0 || modelReservedCostMicros !== 0))
+    || (modelCallCount > 0 && modelReservedTokens < modelCallCount)) {
+    throw corrupt('execution model reservations must match a charged model call and its minimum token allowance.');
+  }
   const dispatchedActions = raw.dispatchedActions === undefined
     ? stepCount
     : boundedInteger(raw.dispatchedActions, 0, maxSteps, 'execution dispatchedActions');
@@ -400,6 +420,8 @@ function validateExecution(input: unknown): TaskExecution {
   return {
     schemaVersion: 1, plannerId, goalKind, plannerState, maxSteps, maxAttemptsPerStep, timeoutMs, stepCount,
     plannerIterations, progressExtensions, progressProofDigests, preDispatchReobserves, dispatchedActions,
+    ...(modelCallCount > 0 || modelReservedTokens > 0 || modelReservedCostMicros > 0
+      ? { modelCallCount, modelReservedTokens, modelReservedCostMicros } : {}),
     ...(startedAt ? { startedAt, deadlineAt } : {}), records,
     ...(plannerEvents.length > 0 ? { plannerEvents } : {}),
     ...(rejectedDecisions.length > 0 ? { rejectedDecisions } : {})

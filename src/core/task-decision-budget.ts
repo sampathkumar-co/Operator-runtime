@@ -47,11 +47,11 @@ export function taskDecisionBudget(execution: TaskExecution, nowMs: number): Tas
   const elapsed = !clockValid || (deadlineAt !== undefined && nowMs >= deadlineAt)
     ? execution.timeoutMs : Math.max(0, nowMs - startedAt);
   return {
-    // Built-in Task planners are deterministic. Model-backed adapters must
-    // charge these dimensions before returning a PlannerDecision.
-    modelCalls: dimension(0, Math.max(1, execution.maxSteps * 2)),
-    tokens: dimension(0, Math.max(1, execution.maxSteps * 100_000)),
-    estimatedCostMicros: dimension(0, Math.max(1, execution.maxSteps * 1_000_000)),
+    // Persist the reservation BEFORE invoking any model, including a local one.
+    // A crashed call may have spent tokens/cost and is never refunded by inference.
+    modelCalls: dimension(execution.modelCallCount ?? 0, Math.max(1, execution.maxSteps * 2)),
+    tokens: dimension(execution.modelReservedTokens ?? 0, Math.max(1, execution.maxSteps * 100_000)),
+    estimatedCostMicros: dimension(execution.modelReservedCostMicros ?? 0, Math.max(1, execution.maxSteps * 1_000_000)),
     plannerIterations: dimension(validExtensions ? (execution.plannerIterations ?? 0) : plannerLimit, plannerLimit),
     environmentActions: dimension(execution.dispatchedActions ?? execution.stepCount, execution.maxSteps),
     readObservations: dimension(records.filter((record) => record.risk === 'read' && record.observation !== undefined).length, observationLimit),

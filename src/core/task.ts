@@ -103,6 +103,10 @@ export interface TaskExecution {
   progressProofDigests?: string[];
   preDispatchReobserves?: number;
   dispatchedActions?: number;
+  /** Durably consumed before invoking an optional model. Never refunded on timeout. */
+  modelCallCount?: number;
+  modelReservedTokens?: number;
+  modelReservedCostMicros?: number;
   startedAt?: string;
   deadlineAt?: string;
   records: TaskActionRecord[];
