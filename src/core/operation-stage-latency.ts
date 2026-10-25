@@ -70,7 +70,8 @@ export function summarizeOperationStageLatency(eventsInput: OperationTraceEvent[
     // One trace represents one request and one terminal event; if the owner
     // crosses context/scope or duplicates terminal claims, never count success.
     if (requested.length !== 1 || terminal.length > 1 ||
-      sorted.some(event => event.executionContextDigest !== sorted[0]!.executionContextDigest)) {
+      sorted.some(event => event.executionContextDigest !== sorted[0]!.executionContextDigest) ||
+      new Set(sorted.map(event => event.id)).size !== sorted.length) {
       invalidCausalTraces++;
       continue;
     }

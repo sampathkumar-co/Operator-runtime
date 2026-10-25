@@ -68,3 +68,23 @@ test('C09 bound excessive trace input and reject untrusted event structure', () 
   assert.throws(()=>summarizeOperationStageLatency([{...event('x','REQUEST',0),durationMs:-1}]),
     (error:any)=>error?.code==='OPERATION_TRACE_INVALID');
 });
+
+test('C09 stage latency refuses replayed event IDs even with an otherwise valid context', () => {
+  const baseline = [
+    event('event-replay','REQUEST',0),
+    event('event-replay','DISPATCH',10),
+    event('event-replay','VERIFY',20),
+    event('event-replay','COMPLETE',30)
+  ];
+  assert.equal(summarizeOperationStageLatency(baseline).terminalTraces,1);
+  for (const forged of [
+    [...baseline.slice(0,3), {...baseline[3]!,id:baseline[1]!.id}],
+    [...baseline.slice(0,2), {...baseline[2]!,id:baseline[0]!.id},baseline[3]!]
+  ]) {
+    const report=summarizeOperationStageLatency(forged);
+    assert.equal(report.invalidCausalTraces,1);
+    assert.equal(report.terminalTraces,0);
+    assert.equal(report.p95EndToEndMs,0);
+    assert.equal(report.stages.length,0);
+  }
+});

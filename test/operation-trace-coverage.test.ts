@@ -89,6 +89,7 @@ test('C09 operation SLO rejects verification that occurs after an already claime
 test('C09 operation SLO preserves verified claim only when last verification precedes completion',()=>{
   const valid=[
     e('REQUEST','2026-10-07T00:00:00.000Z'),
+    e('DISPATCH','2026-10-07T00:00:00.050Z'),
     e('VERIFY','2026-10-07T00:00:00.100Z'),
     e('COMPLETE','2026-10-07T00:00:00.200Z')
   ];
@@ -215,4 +216,108 @@ test('C09 empty operation sample exposes zero p99 rather than fabricated latency
   assert.equal(empty.p50CompletionMs, 0);
   assert.equal(empty.p95CompletionMs, 0);
   assert.equal(empty.p99CompletionMs, 0);
+});
+
+test('C09 cross-context terminal claims do not count as verified success or latency samples', () => {
+  const valid = [
+    e('REQUEST', '2026-10-25T00:00:00.000Z'),
+    e('DISPATCH', '2026-10-25T00:00:00.050Z'),
+    e('VERIFY', '2026-10-25T00:00:00.100Z'),
+    e('COMPLETE', '2026-10-25T00:00:00.200Z')
+  ];
+  const good = summarizeOperationSlo(valid);
+  assert.equal(good.verified, 1);
+  assert.equal(good.invalidCausalTraces, 0);
+  assert.equal(good.p95CompletionMs, 200);
+
+  const mixed = [valid[0]!, valid[1]!, {...valid[2]!, executionContextDigest:'b'.repeat(64)}, valid[3]!];
+  const report = summarizeOperationSlo(mixed);
+  assert.equal(report.traces, 1);
+  assert.equal(report.completed, 1, 'raw terminal claims remain visible for safety accounting');
+  assert.equal(report.verified, 0);
+  assert.equal(report.falseCompletionCount, 1);
+  assert.equal(report.invalidCausalTraces, 1);
+  assert.equal(report.p95CompletionMs, 0, 'no invalid measurement enters a percentile');
+});
+
+test('C09 duplicate terminal claims and event identities fail closed in operation SLOs', () => {
+  const base = [
+    e('REQUEST', '2026-10-25T00:00:00.000Z'),
+    e('DISPATCH', '2026-10-25T00:00:00.050Z'),
+    e('VERIFY', '2026-10-25T00:00:00.100Z'),
+    e('COMPLETE', '2026-10-25T00:00:00.200Z')
+  ];
+  for (const mutated of [
+    [...base, e('COMPLETE', '2026-10-25T00:00:00.300Z')],
+    [...base, {...base[2]!, id:base[0]!.id}],
+    [base[0]!, base[1]!, base[3]!, e('VERIFY', '2026-10-25T00:00:00.300Z')],
+    [base[1]!, base[2]!, base[3]!],
+    [...base, {...base[0]!, id:'replayed-request',at:'2026-10-25T00:00:00.300Z'}]
+  ]) {
+    const report = summarizeOperationSlo(mutated);
+    assert.equal(report.verified, 0);
+    assert.equal(report.invalidCausalTraces, 1);
+    assert.equal(report.p95CompletionMs, 0);
+    assert.equal(report.falseCompletionCount, 1);
+  }
+});
+
+test('C09 completed and incomplete traces never fabricate samples from absent requests', () => {
+  const report = summarizeOperationSlo([
+    e('VERIFY', '2026-10-25T00:00:00.100Z'),
+    e('COMPLETE', '2026-10-25T00:00:00.200Z')
+  ]);
+  assert.equal(report.completed, 1);
+  assert.equal(report.verified, 0);
+  assert.equal(report.falseCompletionCount, 1);
+  assert.equal(report.p50CompletionMs, 0);
+  assert.equal(report.invalidCausalTraces, 1);
+});
+
+test('C09 active operation traces remain incomplete, not corrupt terminal evidence', () => {
+  const report = summarizeOperationSlo([
+    e('REQUEST', '2026-10-25T00:00:00.000Z'),
+    e('DISPATCH', '2026-10-25T00:00:00.100Z')
+  ]);
+  assert.equal(report.traces, 1);
+  assert.equal(report.incompleteTraces, 1);
+  assert.equal(report.invalidCausalTraces, 0);
+  assert.equal(report.completed, 0);
+  assert.equal(report.p95CompletionMs, 0);
+});
+
+test('C09 a VERIFIED terminal without any dispatched provider work is unproven', () => {
+  const report = summarizeOperationSlo([
+    e('REQUEST','2026-10-25T01:00:00.000Z'),
+    e('VERIFY','2026-10-25T01:00:00.100Z'),
+    e('COMPLETE','2026-10-25T01:00:00.200Z')
+  ]);
+  assert.equal(report.completed, 1);
+  assert.equal(report.verified, 0);
+  assert.equal(report.falseCompletionCount, 1);
+  assert.equal(report.invalidCausalTraces, 0, 'lineage can be intact while outcome remains unverified');
+});
+
+test('C09 source-shifted and duplicate terminal trace events cannot pass coverage', () => {
+  const canonical = [
+    e('REQUEST','2026-10-25T01:00:00.000Z'),
+    e('ROUTE','2026-10-25T01:00:00.100Z'),
+    e('POLICY','2026-10-25T01:00:00.200Z'),
+    e('DISPATCH','2026-10-25T01:00:00.300Z'),
+    e('VERIFY','2026-10-25T01:00:00.400Z'),
+    e('COMPLETE','2026-10-25T01:00:00.500Z')
+  ];
+  assert.equal(evaluateOperationTraceCoverage(canonical).invalidCausalTrace, false);
+  assert.equal(evaluateOperationTraceCoverage(canonical).complete, true);
+  const malformed = [
+    [...canonical.slice(0, -1), {...canonical.at(-1)!, executionContextDigest:'b'.repeat(64)}],
+    [...canonical, {...canonical.at(-1)!, id:'extra-complete',at:'2026-10-25T01:00:00.600Z'}],
+    [...canonical, {...canonical[1]!, id:'extra-route',at:'2026-10-25T01:00:00.700Z'}],
+    [...canonical, {...canonical[2]!, id:canonical[1]!.id}]
+  ];
+  for (const trace of malformed) {
+    const result = evaluateOperationTraceCoverage(trace);
+    assert.equal(result.complete, false);
+    assert.equal(result.invalidCausalTrace, true);
+  }
 });
