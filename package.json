@@ -11,6 +11,7 @@
     "test:red-team": "node --experimental-strip-types scripts/run-test-suite.ts security",
     "test:performance": "node --experimental-strip-types scripts/run-test-suite.ts performance",
     "certify:nonbenchmark": "node --experimental-strip-types scripts/certify-nonbenchmark.ts",
+    "evidence:wave4": "node scripts/wave4-qualification-evidence.mjs",
     "verify:release-checkout": "node scripts/verify-release-checkout.mjs",
     "check": "node --experimental-strip-types scripts/check.ts && npm run verify:release-truth && npm test && npm run test:intelligence",
     "test:intelligence": "npm --prefix packages/adaptive-intelligence test && npm --prefix packages/verified-plan-runtime test",
