@@ -26,7 +26,11 @@ export function taskDecisionBudget(execution: TaskExecution, nowMs: number): Tas
     throw new OperatorError('TASK_DECISION_BUDGET_INVALID', 'Persisted task execution limits are invalid.');
   }
   const basePlannerLimit = Math.max(4, execution.maxSteps * 4);
-  const verifiedExtensions = Math.min(execution.maxSteps, Math.max(0, execution.progressExtensions ?? 0));
+  const extensionInput = execution.progressExtensions ?? 0;
+  // No fractional, negative or non-finite durable extension can create
+  // additional planner iterations. The owner-set hard maxSteps remains a cap.
+  const validExtensions = Number.isSafeInteger(extensionInput) && extensionInput >= 0;
+  const verifiedExtensions = validExtensions ? Math.min(execution.maxSteps, extensionInput) : 0;
   const plannerLimit = basePlannerLimit + verifiedExtensions;
   const observationLimit = Math.max(execution.maxSteps, Math.ceil(execution.maxSteps * 1.5));
   const retryLimit = execution.maxSteps * Math.max(0, execution.maxAttemptsPerStep - 1);
@@ -34,16 +38,21 @@ export function taskDecisionBudget(execution: TaskExecution, nowMs: number): Tas
   const events = execution.plannerEvents ?? [];
   const startedAt = execution.startedAt ? Date.parse(execution.startedAt) : nowMs;
   // Invalid durable timestamps must exhaust the wall-clock budget, never disable it.
-  const elapsed = Number.isFinite(startedAt) && Number.isFinite(nowMs)
-    ? Math.max(0, nowMs - startedAt)
-    : execution.timeoutMs;
+  const deadlineAt = execution.deadlineAt === undefined ? undefined : Date.parse(execution.deadlineAt);
+  const clockValid = Number.isFinite(startedAt) && Number.isFinite(nowMs) &&
+    nowMs >= startedAt &&
+    (deadlineAt === undefined || (Number.isFinite(deadlineAt) && deadlineAt > startedAt));
+  // Clock rollback, malformed deadline and a reached absolute deadline are
+  // exhaustion, not an excuse to create additional wall-clock budget.
+  const elapsed = !clockValid || (deadlineAt !== undefined && nowMs >= deadlineAt)
+    ? execution.timeoutMs : Math.max(0, nowMs - startedAt);
   return {
     // Built-in Task planners are deterministic. Model-backed adapters must
     // charge these dimensions before returning a PlannerDecision.
     modelCalls: dimension(0, Math.max(1, execution.maxSteps * 2)),
     tokens: dimension(0, Math.max(1, execution.maxSteps * 100_000)),
     estimatedCostMicros: dimension(0, Math.max(1, execution.maxSteps * 1_000_000)),
-    plannerIterations: dimension(execution.plannerIterations ?? 0, plannerLimit),
+    plannerIterations: dimension(validExtensions ? (execution.plannerIterations ?? 0) : plannerLimit, plannerLimit),
     environmentActions: dimension(execution.dispatchedActions ?? execution.stepCount, execution.maxSteps),
     readObservations: dimension(records.filter((record) => record.risk === 'read' && record.observation !== undefined).length, observationLimit),
     visualCaptures: dimension(records.filter((record) => record.observation?.channel === 'visual').length, execution.maxSteps),
