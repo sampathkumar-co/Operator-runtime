@@ -38,3 +38,22 @@ test('current enterprise authorization rejects coerced policy digest and generat
       (e:any)=>e?.code==='ENTERPRISE_POLICY_AUTHORITY_INVALID');
   }
 });
+
+test('C08 enterprise narrowing never inherits a malformed parent risk ceiling', async t => {
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'operator-enterprise-parent-risk-'));
+  t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const store=new EnterprisePolicyStore(root);
+  await store.configure(policy);
+  const base={allowedCapabilities:['file.read'],allowedRoots:[],maxRisk:'destructive' as const};
+  const valid=await store.narrow(base,{principalId:'principal:one'});
+  assert.equal(valid.permissions.maxRisk,'read');
+  for(const risk of ['toString','constructor','__proto__','unknown','READ',null,false,0,{}]) {
+    await assert.rejects(
+      ()=>store.narrow({...base,maxRisk:risk as any},{principalId:'principal:one'}),
+      (error:any)=>error?.code==='ENTERPRISE_AUTHORITY_INVALID',
+      String(risk)
+    );
+  }
+  const ordinary=await store.narrow({allowedCapabilities:['file.read'],allowedRoots:[]},{principalId:'principal:one'});
+  assert.equal(ordinary.permissions.maxRisk,'read');
+});
