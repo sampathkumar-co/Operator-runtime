@@ -224,11 +224,13 @@ export function summarizeOperationSlo(eventsInput: OperationTraceEvent[]): Opera
     rows.sort((a,b) => a.at.localeCompare(b.at));
     const complete = [...rows].reverse().find((event) => event.stage === 'COMPLETE');
     const verify = [...rows].reverse().find((event) => event.stage === 'VERIFY');
-    // Verification must causally precede the terminal completion. A late
-    // VERIFY or a same-timestamp reordering is not evidence for the claimed
-    // COMPLETE, regardless of its outcome.
+    const lastDispatch = [...rows].reverse().find((event) => event.stage === 'DISPATCH');
+    // Positive verification must be causally newer than the last attempted
+    // dispatch. A second side effect after a valid read supersedes its proof,
+    // even if COMPLETE claims success.
     const verifiedBeforeCompletion = Boolean(complete?.outcome === 'OK' && verify?.outcome === 'OK'
-      && Date.parse(verify.at) < Date.parse(complete.at));
+      && Date.parse(verify.at) < Date.parse(complete.at)
+      && (!lastDispatch || Date.parse(lastDispatch.at) < Date.parse(verify.at)));
     if (complete?.outcome === 'OK') completed += 1;
     if (rows.some((event) => event.outcome === 'BLOCKED')) blocked += 1;
     if (rows.some((event) => event.outcome === 'FAILED')) failed += 1;
