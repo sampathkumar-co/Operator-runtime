@@ -293,3 +293,40 @@ test('C08 mutating UIA transport-write and post-input capture failures cannot be
     await provider.close();
   }
 });
+
+test('C10 Windows native helper errors cannot export secret-bearing stderr or target details', async () => {
+  const secret='PRIVATE_DEVICE_TOKEN_DO_NOT_EXPORT';
+  const provider=new WindowsUiaProvider({
+    platform:'win32',
+    client:{
+      async call(){throw new OperatorError('UIA_SIDECAR_EXITED',
+        'native stderr password=' + secret + ' path=C:\\Users\\private', {retryable:true});},
+      close(){}
+    }
+  });
+  const result=await provider.execute({
+    id:'uia-privacy-boundary',capability:'app.operate',risk:'external',provenance,
+    input:{operation:'invoke',selector:{automationId:'login'}}
+  });
+  assert.equal(result.ok,false);
+  assert.equal(result.error?.code,'UIA_SIDECAR_EXITED');
+  assert.equal(result.error?.sideEffectState,'uncertain');
+  assert.equal(result.error?.retryable,false);
+  assert.equal(JSON.stringify(result).includes(secret),false);
+  assert.equal(JSON.stringify(result).includes('Users'),false);
+  await provider.close();
+});
+
+test('C04 UIA mutation cannot silently ignore unknown selector identity constraints', async () => {
+  const provider=new WindowsUiaProvider({
+    platform:'win32',
+    client:{async call(){throw Error('Native helper must not be reached');},close(){}}
+  });
+  const result=await provider.execute({
+    id:'uia-extra-selector',capability:'app.operate',risk:'external',provenance,
+    input:{operation:'invoke',selector:{automationId:'save',unexpectedTarget:'another-window'}}
+  });
+  assert.equal(result.ok,false);
+  assert.equal(result.error?.code,'INVALID_UIA_SELECTOR');
+  await provider.close();
+});
