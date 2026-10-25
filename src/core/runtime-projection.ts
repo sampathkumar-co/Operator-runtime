@@ -26,7 +26,9 @@ export function projectTaskRuntime(
   options: { journal?: ActionJournalEntry[]; approvals?: ApprovalProjectionInput[] } = {}
 ): RuntimeControlProjection {
   const records = task.execution?.records ?? [];
-  const current = [...records].reverse().find((record) => record.state === 'STARTED' || record.state === 'BLOCKED') ?? records.at(-1);
+  // Records are an append-only chronological sequence. An older blocked step
+  // cannot remain the 'current' action after a later successful/failed step.
+  const current = records.at(-1);
   const journal = current ? options.journal?.find((entry) => entry.actionId === current.actionId) : undefined;
   const approval = current ? options.approvals?.find((entry) => entry.actionId === current.actionId && entry.status === 'pending') : undefined;
   const provider = journal ? [...journal.transitions].reverse().find((transition) => transition.provider)?.provider : current?.observation?.provider;
@@ -35,9 +37,19 @@ export function projectTaskRuntime(
   const verificationDigest = typeof verificationEvidence?.data?.digest === 'string' && /^[0-9a-f]{64}$/i.test(verificationEvidence.data.digest)
     ? verificationEvidence.data.digest.toLowerCase() : undefined;
   const lastFailure = task.failures.at(-1);
+  const latestPlannerEvent = task.execution?.plannerEvents?.at(-1);
+  const actionJournal = new Map((options.journal ?? []).map(item => [item.actionId, item]));
+  // Never conceal an older unresolved side effect merely because a newer
+  // read succeeded. Only a matching action journal with reconciled/completed
+  // state can demonstrate that its uncertainty was subsequently settled.
+  const uncertainActionRemains = records.some(record => {
+    if (record.sideEffectState !== 'uncertain') return false;
+    const persisted = actionJournal.get(record.actionId);
+    return persisted?.state !== 'RECONCILED' && persisted?.state !== 'COMPLETED';
+  });
   const reconciliationRequired = journal?.state === 'UNCERTAIN'
-    || (task.execution?.plannerEvents ?? []).some((event) => event.decision === 'RECONCILE')
-    || current?.sideEffectState === 'uncertain';
+    || uncertainActionRemains
+    || (task.state === 'BLOCKED' && latestPlannerEvent?.decision === 'RECONCILE');
   const blocker = task.state === 'BLOCKED' || task.state === 'FAILED' || reconciliationRequired
     ? {
         code: reconciliationRequired ? 'ACTION_RECONCILIATION_REQUIRED' : lastFailure?.code ?? current?.errorCode ?? task.state,
