@@ -101,7 +101,7 @@ async function readBoundedResponse(response:ArtifactFetchResponse,declaredSize?:
       chunkCount++;
       if(chunkCount>65536)await fail('Artifact stream exceeds the bounded chunk count.');
       if(!(part.value instanceof Uint8Array))await fail('Artifact stream must return typed binary chunks.');
-      const chunk=Buffer.from(part.value);
+      const chunk=Buffer.from(part.value as Uint8Array);
       if(chunk.byteLength===0){
         emptyChunks++;
         if(emptyChunks>4)await fail('Artifact stream made no forward progress.');
