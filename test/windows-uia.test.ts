@@ -454,3 +454,50 @@ test('C04 native protocol rejection never includes remote data in the public err
         && error?.retryable !== true);
   }
 });
+
+test('C04 malformed UIA inspection limits fail before any native-sidecar request', async () => {
+  let requests=0;
+  const provider = new WindowsUiaProvider({
+    platform:'win32',
+    client:{
+      async call(){requests++;return {elements:[]};},
+      close(){}
+    }
+  });
+  for(const input of [
+    {maxNodes:0}, {maxNodes:-1}, {maxNodes:1501}, {maxNodes:1.2},
+    {maxNodes:'1500'}, {maxNodes:Infinity}, {maxNodes:Number.MAX_SAFE_INTEGER+1},
+    {maxDepth:0}, {maxDepth:-4}, {maxDepth:13}, {maxDepth:'12'},
+    {maxDepth:2.5}, {maxDepth:null}
+  ]) {
+    const result=await provider.execute({
+      id:'inspect-bound-'+requests,
+      capability:'app.inspect',risk:'read',provenance,input
+    });
+    assert.equal(result.ok,false,JSON.stringify(input));
+    assert.equal(result.error?.code,'INVALID_UIA_INSPECT_LIMIT',JSON.stringify(input));
+  }
+  assert.equal(requests,0);
+  provider.close();
+});
+
+test('C04 native UIA inspection accepts exact defined bounds without coercion', async () => {
+  let requests=0;
+  const provider = new WindowsUiaProvider({
+    platform:'win32',
+    client:{
+      async call(method,params){
+        requests++;
+        assert.equal(method,'inspect');
+        assert.equal((params as any).max_nodes,1500);
+        assert.equal((params as any).max_depth,12);
+        return {elements:[]};
+      },close(){}
+    }
+  });
+  const result=await provider.execute({id:'inspect-max',capability:'app.inspect',
+    risk:'read',provenance,input:{maxNodes:1500,maxDepth:12}});
+  assert.equal(result.ok,true);
+  assert.equal(requests,1);
+  provider.close();
+});
