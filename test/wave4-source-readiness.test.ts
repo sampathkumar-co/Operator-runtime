@@ -53,6 +53,14 @@ test('C11 must see exact issue roster without gaps, duplicate IDs, or altered ta
   duplicate[4].body = duplicate[4].body.replace('C04-10', 'C04-01');
   assert.throws(() => evaluateWave4Readiness({ candidateSha, issues: duplicate }),
     /duplicate atomic checklist ID/);
+  const injectedForeign = makeIssues(true);
+  injectedForeign[0].body += '\n- [ ] C01-01 misplaced duplicate with no physical proof';
+  assert.throws(() => evaluateWave4Readiness({ candidateSha, issues: injectedForeign }),
+    /task C01-01 is assigned outside C00/);
+  const unexpectedForeign = makeIssues(true);
+  unexpectedForeign[11].body += '\n- [x] C99-01 forged release acceptance';
+  assert.throws(() => evaluateWave4Readiness({ candidateSha, issues: unexpectedForeign }),
+    /task C99-01 is assigned outside C11/);
   const closed = makeIssues();
   closed[11].state = 'closed';
   assert.throws(() => evaluateWave4Readiness({ candidateSha, issues: closed }),
