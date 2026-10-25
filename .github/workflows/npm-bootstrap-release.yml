@@ -16,6 +16,7 @@ on:
 permissions:
   actions: read
   contents: read
+  issues: read
   id-token: write
   pull-requests: read
 
@@ -148,6 +149,13 @@ jobs:
             exit 1
           fi
 
+      - name: Require signed Wave 0-4 owner acceptance before npm bootstrap publication
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          OPERATOR_WAVE4_RELEASE_ATTESTATION_B64: ${{ secrets.OPERATOR_WAVE4_RELEASE_ATTESTATION_B64 }}
+          OPERATOR_WAVE4_RELEASE_SIGNATURE_B64: ${{ secrets.OPERATOR_WAVE4_RELEASE_SIGNATURE_B64 }}
+          OPERATOR_WAVE4_RELEASE_PUBLIC_KEY_PEM: ${{ secrets.OPERATOR_WAVE4_RELEASE_PUBLIC_KEY_PEM }}
+        run: node scripts/wave4-publication-gate.mjs
       - name: Publish npm bootstrap with provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
