@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
-import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { withDurableStateLock } from './durable-state-lock.ts';
 import type { ModelCallBudgetLedger } from './bounded-model-goal-inference.ts';
 
@@ -99,6 +99,7 @@ function validateFile(input: unknown, expected: DurableModelBudgetLimits): Budge
  */
 export class DurableModelCallBudgetLedger implements ModelCallBudgetLedger {
   readonly #file: string;
+  readonly #initializedMarker: string;
   readonly #limits: DurableModelBudgetLimits;
 
   constructor(stateDir: string, limits: DurableModelBudgetLimits) {
@@ -107,6 +108,7 @@ export class DurableModelCallBudgetLedger implements ModelCallBudgetLedger {
         'An absolute owner-controlled durable state directory and bounded profile are required.');
     }
     this.#file = path.join(path.resolve(stateDir), 'model-budget', 'ledger-v1.json');
+    this.#initializedMarker = path.join(path.dirname(this.#file), 'initialized-v1.json');
     this.#limits = { ...limits };
   }
 
@@ -121,10 +123,24 @@ export class DurableModelCallBudgetLedger implements ModelCallBudgetLedger {
   }
 
   async #read(): Promise<BudgetFile> {
+    let initialized = false;
+    try {
+      const stamp = JSON.parse(await readDurableStateText(this.#initializedMarker, OPTIONS));
+      if (!exactKeys(stamp, ['schemaVersion', 'profileDigest']) || stamp.schemaVersion !== 1 ||
+          stamp.profileDigest !== this.#profileDigest()) {
+        denied('TASK_MODEL_BUDGET_LEDGER_CORRUPT',
+          'Model ledger initialization marker is invalid or its budget profile changed.');
+      }
+      initialized = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
     let raw: string;
     try { raw = await readDurableStateText(this.#file, OPTIONS); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        if (initialized) denied('TASK_MODEL_BUDGET_LEDGER_CORRUPT',
+          'Previously initialized model budget ledger disappeared; never reset the consumed budget.');
         return { schemaVersion: 1, limits: { ...this.#limits }, reservations: [] };
       }
       throw error;
@@ -132,7 +148,13 @@ export class DurableModelCallBudgetLedger implements ModelCallBudgetLedger {
     let parsed: unknown;
     try { parsed = JSON.parse(raw); }
     catch { return denied('TASK_MODEL_BUDGET_LEDGER_CORRUPT', 'Stored model budget JSON is invalid.'); }
+    if (!initialized) denied('TASK_MODEL_BUDGET_LEDGER_CORRUPT',
+      'Existing model ledger lacks its durable initialization marker.');
     return validateFile(parsed, this.#limits);
+  }
+
+  #profileDigest(): string {
+    return crypto.createHash('sha256').update(JSON.stringify(this.#limits)).digest('hex');
   }
 
   async reserve(input: {
@@ -164,6 +186,24 @@ export class DurableModelCallBudgetLedger implements ModelCallBudgetLedger {
         maxOutputTokens: input.maxOutputTokens, maxCostMicros: input.maxCostMicros,
         status: 'RESERVED'
       });
+      // Once any budget is committed, deleting the ledger alone must not
+      // silently mint a fresh budget. Marker is durable BEFORE the first ledger.
+      if (state.reservations.length === 1) {
+        try {
+          await createDurableStateBytes(this.#initializedMarker, Buffer.from(JSON.stringify({
+            schemaVersion: 1, profileDigest: this.#profileDigest()
+          }), 'utf8'), OPTIONS);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+          // EEXIST is only acceptable when it is the exact marker we just
+          // validated in #read(); otherwise an unknown writer wins.
+          const marker = JSON.parse(await readDurableStateText(this.#initializedMarker, OPTIONS));
+          if (!exactKeys(marker, ['schemaVersion', 'profileDigest']) ||
+              marker.schemaVersion !== 1 || marker.profileDigest !== this.#profileDigest()) {
+            denied('TASK_MODEL_BUDGET_LEDGER_CORRUPT', 'Conflicting budget initialization marker.');
+          }
+        }
+      }
       // The model must not see the prompt until this write and fsync succeeded.
       await writeDurableStateText(this.#file, JSON.stringify(state), OPTIONS);
       return { reservationId };
