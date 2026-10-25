@@ -170,7 +170,9 @@ class WindowsUiaSidecarClient {
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => {
       for (const line of chunk.split(/\r?\n/).filter(Boolean)) {
-        this.#stderrTail.push(line.slice(0, 1000));
+        // Native stderr is diagnostic but not cleared for secrets. Retain only
+        // an opaque bounded marker, never the user-controlled text itself.
+        this.#stderrTail.push('NATIVE_STDERR_REDACTED');
         if (this.#stderrTail.length > 20) this.#stderrTail.shift();
       }
     });
@@ -216,7 +218,7 @@ class WindowsUiaSidecarClient {
       });
       child.once('error', (error) => {
         clearTimeout(timer);
-        reject(new OperatorError('UIA_SIDECAR_START_FAILED', error.message, { retryable: false }));
+        reject(new OperatorError('UIA_SIDECAR_START_FAILED', 'Windows UIA sidecar could not start.', { retryable: false }));
       });
     });
 
@@ -297,17 +299,21 @@ export class WindowsUiaProvider implements CapabilityProvider {
     } catch (error) {
       const op = error instanceof OperatorError
         ? error
-        : new OperatorError('UIA_PROVIDER_FAILED', error instanceof Error ? error.message : String(error), { retryable: true });
+        : new OperatorError('UIA_PROVIDER_FAILED', 'Windows UIA operation failed.', { retryable: true });
       const ambiguousMutation = action.risk !== 'read'
         && ['UIA_SIDECAR_TIMEOUT', 'UIA_SIDECAR_CLOSED', 'UIA_SIDECAR_EXITED',
           'UIA_SIDECAR_WRITE_FAILED', 'EXECUTION_ABORTED', 'UIA_OPERATION_FAILED',
           'INPUT_AFTER_CAPTURE_FAILED', 'INPUT_AFTER_CAPTURE_INVALID'].includes(op.code);
+      // Native error messages can include target names, input values or
+      // process paths. Return the closed error class only, never raw stderr.
+      const publicCode = /^[A-Z][A-Z0-9_]{2,100}$/.test(op.code) ? op.code : 'UIA_PROVIDER_FAILED';
+      const publicMessage = `Windows UIA operation failed (${publicCode}).`;
       return {
         ok: false,
         capability: action.capability,
         provider: this.name,
-        evidence: [evidence('windows_uia', 'fail', op.message, { code: op.code })],
-        error: { code: op.code, message: op.message, retryable: ambiguousMutation ? false : op.retryable, sideEffectState: ambiguousMutation ? 'uncertain' : action.risk === 'read' ? 'none' : undefined },
+        evidence: [evidence('windows_uia', 'fail', publicMessage, { code: publicCode })],
+        error: { code: publicCode, message: publicMessage, retryable: ambiguousMutation ? false : op.retryable, sideEffectState: ambiguousMutation ? 'uncertain' : action.risk === 'read' ? 'none' : undefined },
         durationMs: Math.round(performance.now() - started)
       };
     }
