@@ -396,8 +396,14 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
       return Number.isFinite(start) && Number.isFinite(end) && Number.isFinite(captured)
         && start <= captured && captured <= end;
     };
-    const verifiedAfterOperation = Boolean(verify && operate && knownFreshRead(verify) &&
-      Number.isFinite(Date.parse(operate.finishedAt ?? '')) &&
+    const latestGoalAttempt = [...records].reverse().find((record) =>
+      record.stepKey === `${prefix}operate-app-target` ||
+      record.stepKey === `${prefix}operate-app-physical-fallback` ||
+      record.stepKey === `${prefix}verify-app-target`);
+    // A newer mutating action supersedes a previously valid observation even
+    // if the later action failed or its effect became uncertain.
+    const verifiedAfterOperation = Boolean(verify && operate && latestGoalAttempt === verify &&
+      knownFreshRead(verify) && Number.isFinite(Date.parse(operate.finishedAt ?? '')) &&
       Date.parse(verify!.startedAt) >= Date.parse(operate!.finishedAt!));
     let semanticEffect = Boolean(element);
     if (semanticEffect && operation === 'set_value') semanticEffect = element!.valueHash === sha256(String(goal.value ?? ''));
