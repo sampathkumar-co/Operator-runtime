@@ -83,7 +83,8 @@ export function buildContextualCapabilityReadiness(input: {
   }
   const scope = input.permissions.allowedCapabilities;
   if(scope.some(x => typeof x !== 'string' || x.length > 256 ||
-      (x !== '*' && !CAPABILITY.test(x)))) {
+      (x !== '*' && !CAPABILITY.test(x) &&
+        !(x.endsWith('.*') && CAPABILITY.test(x.slice(0,-1)+'x'))))) {
     invalid('Requested capability policy contains a malformed scope.');
   }
   const seen = new Set<string>();
