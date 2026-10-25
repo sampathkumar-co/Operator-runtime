@@ -275,8 +275,18 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
   if (kind === 'trusted-project-command') {
     const record = lastSucceeded(records, `${prefix}run-command`);
     const state = observationState(record);
-    const expectedKind = String(goal.commandKind ?? '');
-    const ok = Boolean(record && expectedKind && state.commandKind === expectedKind && state.exitCode === 0 && state.validationPassed !== false);
+    const expectedKind = typeof goal.commandKind === 'string' ? goal.commandKind : '';
+    const observed = record?.observation;
+    const start = Date.parse(record?.startedAt ?? '');
+    const finish = Date.parse(record?.finishedAt ?? '');
+    const seen = observed?.schemaVersion === 2 ? Date.parse(observed.observedAt) : NaN;
+    const ok = Boolean(record && ['lint', 'test', 'build'].includes(expectedKind)
+      && record.capability === 'project.command.run'
+      && observed?.schemaVersion === 2 && observed.capability === record.capability
+      && observed.epistemicStatus === 'KNOWN' && observed.ambiguous === false
+      && Number.isFinite(start) && Number.isFinite(finish) && Number.isFinite(seen)
+      && start <= seen && seen <= finish
+      && state.commandKind === expectedKind && state.exitCode === 0 && state.validationPassed === true);
     return outcome(true, ok, ok
       ? 'Trusted command kind, zero exit status, and registered artifact validation are proven by durable execution evidence.'
       : 'Trusted command completion is missing a matching zero-exit validated machine observation.', versions(record));
@@ -462,9 +472,23 @@ function evaluateQualityGate(records: TaskActionRecord[], state: Record<string, 
     const kind = String(check.kind ?? '');
     const record = lastSucceeded(records, `quality-run:${index}:${kind}`);
     used.push(record);
-    if (!record) return false;
+    if (!record || !['lint', 'test', 'build'].includes(kind)
+      || !['read', 'write'].includes(String(check.risk ?? ''))) return false;
+    const observation = record.observation;
+    if (observation?.schemaVersion !== 2 || observation.epistemicStatus !== 'KNOWN'
+      || observation.ambiguous || observation.capability !== record.capability) return false;
+    const started = Date.parse(record.startedAt);
+    const finished = Date.parse(record.finishedAt ?? '');
+    const observed = Date.parse(observation.observedAt);
+    if (!Number.isFinite(started) || !Number.isFinite(finished)
+      || !Number.isFinite(observed) || started > observed || observed > finished) return false;
+    const expectedCapability = check.risk === 'write' ? 'project.transaction.run' : 'project.command.run';
     const machine = observationState(record);
-    return machine.exitCode === 0 && machine.validationPassed !== false;
+    // A zero exit code without the exact compiled kind, matching provider,
+    // known fresh machine observation and explicit artifact-validation result
+    // cannot independently prove a quality gate.
+    return record.capability === expectedCapability && machine.commandKind === kind
+      && machine.exitCode === 0 && machine.validationPassed === true;
   });
   return outcome(true, ok, ok
     ? `All ${checks.length} compiled trusted quality checks have successful durable machine evidence.`
