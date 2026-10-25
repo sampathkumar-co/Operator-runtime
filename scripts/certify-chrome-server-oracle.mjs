@@ -70,7 +70,9 @@ export async function certifyPhysicalChromeOracle({
       return;
     }
     if (req.method !== 'POST' || req.url !== '/submit') {
-      rejected++;
+      // Chrome may request /favicon.ico or other incidental GET resources.
+      // These are not rejected form submissions and cannot affect the oracle.
+      if (req.method === 'POST') rejected++;
       res.writeHead(404).end('{}');
       return;
     }
