@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'apps/control-center/src/**'
+      - 'apps/control-center/scripts/build.mjs'
       - 'apps/local-agent/src/control-center.ts'
       - 'test/control-center-troubleshooting.test.ts'
       - '.github/workflows/c10-safe-troubleshooting.yml'
@@ -11,6 +12,7 @@ on:
     branches: [main]
     paths:
       - 'apps/control-center/src/**'
+      - 'apps/control-center/scripts/build.mjs'
       - 'apps/local-agent/src/control-center.ts'
       - 'test/control-center-troubleshooting.test.ts'
       - '.github/workflows/c10-safe-troubleshooting.yml'
