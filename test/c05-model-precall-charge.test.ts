@@ -158,3 +158,42 @@ test('C05 settled planner cannot reuse a retained model charging callback', asyn
   await assert.rejects(callback!(40), (error: any) => error?.code === 'TASK_PLANNER_ABORTED');
   assert.equal((await f.store.get(task.id)).execution?.modelCallCount, undefined);
 });
+
+test('C05 simultaneous local-model reservations commit in sequence with no lost usage', async t => {
+  const f = await fixture(t);
+  const builtin = new SemanticTaskPlanner();
+  let charged = false;
+  const planner: TaskPlanner = {
+    id: 'test.concurrent-model-reservations',
+    supports: goal => goal.kind === 'controlled-file-change',
+    async next(context) {
+      if (!charged) {
+        charged = true;
+        const reserves = [101, 202, 303, 404];
+        const accepted = await Promise.all(reserves.map(tokens =>
+          context.reserveModelBudget!(tokens)
+        ));
+        assert.equal(accepted.length, 4);
+        const durable = await new TaskStore(f.state).get(context.task.id);
+        assert.equal(durable.execution?.modelCallCount, 4);
+        assert.equal(durable.execution?.modelReservedTokens, 1010);
+      }
+      return builtin.next(context);
+    },
+    accept: (context, step, observation) => builtin.accept(context, step, observation),
+    fallback: (context, step, observation) => builtin.fallback(context, step, observation)
+  };
+  const engine = new TaskOrchestrator({
+    runtime: f.runtime, store: f.store, permissions: f.permissions, planners: [planner]
+  });
+  const task = await engine.submit({
+    objective: 'Charge all concurrent model calls before authorizing any action',
+    authorizedScope: [f.root], successConditions: ['file independently verified'], goal: f.goal
+  });
+  const completed = await engine.run(task.id);
+  assert.equal(completed.state, 'VERIFIED', JSON.stringify(completed.failures));
+  const persisted = await new TaskStore(f.state).get(task.id);
+  assert.equal(persisted.execution?.modelCallCount, 4);
+  assert.equal(persisted.execution?.modelReservedTokens, 1010);
+  assert.equal(await fs.readFile(path.join(f.root, 'verified.txt'), 'utf8'), f.goal.content);
+});
