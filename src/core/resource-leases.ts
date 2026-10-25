@@ -101,10 +101,15 @@ export class ResourceLeaseStore {
     const keys = normalizeKeys(keysInput);
     // Even an empty key set must never bypass typed authorization contracts.
     if (mode !== 'shared' && mode !== 'exclusive') throw new OperatorError('RESOURCE_LEASE_INPUT_INVALID', 'Resource lease mode is invalid.');
+    // An empty resource set must not bypass validation of the claimed
+    // reconciliation identity, even though it acquires no actual lock.
+    if (!options || typeof options !== 'object' || Array.isArray(options)) {
+      throw new OperatorError('RESOURCE_LEASE_INPUT_INVALID', 'Resource lease options are invalid.');
+    }
+    const mutationActionId = options.mutationActionId === undefined ? undefined : bounded(options.mutationActionId, 512, 'mutationActionId');
     if (keys.length === 0) return noOpLease(ownerId, mode);
 
     const leaseId = crypto.randomUUID();
-    const mutationActionId = options.mutationActionId === undefined ? undefined : bounded(options.mutationActionId, 512, 'mutationActionId');
     const processInstance = this.#processInstance ?? await currentProcessInstance();
     await this.#mutate(async (state) => {
       await reapDeadHolders(state, this.#observeProcessInstance, processInstance);
