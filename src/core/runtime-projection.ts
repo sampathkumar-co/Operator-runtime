@@ -26,7 +26,9 @@ export function projectTaskRuntime(
   options: { journal?: ActionJournalEntry[]; approvals?: ApprovalProjectionInput[] } = {}
 ): RuntimeControlProjection {
   const records = task.execution?.records ?? [];
-  const current = [...records].reverse().find((record) => record.state === 'STARTED' || record.state === 'BLOCKED') ?? records.at(-1);
+  // Records are an append-only chronological sequence. An older blocked step
+  // cannot remain the 'current' action after a later successful/failed step.
+  const current = records.at(-1);
   const journal = current ? options.journal?.find((entry) => entry.actionId === current.actionId) : undefined;
   const approval = current ? options.approvals?.find((entry) => entry.actionId === current.actionId && entry.status === 'pending') : undefined;
   const provider = journal ? [...journal.transitions].reverse().find((transition) => transition.provider)?.provider : current?.observation?.provider;
@@ -35,9 +37,12 @@ export function projectTaskRuntime(
   const verificationDigest = typeof verificationEvidence?.data?.digest === 'string' && /^[0-9a-f]{64}$/i.test(verificationEvidence.data.digest)
     ? verificationEvidence.data.digest.toLowerCase() : undefined;
   const lastFailure = task.failures.at(-1);
+  const latestPlannerEvent = task.execution?.plannerEvents?.at(-1);
   const reconciliationRequired = journal?.state === 'UNCERTAIN'
-    || (task.execution?.plannerEvents ?? []).some((event) => event.decision === 'RECONCILE')
-    || current?.sideEffectState === 'uncertain';
+    || current?.sideEffectState === 'uncertain'
+    // Historical reconciliation events remain auditable, but do not declare
+    // a verified task permanently stuck once later work has settled.
+    || (task.state === 'BLOCKED' && latestPlannerEvent?.decision === 'RECONCILE');
   const blocker = task.state === 'BLOCKED' || task.state === 'FAILED' || reconciliationRequired
     ? {
         code: reconciliationRequired ? 'ACTION_RECONCILIATION_REQUIRED' : lastFailure?.code ?? current?.errorCode ?? task.state,
