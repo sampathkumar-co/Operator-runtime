@@ -34,7 +34,7 @@ export function assertProviderResultContract(
     const evidence = entry as Record<string, unknown>;
     if (typeof evidence.kind !== 'string' || !evidence.kind ||
         evidence.kind.length > 128 ||
-        !['pass','fail','info'].includes(String(evidence.status)) ||
+        (typeof evidence.status !== 'string' || !['pass','fail','info'].includes(evidence.status)) ||
         typeof evidence.message !== 'string' ||
         evidence.message.length > 8192 ||
         typeof evidence.timestamp !== 'string' ||
@@ -49,9 +49,9 @@ export function assertProviderResultContract(
         typeof error.message !== 'string' || error.message.length > 8192 ||
         (error.retryable !== undefined && typeof error.retryable !== 'boolean')) reject();
     if (error.sideEffectState !== undefined &&
-        !['none','known','uncertain'].includes(String(error.sideEffectState))) reject();
+        (typeof error.sideEffectState !== 'string' || !['none','known','uncertain'].includes(error.sideEffectState))) reject();
     if (error.executionPhase !== undefined &&
-        !['pre_dispatch','dispatched','effect_observed','reconciled'].includes(String(error.executionPhase))) reject();
+        (typeof error.executionPhase !== 'string' || !['pre_dispatch','dispatched','effect_observed','reconciled'].includes(error.executionPhase))) reject();
   }
   return input as ActionResult;
 }
