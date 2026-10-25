@@ -10,6 +10,8 @@ export interface TrustedModelTaskReview {
   proposalId: string;
   proposalDigest: string;
   reviewProof: unknown;
+  /** Optional Stop/cancellation fence owned by the trusted caller, never user JSON. */
+  signal?: AbortSignal;
 }
 export interface ModelTaskIntakeAuthority {
   /**
@@ -106,6 +108,9 @@ export class TrustedReviewedModelTaskIntake {
     // A long inference may finish after Stop, scope revocation, or intent replacement.
     // Discard its valid JSON rather than issuing a review against stale rights.
     const refreshed = await this.#authority.currentApprovedScope(input.principal);
+    if (input.signal?.aborted) {
+      denied('TASK_MODEL_INFERENCE_ABORTED', 'Model review generation was cancelled after inference.');
+    }
     if (!refreshed || normalizedScope(refreshed) !== normalizedScope(input.request)) {
       denied('TASK_MODEL_INTAKE_SCOPE_DENIED',
         'Approved model objective or resource scope changed while inference was running.');
@@ -132,21 +137,32 @@ export class TrustedReviewedModelTaskIntake {
         !/^[0-9a-f]{64}$/i.test(input.proposalDigest)) {
       denied('TASK_MODEL_REVIEW_INVALID', 'An exact pending review challenge and trusted review proof are required.');
     }
-    if (!(await this.#authority.verifyTrustedReview({
+    if (input.signal?.aborted) denied('TASK_MODEL_REVIEW_DENIED', 'Model task review was stopped.');
+    const nativeApproved = await this.#authority.verifyTrustedReview({
       principal: input.principal,
       proposalId: input.proposalId,
       proposalDigest: input.proposalDigest,
       reviewProof: input.reviewProof
-    }))) {
+    });
+    // A provider returning "true", 1 or an object has NOT approved a
+    // protected operation. Only a literal independent boolean true qualifies.
+    if (nativeApproved !== true) {
       denied('TASK_MODEL_REVIEW_DENIED', 'Independent native owner/session review was denied or expired.');
     }
+    // An asynchronous native reviewer can return after Stop. It must not
+    // promote an expired confirmation into the canonical task queue.
+    if (input.signal?.aborted) denied('TASK_MODEL_REVIEW_DENIED', 'Model task review was stopped.');
     const current = await this.#authority.currentApprovedScope(input.principal);
+    if (input.signal?.aborted) denied('TASK_MODEL_REVIEW_DENIED', 'Model task review was stopped.');
     const options = this.#review.confirm({
       principal: input.principal,
       proposalId: input.proposalId,
       proposalDigest: input.proposalDigest,
       currentApprovedScopeFor: () => current
     });
+    // Stop after one-use consumption intentionally burns the confirmation.
+    // Never retry a potentially submitted task following ambiguous outcomes.
+    if (input.signal?.aborted) denied('TASK_MODEL_REVIEW_DENIED', 'Model task review was stopped.');
     // Receipt was consumed BEFORE submitting, including reentrant calls.
     // A failed/uncertain submit remains failed; confirmation is not replayed.
     const submitted = await this.#authority.submitReviewedTask(options);
