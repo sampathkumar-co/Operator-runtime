@@ -356,8 +356,16 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
         : 'Physical fallback lacks complete capture-bound postcondition evidence.', versions(physical));
     }
 
+    const latestMutation = [...records].reverse().find((record) =>
+      record.stepKey === `${prefix}operate-app-target` ||
+      record.stepKey === `${prefix}operate-app-physical-fallback`);
+    const latestVerifyAttempt = [...records].reverse().find((record) => record.stepKey === `${prefix}verify-app-target`);
     const verify = lastSucceeded(records, `${prefix}verify-app-target`);
-    const inspect = verify ?? lastSucceeded(records, `${prefix}inspect-app-target`);
+    // Initial inspection is valid only for a genuine no-op. Once mutation or
+    // verification was attempted, a failed/latest attempt cannot fall back to
+    // pre-action state and promote an unverified goal to success.
+    const safeInitialOnly = !latestMutation && !latestVerifyAttempt;
+    const inspect = verify ?? (safeInitialOnly ? lastSucceeded(records, `${prefix}inspect-app-target`) : undefined);
     const state = observationState(inspect);
     const elements = Array.isArray(state.uiaElements) ? state.uiaElements.map(asRecord) : [];
     const selector = asRecord(verify ? (goal.verifySelector ?? goal.selector) : goal.selector);
@@ -368,20 +376,34 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
     }
     const operate = lastSucceeded(records, `${prefix}operate-app-target`);
     const operatePostcondition = asRecord(observationState(operate).postcondition);
-    const providerVerified = operate ? operatePostcondition.verified === true : operation === 'set_value';
+    const providerVerified = operatePostcondition.verified === true;
+    const knownFreshRead = (record: TaskActionRecord | undefined): boolean => {
+      const observed = record?.observation;
+      if (!record || record.risk !== 'read' || observed?.schemaVersion !== 2 ||
+        observed.capability !== record.capability || observed.epistemicStatus !== 'KNOWN' ||
+        observed.ambiguous === true) return false;
+      const start = Date.parse(record.startedAt);
+      const end = Date.parse(record.finishedAt ?? '');
+      const captured = Date.parse(observed.observedAt);
+      return Number.isFinite(start) && Number.isFinite(end) && Number.isFinite(captured)
+        && start <= captured && captured <= end;
+    };
+    const verifiedAfterOperation = Boolean(verify && operate && knownFreshRead(verify) &&
+      Number.isFinite(Date.parse(operate.finishedAt ?? '')) &&
+      Date.parse(verify!.startedAt) >= Date.parse(operate!.finishedAt!));
     let semanticEffect = Boolean(element);
     if (semanticEffect && operation === 'set_value') semanticEffect = element!.valueHash === sha256(String(goal.value ?? ''));
     if (semanticEffect && operation === 'focus' && element!.focused !== undefined) semanticEffect = element!.focused === true;
     if (semanticEffect && operation === 'select' && element!.selected !== undefined) semanticEffect = element!.selected === true;
     if (semanticEffect && operation === 'expand' && element!.expandCollapseState !== undefined) semanticEffect = element!.expandCollapseState === 'expanded';
     if (semanticEffect && operation === 'collapse' && element!.expandCollapseState !== undefined) semanticEffect = element!.expandCollapseState === 'collapsed';
-    const alreadySatisfied = operation === 'set_value' && !verify && semanticEffect;
-    const ok = Boolean(inspect && semanticEffect && (alreadySatisfied || (operate && providerVerified)));
+    const alreadySatisfied = operation === 'set_value' && safeInitialOnly && knownFreshRead(inspect) && semanticEffect;
+    const ok = Boolean(inspect && semanticEffect && (alreadySatisfied || (operate && providerVerified && verifiedAfterOperation)));
     return outcome(true, ok, ok
       ? alreadySatisfied
-        ? 'Initial semantic UIA observation proves the requested value already exists, so no environment mutation is required.'
-        : 'Provider-verified UIA operation plus fresh semantic reinspection proves the typed application outcome.'
-      : 'Application outcome is not proven by a unique matching semantic target and verified post-operation state.', mergeRecordVersions([inspect, operate]));
+        ? 'Fresh initial UIA inspection proves the requested value already exists and no mutation or verification was attempted.'
+        : 'Provider-verified UIA operation plus causally later independent semantic reinspection proves the typed application outcome.'
+      : 'Application outcome is not proven by a fresh post-operation semantic inspection or a clean no-op.', mergeRecordVersions([inspect, operate]));
   }
   return outcome(false, false, `No typed outcome evaluator exists for goal kind ${kind || 'missing'}.`, []);
 }
