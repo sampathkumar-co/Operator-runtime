@@ -308,6 +308,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
+      if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Windows UIA provider does not support this action on the current platform.');
       const output = action.capability === 'app.inspect'
         ? await this.#client.call('inspect', normalizeInspectInput(action.input), context.signal)
         : action.capability === 'app.operate'
