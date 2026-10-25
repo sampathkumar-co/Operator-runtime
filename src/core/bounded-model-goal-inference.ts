@@ -113,7 +113,7 @@ export class BoundedModelGoalInference {
     }
     requiredText(scope.objective, 4096, 'objective');
     for (const root of scope.approvedRoots) {
-      if (typeof root !== 'string' || root.length > 4096 || root.includes('\\0') ||
+      if (typeof root !== 'string' || root.length > 4096 || root.includes('\0') ||
           !path.isAbsolute(root)) {
         refused('TASK_MODEL_INFERENCE_INVALID', 'Approved model project roots must be absolute and bounded.');
       }
