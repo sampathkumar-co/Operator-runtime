@@ -1,6 +1,7 @@
 import { OperatorRuntime } from '../../../src/core/runtime.ts';
 import { FilesystemProvider, GitProvider, GitCheckpointProvider, GitWriteProvider, ProcessProvider, ProjectInspectProvider, ProjectCommandProvider, ProjectTransactionProvider, DockerProvider, PostgresProvider, VsCodeProvider, SystemInspectProvider, ManagedBrowserProvider, WindowsUiaProvider, SandboxedComputeProvider, PerceptionProvider, WorkspaceEditTransactionProvider, WorkspaceEditRollbackProvider, WorkspaceLspEditProvider, DocumentDataProvider } from '../../../src/capabilities/index.ts';
 import { ProviderLearningStore } from '../../../src/core/provider-learning.ts';
+import { ArtifactStore } from '../../../src/core/artifact-store.ts';
 import type { PerceptionGraphStore } from '../../../src/core/perception-graph.ts';
 
 export function createRuntime(config: {
@@ -95,5 +96,8 @@ export function createRuntime(config: {
   }
   if (config.perception) runtime.register(new PerceptionProvider(config.perception));
   runtime.register(new DocumentDataProvider({ allowedRoots: config.allowedRoots }));
-  return runtime.register(new WindowsUiaProvider({ binaryPath: config.windowsUiaPath }));
+  return runtime.register(new WindowsUiaProvider({
+    binaryPath: config.windowsUiaPath,
+    ...(config.stateDir ? {artifactStore:new ArtifactStore(config.stateDir)} : {})
+  }));
 }
