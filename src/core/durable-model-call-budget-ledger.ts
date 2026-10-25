@@ -47,7 +47,7 @@ function validLimits(value: unknown): value is DurableModelBudgetLimits {
     allowedInt(x.maxCostMicros, 0, 1_000_000_000);
 }
 function exactKeys(x: unknown, keys: string[]): x is Record<string, unknown> {
-  return Boolean(x) && typeof x === 'object' && !Array.isArray(x) &&
+  return x !== null && typeof x === 'object' && !Array.isArray(x) &&
     Object.keys(x).sort().join(',') === [...keys].sort().join(',');
 }
 function validRecord(input: unknown): input is RecordEntry {
