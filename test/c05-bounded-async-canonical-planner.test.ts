@@ -150,3 +150,74 @@ test('C05 Pause interrupts an uncooperative async planner without starting any s
   assert.equal((await running).state, 'PAUSED');
   assert.equal(dispatched, 0);
 });
+
+test('C05 Pause interrupts a hanging asynchronous repair before any action dispatch', async t => {
+  const f = await fixture(t);
+  let enteredRepair!: () => void;
+  const repairStarted = new Promise<void>(resolve => { enteredRepair = resolve; });
+  let dispatched = 0;
+  const planner: TaskPlanner = {
+    id: 'test.async-repair-pause',
+    supports: goal => goal.kind === 'controlled-file-change',
+    next: () => ({ type: 'step', key: 'bad', title: 'bad', capability: 'file.create',
+      input: null }) as unknown as PlannerDecision,
+    async repair() {
+      enteredRepair();
+      return await new Promise<PlannerDecision>(() => {});
+    },
+    accept() {}
+  };
+  const engine = new TaskOrchestrator({
+    runtime: f.runtime, store: new TaskStore(f.stateDir), permissions: f.permissions, planners: [planner],
+    executeAction: async (action, profile, context) => {
+      dispatched++; return await f.runtime.execute(action, profile, context);
+    }
+  });
+  const task = await engine.submit({
+    objective: 'Stop before repairing a malformed model decision',
+    authorizedScope: [f.root], successConditions: ['no mutations before owner resumes'],
+    goal: f.goal
+  });
+  const running = engine.run(task.id);
+  await repairStarted;
+  await engine.pause(task.id);
+  const paused = await running;
+  assert.equal(paused.state, 'PAUSED');
+  assert.equal(dispatched, 0);
+  assert.equal(paused.execution?.records.length, 0);
+});
+
+test('C05 emergency Stop aborts pending async planning and suppresses late decision', async t => {
+  const f = await fixture(t);
+  let started!: () => void, release!: (value: PlannerDecision) => void;
+  const entered = new Promise<void>(resolve => { started = resolve; });
+  const delayed = new Promise<PlannerDecision>(resolve => { release = resolve; });
+  const builtin = new SemanticTaskPlanner();
+  let dispatched = 0;
+  const planner: TaskPlanner = {
+    id: 'test.async-emergency-stop',
+    supports: goal => goal.kind === 'controlled-file-change',
+    next(context) {
+      started();
+      return delayed.then(() => builtin.next(context));
+    },
+    accept(context, step, observation) { builtin.accept(context, step, observation); }
+  };
+  const engine = new TaskOrchestrator({
+    runtime: f.runtime, store: new TaskStore(f.stateDir), permissions: f.permissions, planners: [planner],
+    executeAction: async (action, profile, context) => {
+      dispatched++; return await f.runtime.execute(action, profile, context);
+    }
+  });
+  const task = await engine.submit({
+    objective: 'No late dispatch after emergency Stop',
+    authorizedScope: [f.root], successConditions: ['no mutation'], goal: f.goal
+  });
+  const running = engine.run(task.id);
+  await entered;
+  assert.deepEqual(engine.emergencyStopActive(), [task.id]);
+  assert.equal((await running).state, 'CANCELLED');
+  release({ type: 'complete', message: 'late result' });
+  await Promise.resolve();
+  assert.equal(dispatched, 0);
+});
