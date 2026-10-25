@@ -147,3 +147,45 @@ test('C05 deleting or replacing only the used ledger never silently replenishes 
   }));
   await assert.rejects(ledger.inspect(),matching('TASK_MODEL_BUDGET_LEDGER_CORRUPT'));
 });
+
+test('C05 budget ledger refuses array-wrapped UUID and status identities without refund or new call',async t=>{
+  const root=await temp(t);
+  const ledger=new DurableModelCallBudgetLedger(root,limits);
+  const original=claim();
+  for(const altered of [
+    {...original,callId:[original.callId]},
+    {...original,callId:{toString:()=>original.callId}}
+  ]) {
+    await assert.rejects(ledger.reserve(altered as any),
+      matching('TASK_MODEL_BUDGET_RESERVATION_INVALID'));
+  }
+  assert.equal((await ledger.inspect()).calls,0);
+  const {reservationId}=await ledger.reserve(original);
+  for(const changed of [
+    {reservationId:[reservationId],callId:original.callId,outcome:'UNKNOWN_SPEND'},
+    {reservationId,callId:[original.callId],outcome:'UNKNOWN_SPEND'},
+    {reservationId,callId:original.callId,outcome:['UNKNOWN_SPEND']}
+  ]) {
+    await assert.rejects(ledger.finalize(changed as any),
+      matching('TASK_MODEL_BUDGET_FINALIZATION_INVALID'));
+  }
+  assert.equal((await ledger.inspect()).outstanding,1);
+  const file=path.join(root,'model-budget','ledger-v1.json');
+  const valid=JSON.parse(await fs.readFile(file,'utf8'));
+  const initial=JSON.stringify(valid);
+  for(const wrong of [
+    {reservationId:[reservationId]},
+    {callId:[original.callId]},
+    {status:['RESERVED']}
+  ]) {
+    valid.reservations[0]={...JSON.parse(initial).reservations[0],...wrong};
+    await fs.writeFile(file,JSON.stringify(valid));
+    await assert.rejects(ledger.inspect(),matching('TASK_MODEL_BUDGET_LEDGER_CORRUPT'));
+  }
+  await fs.writeFile(file,initial);
+  await ledger.finalize({reservationId,callId:original.callId,outcome:'UNKNOWN_SPEND'});
+  const final=await ledger.inspect();
+  assert.equal(final.calls,1);
+  assert.equal(final.unknownSpend,1);
+  assert.equal(final.remainingCalls,2,'malformed objects must never replenish or consume a budget');
+});

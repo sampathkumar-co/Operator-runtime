@@ -52,12 +52,14 @@ function exactKeys(x: unknown, keys: string[]): x is Record<string, unknown> {
 }
 function validRecord(input: unknown): input is RecordEntry {
   if (!exactKeys(input, ['reservationId','callId','modelId','maxOutputTokens','maxCostMicros','status'])) return false;
-  return UUID.test(String(input.reservationId)) && UUID.test(String(input.callId)) &&
+  return typeof input.reservationId === 'string' && UUID.test(input.reservationId) &&
+    typeof input.callId === 'string' && UUID.test(input.callId) &&
     typeof input.modelId === 'string' && input.modelId.length >= 1 &&
     input.modelId.length <= 128 && input.modelId.trim() === input.modelId &&
     allowedInt(input.maxOutputTokens, 64, 4096) &&
     allowedInt(input.maxCostMicros, 0, 2_000_000) &&
-    ['RESERVED','VALIDATED_PROPOSAL','UNKNOWN_SPEND'].includes(String(input.status));
+    typeof input.status === 'string' &&
+    ['RESERVED','VALIDATED_PROPOSAL','UNKNOWN_SPEND'].includes(input.status);
 }
 function validateFile(input: unknown, expected: DurableModelBudgetLimits): BudgetFile {
   if (!exactKeys(input, ['schemaVersion', 'limits', 'reservations']) ||
@@ -160,7 +162,8 @@ export class DurableModelCallBudgetLedger implements ModelCallBudgetLedger {
   async reserve(input: {
     callId: string; modelId: string; maxOutputTokens: number; maxCostMicros: number;
   }): Promise<{ reservationId: string }> {
-    if (!input || !UUID.test(input.callId) || typeof input.modelId !== 'string' ||
+    if (!input || typeof input.callId !== 'string' || !UUID.test(input.callId) ||
+        typeof input.modelId !== 'string' ||
         !input.modelId.trim() || input.modelId.trim() !== input.modelId ||
         input.modelId.length > 128 || !allowedInt(input.maxOutputTokens, 64, 4096) ||
         !allowedInt(input.maxCostMicros, 0, 2_000_000)) {
@@ -213,8 +216,9 @@ export class DurableModelCallBudgetLedger implements ModelCallBudgetLedger {
   async finalize(input: {
     reservationId: string; callId: string; outcome: 'VALIDATED_PROPOSAL' | 'UNKNOWN_SPEND';
   }): Promise<void> {
-    if (!input || !UUID.test(input.reservationId) || !UUID.test(input.callId) ||
-        !['VALIDATED_PROPOSAL', 'UNKNOWN_SPEND'].includes(input.outcome)) {
+    if (!input || typeof input.reservationId !== 'string' || !UUID.test(input.reservationId) ||
+        typeof input.callId !== 'string' || !UUID.test(input.callId) ||
+        (input.outcome !== 'VALIDATED_PROPOSAL' && input.outcome !== 'UNKNOWN_SPEND')) {
       denied('TASK_MODEL_BUDGET_FINALIZATION_INVALID', 'Model finalization identity is invalid.');
     }
     await this.#prepare();
