@@ -169,9 +169,9 @@ class WindowsUiaSidecarClient {
 
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => {
-      for (const line of chunk.split(/\r?\n/).filter(Boolean)) {
-        // Native stderr is diagnostic but not cleared for secrets. Retain only
-        // an opaque bounded marker, never the user-controlled text itself.
+      const emittedLines = Math.min(20, chunk.split(/\r?\n/).filter(Boolean).length);
+      for (let index = 0; index < emittedLines; index += 1) {
+        // Native stderr is not cleared for secrets; store bounded markers only.
         this.#stderrTail.push('NATIVE_STDERR_REDACTED');
         if (this.#stderrTail.length > 20) this.#stderrTail.shift();
       }
@@ -569,6 +569,10 @@ function normalizeSelector(input: unknown, exactMutationTarget = false) {
     throw new OperatorError('INVALID_UIA_SELECTOR', 'Mutating UIA operation requires a semantic selector object.');
   }
   const raw = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  if (exactMutationTarget && Object.keys(raw).some(key =>
+    !['name', 'automationId', 'className', 'controlType', 'processId'].includes(key))) {
+    throw new OperatorError('INVALID_UIA_SELECTOR', 'UIA mutation selector contains unsupported identity fields.');
+  }
   const text = (key: string) => {
     const candidate = raw[key];
     if (candidate === undefined) return undefined;
