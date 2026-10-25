@@ -20,6 +20,7 @@ export class SystemInspectProvider implements CapabilityProvider {
 
   async execute(action: ActionRequest): Promise<ActionResult> {
     const started = performance.now();
+    if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Computer inspect provider does not support this capability.');
     const output = {
       hostname: os.hostname(),
       platform: os.platform(),
