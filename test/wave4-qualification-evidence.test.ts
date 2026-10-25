@@ -49,12 +49,12 @@ test('source-only execution reports every gate NOT_RUN deterministically and nev
   assert.deepEqual(left.gates.map(gate => gate.gate), WAVE4_QUALIFICATION_GATES);
 });
 
-test('nine exact-source artifacts produce one deterministic digest-bound qualified manifest', async t => {
+test('nine self-declared PASS artifacts remain explicitly unverified even when digest-bound', async t => {
   const root = await fixture(t);
   const input = declaration();
   for (const gate of WAVE4_QUALIFICATION_GATES) await attach(root, input, gate);
   const report = await buildWave4QualificationEvidence({ candidateSha, evidenceRoot: root, declaration: input });
-  assert.equal(report.qualificationStatus, 'QUALIFIED');
+  assert.equal(report.qualificationStatus, 'ALL_GATES_DECLARED_PASS_UNVERIFIED');
   assert.deepEqual(report.counts, { pass: 9, fail: 0, notRun: 0 });
   assert.ok(report.gates.every(gate => gate.evidenceSha256 && gate.artifacts[0]?.sizeBytes > 0));
   assert.equal(report.publicationAllowed, false);
