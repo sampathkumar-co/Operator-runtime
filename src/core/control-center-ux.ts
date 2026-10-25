@@ -456,9 +456,12 @@ function boolean(value: unknown, label: string): boolean {
 }
 
 function boundedId(value: unknown, label: string): string {
-  const text = String(value ?? '');
-  if (!/^[A-Za-z0-9._:@/+\-=]{1,512}$/.test(text)) throw invalid(label + ' is invalid.');
-  return text;
+  // Identity fields are owned by the runtime. Never allow object-coercion to
+  // fabricate a plausible approval, lease or recovery action identifier.
+  if (typeof value !== 'string' || !/^[A-Za-z0-9._:@/+\-=]{1,512}$/.test(value)) {
+    throw invalid(label + ' is invalid.');
+  }
+  return value;
 }
 
 function boundedText(value: unknown, maxBytes: number, label: string): string {
@@ -469,7 +472,8 @@ function boundedText(value: unknown, maxBytes: number, label: string): string {
 }
 
 function canonicalIso(value: unknown, label: string): string {
-  const text = String(value ?? '');
+  if (typeof value !== 'string') throw invalid(label + ' must be canonical ISO.');
+  const text = value;
   if (!text || !Number.isFinite(Date.parse(text)) || new Date(text).toISOString() !== text) throw invalid(label + ' must be canonical ISO.');
   return text;
 }
