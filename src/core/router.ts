@@ -34,6 +34,14 @@ export class CapabilityRouter {
   }
 
   register(provider: CapabilityProvider): void {
+    // Provider identity is used for exact reconciliation and learned routing.
+    // Refuse collisions before they can create ambiguous recovery ownership.
+    if (typeof provider.name !== 'string' || provider.name.length === 0 || provider.name.length > 256) {
+      throw new OperatorError('CAPABILITY_PROVIDER_NAME_INVALID', 'Capability provider name must be a non-empty string of at most 256 characters.');
+    }
+    if (this.#providers.some((registered) => registered.name === provider.name)) {
+      throw new OperatorError('CAPABILITY_PROVIDER_DUPLICATE', `Capability provider ${provider.name} is already registered.`);
+    }
     this.#providers.push(provider);
   }
 
