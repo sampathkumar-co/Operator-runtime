@@ -403,13 +403,18 @@ function evaluateQualityGate(records: TaskActionRecord[], state: Record<string, 
     : 'At least one compiled trusted quality check lacks successful durable machine evidence.', mergeRecordVersions(used));
 }
 
+// Only the terminal attempt for an identity can attest an outcome. Never
+// resurrect an earlier successful receipt after a later failed, interrupted,
+// blocked or uncertain attempt for the same verification step.
 function lastSucceeded(records: TaskActionRecord[], stepKey: string): TaskActionRecord | undefined {
-  return [...records].reverse().find((record) => record.stepKey === stepKey && record.state === 'SUCCEEDED');
+  const latest = [...records].reverse().find((record) => record.stepKey === stepKey);
+  return latest?.state === 'SUCCEEDED' ? latest : undefined;
 }
 
 function lastSucceededAny(records: TaskActionRecord[], stepKeys: string[]): TaskActionRecord | undefined {
   const allowed = new Set(stepKeys);
-  return [...records].reverse().find((record) => allowed.has(record.stepKey) && record.state === 'SUCCEEDED');
+  const latest = [...records].reverse().find((record) => allowed.has(record.stepKey));
+  return latest?.state === 'SUCCEEDED' ? latest : undefined;
 }
 
 function observationState(record: TaskActionRecord | undefined): Record<string, unknown> {
