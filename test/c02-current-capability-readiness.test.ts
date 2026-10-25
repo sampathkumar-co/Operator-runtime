@@ -130,6 +130,11 @@ test('C02 source readiness does not trust malformed or self-contradictory provid
     { ...snapshot, registeredProviders: -1 },
     { ...snapshot, registeredProviders: 1.5 },
     mutated({ canonicalRisk: 'UNKNOWN_RISK' }),
+    mutated({ canonicalRisk: first.canonicalRisk === 'read' ? 'write' : 'read' }),
+    { ...snapshot, registeredProviders: 0, capabilities: [
+      { ...first, providerNames: ['forged-provider'], status: 'DECLARED_NOT_EXECUTED' },
+      ...snapshot.capabilities.slice(1)
+    ] },
     mutated({ providerNames: ['duplicate', 'duplicate'] }),
     mutated({ status: 'DECLARED_NOT_EXECUTED', providerNames: [] }),
     mutated({ status: 'NOT_ADVERTISED_WITH_EMPTY_INPUT', providerNames: ['claimed-provider'] }),
