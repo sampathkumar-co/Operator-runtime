@@ -87,9 +87,17 @@ export function compareMatchedPerformance({ baseline, candidate }) {
   const keys = [...oldRows.keys()].sort();
   const a = summarize(keys.map(k => oldRows.get(k)));
   const b = summarize(keys.map(k => newRows.get(k)));
-  const candidateNotWorse = b.p95Ms <= a.p95Ms &&
+  // Aggregate success can hide a swapped failure: candidate succeeds at an
+  // easier task while regressing a previously verified user journey. Require
+  // no loss of the independent scorer's result for *each* matched identity.
+  const noLostVerifiedJourneys = keys.every(key =>
+    oldRows.get(key).verifiedSuccess !== true || newRows.get(key).verifiedSuccess === true
+  );
+  const candidateNotWorse = b.p95Ms <= a.p95Ms && b.p99Ms <= a.p99Ms &&
+    noLostVerifiedJourneys &&
     b.verifiedSuccesses >= a.verifiedSuccesses &&
     b.falseCompletionCount <= a.falseCompletionCount &&
+    b.humanInterventions <= a.humanInterventions &&
     b.unauthorizedOperations === 0 && b.uncertainReplays === 0;
   return {
     schemaVersion: 1,
