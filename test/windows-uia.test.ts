@@ -330,3 +330,28 @@ test('C04 UIA mutation cannot silently ignore unknown selector identity constrai
   assert.equal(result.error?.code,'INVALID_UIA_SELECTOR');
   await provider.close();
 });
+
+test('C04 native invoke dispatch is not falsely labeled as verified application outcome', async () => {
+  const run = async (postcondition: Record<string, unknown>) => {
+    const provider=new WindowsUiaProvider({
+      platform:'win32',
+      client:{async call(){return { postcondition };},close(){}}
+    });
+    const result=await provider.execute({
+      id:'uia-invoke-dispatch-truth',capability:'app.operate',risk:'external',provenance,
+      input:{operation:'invoke',selector:{automationId:'save'}}
+    });
+    await provider.close();
+    return result;
+  };
+  const dispatch=await run({element_reachable:true});
+  assert.equal(dispatch.ok,true);
+  const unverified=dispatch.evidence.find(x=>x.kind==='postcondition');
+  assert.equal(unverified?.status,'info');
+  assert.equal(unverified?.data?.verified,false);
+  assert.equal(dispatch.evidence.some(x=>x.message.includes('verified UI Automation')),false);
+
+  const verified=await run({verified:true});
+  assert.equal(verified.evidence.find(x=>x.kind==='postcondition')?.status,'pass');
+  assert.equal(verified.evidence.find(x=>x.kind==='postcondition')?.data?.verified,true);
+});
