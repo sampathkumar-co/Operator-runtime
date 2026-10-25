@@ -43,7 +43,18 @@ test('C03 rejects malformed browser operations before contacting any CDP endpoin
     { capability:'browser.interact', input:{targetId:'tab1',operation:'click_relative',target:{ref:'b-1'},xPx:true,yPx:40}, error:'INVALID_BROWSER_POINT' },
     { capability:'browser.interact', input:{targetId:'tab1',operation:'keyboard_text',target:{ref:'b-1'},value:['hello']}, error:'INVALID_BROWSER_TEXT' },
     { capability:'browser.interact', input:{targetId:'tab1',operation:'select_date',target:{ref:'b-1'},value:['2026-10-25']}, error:'INVALID_BROWSER_DATE' },
-    { capability:'browser.interact', input:{targetId:'tab1',operation:'format_text',target:{ref:'b-1'},value:['bold']}, error:'INVALID_BROWSER_FORMAT' }
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'format_text',target:{ref:'b-1'},value:['bold']}, error:'INVALID_BROWSER_FORMAT' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'key_press',target:{ref:'b-1'},key:['Enter']}, error:'INVALID_BROWSER_KEY' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'key_press',target:{ref:'b-1'},key:''}, error:'INVALID_BROWSER_KEY' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'hotkey',target:{ref:'b-1'},keys:[['CTRL'],'A']}, error:'INVALID_BROWSER_HOTKEY' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'hotkey',target:{ref:'b-1'},keys:['CTRL',42]}, error:'INVALID_BROWSER_HOTKEY' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'hotkey',target:{ref:'b-1'},keys:[]}, error:'INVALID_BROWSER_HOTKEY' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'select_text_range',target:{ref:'b-1'},start:'0',end:2}, error:'INVALID_BROWSER_TEXT_RANGE' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'select_text_range',target:{ref:'b-1'},start:2,end:1}, error:'INVALID_BROWSER_TEXT_RANGE' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'select_text_range',target:{ref:'b-1'},start:0,end:Infinity}, error:'INVALID_BROWSER_TEXT_RANGE' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'click',target:{ref:'b-1'},expectDownload:['true']}, error:'INVALID_DOWNLOAD_INTERACTION' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'click',target:{ref:'b-1'},expectDownload:true,downloadTimeoutMs:'30000'}, error:'INVALID_DOWNLOAD_TIMEOUT' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'click',target:{ref:'b-1'},expectDownload:true,downloadTimeoutMs:[30000]}, error:'INVALID_DOWNLOAD_TIMEOUT' }
   ];
   try {
     for (const [index, entry] of cases.entries()) {
