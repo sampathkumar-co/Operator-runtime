@@ -298,3 +298,52 @@ test('missing durable reservation never permits optional model invocation', asyn
     (error: any) => error?.code === 'TASK_MODEL_BUDGET_UNAVAILABLE');
   assert.equal(calls, 0);
 });
+
+test('C05 provider-neutral injected ranker sees only preauthorized candidates and safe metadata', async () => {
+  let invoked = 0, reserved = 0;
+  const planner = new LocalModelAutonomousWorkflowPlanner({
+    model: 'trusted-private-provider',
+    now: () => TIME,
+    fetchFn: (async () => { throw new Error('Local transport must not run when injected ranker is set'); }) as typeof fetch,
+    ranker: { async select(input) {
+      invoked++;
+      assert.equal(input.modelId, 'trusted-private-provider');
+      assert.equal(input.candidateCount, 2);
+      assert.ok(input.signal instanceof AbortSignal);
+      for (const forbidden of ['SECRET_', '/approved-project', 'private.example']) {
+        assert.equal(input.prompt.includes(forbidden), false);
+      }
+      return 1;
+    } }
+  });
+  const ctx = context();
+  ctx.reserveModelBudget = async () => { reserved++; };
+  const decision = await planner.next(ctx);
+  assert.equal(invoked, 1);
+  assert.equal(reserved, 1);
+  assert.equal(decision.type, 'step');
+  if (decision.type === 'step') assert.equal(decision.key, 'autonomous:2:observe');
+});
+
+test('C05 untrusted injected ranker cannot fabricate an action or select out of bound candidate', async () => {
+  const planner = new LocalModelAutonomousWorkflowPlanner({
+    model: 'trusted-private-provider', now: () => TIME,
+    ranker: { async select() { return 99; } }
+  });
+  const ctx = context();
+  await assert.rejects(() => planner.next(ctx),
+    (error: any) => error?.code === 'TASK_MODEL_SUBGOAL_INVALID');
+  assert.equal(ctx.task.execution!.plannerState.activeSubgoalId, undefined);
+});
+
+test('C05 provider-neutral inference is bounded even if an injected provider ignores AbortSignal', async () => {
+  const planner = new LocalModelAutonomousWorkflowPlanner({
+    model: 'trusted-private-provider', now: () => TIME,
+    ranker: { async select() { return await new Promise<number>(() => {}); } }
+  });
+  const ctx = context();
+  ctx.budget.activeDeadlineMsRemaining = 30;
+  await assert.rejects(() => planner.next(ctx),
+    (error: any) => error?.code === 'TASK_MODEL_SUBGOAL_TIMEOUT');
+  assert.equal(ctx.task.execution!.plannerState.activeSubgoalId, undefined);
+});
