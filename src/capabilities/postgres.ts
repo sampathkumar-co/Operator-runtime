@@ -296,21 +296,21 @@ function validateRegistry(input: unknown): Registry {
     if (!entry || typeof entry !== 'object') throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${index} is invalid.`);
     const value = entry as Record<string, unknown>;
     const id = value.id;
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id) || seen.has(id)) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${index} id is invalid or duplicated.`);
+    if (typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id) || seen.has(id)) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${index} id is invalid or duplicated.`);
     seen.add(id);
-    const roots = Array.isArray(value.roots) ? value.roots : [];
+    const roots: string[] = Array.isArray(value.roots) && value.roots.every(root => typeof root === 'string') ? value.roots : [];
     if (roots.length === 0 || roots.length > 20 || roots.some((root) => typeof root !== 'string' || !path.isAbsolute(root))) {
       throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${id} requires 1-20 absolute project roots.`);
     }
     const host = boundedText(value.host, 512, `Profile ${id} host`);
     const port = value.port === undefined ? 5432 : value.port;
-    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${id} port is invalid.`);
+    if (typeof port !== 'number' || !Number.isSafeInteger(port) || port < 1 || port > 65535) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${id} port is invalid.`);
     const database = boundedText(value.database, 128, `Profile ${id} database`);
     const user = boundedText(value.user, 128, `Profile ${id} user`);
     const passwordEnv = value.passwordEnv;
-    if (passwordEnv !== undefined && !/^[A-Z_][A-Z0-9_]{0,127}$/.test(passwordEnv)) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${id} passwordEnv is invalid.`);
+    if (passwordEnv !== undefined && (typeof passwordEnv !== 'string' || !/^[A-Z_][A-Z0-9_]{0,127}$/.test(passwordEnv))) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${id} passwordEnv is invalid.`);
     const sslMode = value.sslMode === undefined ? 'prefer' : value.sslMode;
-    if (!['disable', 'prefer', 'require'].includes(sslMode)) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${id} sslMode is invalid.`);
+    if (typeof sslMode !== 'string' || !['disable', 'prefer', 'require'].includes(sslMode)) throw new OperatorError('POSTGRES_REGISTRY_INVALID', `Profile ${id} sslMode is invalid.`);
     const title = typeof value.title === 'string' ? value.title.trim().slice(0, 160) || undefined : undefined;
     return { id, title, roots: roots.map((root) => path.resolve(root)), host, port, database, user, passwordEnv, sslMode: sslMode as Profile['sslMode'] };
   });
