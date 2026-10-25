@@ -145,9 +145,20 @@ export class DockerProvider implements CapabilityProvider {
         });
       }
       const ids = [...new Set(selected.map((container) => container.id))].sort();
+      // Expected fingerprint may have been captured before the project read,
+      // but even that read can race with a container replacement. Re-inspect
+      // immediately before the Docker mutation and refuse changed ownership.
+      const preDispatch = await this.#inspectProject(before.root, executionContext.signal);
+      if (preDispatch.fingerprint !== before.fingerprint) {
+        throw new OperatorError('DOCKER_STATE_CHANGED', 'Compose container identity/state changed immediately before dispatch.', {
+          retryable: true,
+          details: { sideEffectState: 'none', executionPhase: 'pre_dispatch' }
+        });
+      }
       await this.#run(before.context, [operation, ...ids], timeoutMs, executionContext.signal);
 
       const after = await this.#inspectProject(before.root, executionContext.signal);
+      assertManagedComposeIdentity(ids, services, after.containers);
       verifyLifecyclePostcondition(operation, services, after.containers);
       return success(action, started, {
         operation,
@@ -396,6 +407,28 @@ function summarizeServices(containers: ComposeContainer[]): Array<{ service: str
     containers: items.length,
     states: [...new Set(items.map((item) => item.state))].sort()
   }));
+}
+
+/** Post-dispatch success is not provable if the service now refers to
+ * different containers, even if the replacements happen to be running. */
+export function assertManagedComposeIdentity(
+  expectedIds: readonly string[],
+  services: readonly string[],
+  observed: readonly { id: string; service: string }[]
+): void {
+  const exact = [...new Set(expectedIds)].sort();
+  const current = [...new Set(observed
+    .filter(container => services.includes(container.service))
+    .map(container => container.id))].sort();
+  if (!exact.length || current.length !== exact.length ||
+      exact.some((id,index) => id !== current[index])) {
+    throw new OperatorError('DOCKER_CONTAINER_IDENTITY_CHANGED',
+      'Compose service container ownership changed while Docker mutation was in flight; operation outcome requires independent recovery.', {
+        retryable: false,
+        details: { sideEffectState: 'uncertain', executionPhase: 'effect_observed',
+          expectedContainerCount: exact.length, observedContainerCount: current.length }
+      });
+  }
 }
 
 function verifyLifecyclePostcondition(operation: string, services: string[], containers: ComposeContainer[]): void {
