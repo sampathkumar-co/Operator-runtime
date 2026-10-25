@@ -7,6 +7,8 @@ const sha = 'a'.repeat(40);
 const now = 2_000_000;
 const keys = crypto.generateKeyPairSync('ed25519');
 const publicKeyPem = keys.publicKey.export({ format: 'pem', type: 'spki' }).toString();
+const expectedPinnedKeySha256 = crypto.createHash('sha256')
+  .update(keys.publicKey.export({ format: 'der', type: 'spki' })).digest('hex');
 const readiness = {
   totalTasks: 134, sourceChecklistAccepted: 134, sourceChecklistPending: 0,
   candidateSha: sha, releaseAuthorization: 'NOT_GRANTED'
@@ -31,7 +33,7 @@ function sign(payload = envelope(), key = keys.privateKey) {
 }
 function verify(input: any = {}) {
   return validateOwnerApprovedPublication({
-    readiness, publicKeyPem, nowMs: now, ...sign(), ...input
+    readiness, publicKeyPem, expectedPinnedKeySha256, nowMs: now, ...sign(), ...input
   });
 }
 test('C11 requires all 134 accepted source checklist items before any owner assertion is considered', () => {
@@ -79,4 +81,11 @@ test('C11 expired, future, overlong and wrong-source owner approval cannot relea
   overlong.expiresAtMs = overlong.issuedAtMs + 25 * 60 * 60 * 1000;
   assert.throws(() => verify(sign(overlong)), /valid 24h issuance window/);
   assert.throws(() => verify({ publicKeyPem: 'not a key' }), /signer is missing/);
+});
+
+test('C11 a valid owner signature is still denied if source reviewer has not pinned its public key', () => {
+  assert.throws(() => verify({ expectedPinnedKeySha256: null }),
+    /owner signer is not source-pinned/);
+  assert.throws(() => verify({ expectedPinnedKeySha256: 'f'.repeat(64) }),
+    /owner signer is not source-pinned/);
 });
