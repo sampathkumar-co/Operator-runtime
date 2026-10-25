@@ -1411,11 +1411,19 @@ export function interactionFunction(input: { operation: string; target: { ref?: 
       const ancestorName = labelledAncestor?.getAttribute('aria-label') || labelledAncestor?.getAttribute('title') || labelledAncestor?.getAttribute('id');
       if (ancestorName) return trim(ancestorName);
     }
+    const inputType = element.tagName === 'INPUT' ? trim(element.getAttribute('type') || 'text').toLowerCase() : '';
+    // Action matching must use the same visible accessible name as inspect
+    // and cross-frame lookup. Never expose password/text input values.
+    const inputActionName = element.tagName === 'INPUT' && ['button', 'submit', 'reset', 'image'].includes(inputType)
+      ? (element.getAttribute('alt') || element.getAttribute('value') ||
+          (inputType === 'submit' ? 'Submit' : inputType === 'reset' ? 'Reset' : ''))
+      : '';
     const explicitRole = trim(element.getAttribute('role')).toLowerCase();
     const nativeText = ['BUTTON', 'SUMMARY', 'A', 'OPTION'].includes(element.tagName) ? trim(element.textContent) : '';
     const roleText = explicitRole && !['textbox', 'searchbox', 'combobox', 'slider'].includes(explicitRole) ? trim(element.textContent) : '';
     return trim(
       element.getAttribute('placeholder')
+      || inputActionName
       || nativeText
       || roleText
       || element.getAttribute('title')
