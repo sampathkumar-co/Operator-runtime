@@ -75,6 +75,11 @@ export class GitProvider implements CapabilityProvider {
       return gitFailure(action, 'GIT_INPUT_INVALID', 'Git paths must be a bounded array of literal string values.');
     }
     const paths: string[] = Array.isArray(suppliedPaths) ? suppliedPaths as string[] : [];
+    if (action.input.publicLiteralFiles !== undefined && (
+      action.capability !== 'git.diff' || typeof action.input.publicLiteralFiles !== 'boolean'
+    )) {
+      return gitFailure(action, 'GIT_INPUT_INVALID', 'Git public literal mode must be a typed Boolean on diff only.');
+    }
     const publicLiteral = action.capability === 'git.diff' && action.input.publicLiteralFiles === true;
 
     if (action.capability !== 'git.rev-parse') {
