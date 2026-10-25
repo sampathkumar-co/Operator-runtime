@@ -37,7 +37,7 @@ const PUBLIC_UIA_ERROR_CODES = new Set([
   'UIA_SIDECAR_PROTOCOL_INVALID',
   'UIA_SIDECAR_TERMINATE_FAILED', 'UIA_REQUEST_TOO_LARGE',
   'INVALID_UIA_OPERATION', 'INVALID_UIA_SCROLL_AMOUNT',
-  'INVALID_UIA_SELECTOR', 'INVALID_UIA_VALUE',
+  'INVALID_UIA_SELECTOR', 'INVALID_UIA_VALUE', 'INVALID_UIA_INSPECT_LIMIT',
   'INPUT_AFTER_CAPTURE_INVALID', 'INPUT_AFTER_CAPTURE_FAILED',
   'INPUT_AFTER_WINDOW_CHANGED', 'INPUT_CAPTURE_INVALID',
   'INPUT_CAPTURE_MISMATCH', 'INPUT_CAPTURE_REVALIDATION_FAILED',
@@ -677,11 +677,18 @@ function normalizeMaxWindows(value: unknown): number {
   return Number.isInteger(value) ? Math.min(Math.max(Number(value), 1), MAX_WINDOWS) : DEFAULT_MAX_WINDOWS;
 }
 
+function boundedInspectLimit(value: unknown, maximum: number, field: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > maximum) {
+    throw new OperatorError('INVALID_UIA_INSPECT_LIMIT', field + ' must be an exact positive integer within the native helper limit.');
+  }
+  return Number(value);
+}
 function normalizeInspectInput(input: Record<string, unknown>) {
   return {
     selector: input.selector ? normalizeSelector(input.selector) : undefined,
-    max_nodes: Number.isInteger(input.maxNodes) ? Number(input.maxNodes) : undefined,
-    max_depth: Number.isInteger(input.maxDepth) ? Number(input.maxDepth) : undefined,
+    max_nodes: boundedInspectLimit(input.maxNodes, 1500, 'maxNodes'),
+    max_depth: boundedInspectLimit(input.maxDepth, 12, 'maxDepth'),
     observe_ms: normalizeObserveMs(input.observeMs),
     wait_ms: normalizeWaitMs(input.waitMs),
     include_windows: input.includeWindows === true,
