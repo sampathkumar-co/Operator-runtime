@@ -552,6 +552,46 @@ async function healthCheckUia() {
   });
 }
 
+/**
+ * Optional system-browser discovery is advisory, not an execution test.
+ * Managed Chromium, live CDP, login state and owner-authorized root cannot
+ * be certified from file existence in a package health check.
+ */
+export async function inspectOptionalBrowsers({
+  platform = process.platform,
+  env = process.env,
+  fileExists = async (file) => {
+    try {
+      const entry = await fs.lstat(file);
+      return entry.isFile() && !entry.isSymbolicLink();
+    } catch { return false; }
+  }
+} = {}) {
+  const unknown = { chrome: 'NOT_CHECKED', edge: 'NOT_CHECKED', managedChromium: 'NOT_CHECKED',
+    liveCdpSession: 'NOT_CHECKED', authorizedRoots: 'CHECKED_AT_REMOTE_START' };
+  if (platform !== 'win32') return unknown;
+  const validRoot = (value) => typeof value === 'string' && path.win32.isAbsolute(value)
+    && ![...value].some((character) => [0, 10, 13].includes(character.charCodeAt(0)));
+  const roots = [env.PROGRAMFILES, env['PROGRAMFILES(X86)'], env.LOCALAPPDATA]
+    .filter(validRoot).slice(0, 3);
+  const known = {
+    chrome: ['Google', 'Chrome', 'Application', 'chrome.exe'],
+    edge: ['Microsoft', 'Edge', 'Application', 'msedge.exe']
+  };
+  const found = {};
+  for (const [name, suffix] of Object.entries(known)) {
+    found[name] = 'NOT_DETECTED';
+    for (const root of roots) {
+      const file = path.win32.join(root, ...suffix);
+      try {
+        if (await fileExists(file)) { found[name] = 'DETECTED'; break; }
+      } catch { /* optional browser probe cannot change runtime doctor status */ }
+    }
+  }
+  return { ...found, managedChromium: 'NOT_CHECKED', liveCdpSession: 'NOT_CHECKED',
+    authorizedRoots: 'CHECKED_AT_REMOTE_START' };
+}
+
 export async function doctor() {
   assertSupportedRuntime();
   const manifest = await verifyRuntimePayload();
@@ -563,6 +603,9 @@ export async function doctor() {
   console.log(`Source: ${manifest.sourceCommit}`);
   console.log(`Runtime files: ${manifest.files.length}`);
   console.log(`Relay authority: ${RELAY_URL}`);
+  const browsers = await inspectOptionalBrowsers();
+  console.log(`Optional system browser candidates: Chrome=${browsers.chrome}; Edge=${browsers.edge}`);
+  console.log('Managed Chromium, live CDP and authorized root: NOT_CHECKED by doctor (validated at remote startup).');
   return manifest;
 }
 
