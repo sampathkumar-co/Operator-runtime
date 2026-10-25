@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import cryptoNS from 'node:crypto';
 import path from 'node:path';
 import test from 'node:test';
 import { AuthorityKernel } from '../src/core/authority-kernel.ts';
@@ -287,4 +288,45 @@ test('runtime revalidates selected-provider dynamic risk immediately before disp
   assert.equal(result.error?.sideEffectState, 'none');
   assert.equal(dispatched, false);
   assert.equal(calls, 0);
+});
+
+test('C08 token risk ceilings reject proto keys, null and noncanonical values before signing',()=>{
+  const root=path.resolve('/tmp/operator-authority-invalid-risk');
+  const kernel=new AuthorityKernel({secret:Buffer.alloc(32,31)});
+  const profile:PermissionProfile={
+    allowedCapabilities:['browser.interact','file.*'], allowedRoots:[root],
+    maxRisk:'destructive',allowExternalWrites:true,allowDestructive:true
+  };
+  for(const value of ['__proto__','constructor','toString','unknown','READ',null,0,{valueOf:()=>0}]) {
+    assert.throws(()=>kernel.issueToken(profile,{
+      capability:'browser.interact',maxRisk:value as any
+    }),(error:any)=>error?.code==='AUTHORITY_RISK_INVALID',String(value));
+    assert.throws(()=>kernel.issueToken({...profile,maxRisk:value as any},{
+      capability:'browser.interact'
+    }),(error:any)=>error?.code==='AUTHORITY_RISK_INVALID','parent '+String(value));
+  }
+  const safe=kernel.issueToken(profile,{capability:'browser.interact',maxRisk:'read'});
+  assert.equal(safe.claims.maxRisk,'read');
+});
+
+test('C08 even a valid-MAC legacy malformed risk token cannot authorize external execution',()=>{
+  const root=path.resolve('/tmp/operator-authority-legacy-invalid-risk');
+  const secret=Buffer.alloc(32,37);
+  const kernel=new AuthorityKernel({secret});
+  const profile:PermissionProfile={allowedCapabilities:['browser.interact'],allowedRoots:[root],
+    maxRisk:'destructive',allowExternalWrites:true,allowDestructive:true};
+  const granted=kernel.issueToken(profile,{capability:'browser.interact',maxRisk:'read'});
+  const claims={...granted.claims,maxRisk:'toString' as any};
+  const payload=JSON.stringify({
+    version:claims.version,tokenId:claims.tokenId,capability:claims.capability,
+    roots:claims.roots,maxRisk:claims.maxRisk,actionIds:claims.actionIds,
+    issuedAt:claims.issuedAt,expiresAt:claims.expiresAt
+  });
+  const mac=cryptoNS.createHmac('sha256',secret).update(payload).digest('hex');
+  const action:ActionRequest={
+    id:'external-action',capability:'browser.interact',risk:'external',input:{},
+    provenance:{kind:'chatgpt'}
+  };
+  assert.throws(()=>kernel.verifyToken({claims,mac},action,profile),
+    (error:any)=>error?.code==='AUTHORITY_TOKEN_INVALID');
 });
