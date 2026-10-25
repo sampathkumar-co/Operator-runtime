@@ -398,25 +398,48 @@ export class TaskOrchestrator {
       const planningController = new AbortController();
       this.#planningControllers.set(task.id, planningController);
       const planningSignal = AbortSignal.any([signal, planningController.signal]);
+      // Model callbacks may call reserveModelBudget concurrently. Serialize
+      // durable writes, not merely arithmetic, so an older persisted snapshot
+      // cannot overwrite the final charge after a later callback completes.
+      let reservationQueue: Promise<void> = Promise.resolve();
+      let reservationPersistenceFailed = false;
       const reserveModelBudget = async (maxTokens: number): Promise<void> => {
         if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 100_000) {
           throw new OperatorError('TASK_MODEL_BUDGET_INVALID', 'Model token reservation must be a positive bounded integer.');
         }
-        if (planningSignal.aborted) {
-          throw new OperatorError('TASK_PLANNER_ABORTED', 'Stopped planner cannot reserve another model call.');
-        }
-        const available = taskDecisionBudget(current, this.#wallNow());
-        if (available.modelCalls.remaining < 1 || available.tokens.remaining < maxTokens ||
-            available.elapsedMs.remaining < 1) {
-          throw new OperatorError('TASK_MODEL_BUDGET_EXHAUSTED', 'Durable task model budget is exhausted.');
-        }
-        // Charge before transmitting the model prompt. Timeouts, provider
-        // refusal and crashes never silently refund an uncertain call.
-        current.modelCallCount = (current.modelCallCount ?? 0) + 1;
-        current.modelReservedTokens = (current.modelReservedTokens ?? 0) + maxTokens;
-        const control = await this.#persistRunState(task, assertLease);
-        if (control || planningSignal.aborted) {
-          throw new OperatorError('TASK_PLANNER_ABORTED', 'Model budget reserved but execution was stopped before model dispatch.');
+        const prior = reservationQueue;
+        let release!: () => void;
+        reservationQueue = new Promise<void>(resolve => { release = resolve; });
+        await prior;
+        try {
+          if (planningSignal.aborted) {
+            throw new OperatorError('TASK_PLANNER_ABORTED', 'Stopped planner cannot reserve another model call.');
+          }
+          if (reservationPersistenceFailed) {
+            throw new OperatorError('TASK_MODEL_BUDGET_PERSIST_FAILED', 'An earlier model reservation could not be durably committed.');
+          }
+          const available = taskDecisionBudget(current, this.#wallNow());
+          if (available.modelCalls.remaining < 1 || available.tokens.remaining < maxTokens ||
+              available.elapsedMs.remaining < 1) {
+            throw new OperatorError('TASK_MODEL_BUDGET_EXHAUSTED', 'Durable task model budget is exhausted.');
+          }
+          // Charge before transmitting the model prompt. Timeouts, provider
+          // refusal and crashes never silently refund an uncertain call.
+          current.modelCallCount = (current.modelCallCount ?? 0) + 1;
+          current.modelReservedTokens = (current.modelReservedTokens ?? 0) + maxTokens;
+          let control: TaskRecord | undefined;
+          try {
+            control = await this.#persistRunState(task, assertLease);
+          } catch (error) {
+            reservationPersistenceFailed = true;
+            throw error;
+          }
+          if (control || planningSignal.aborted) {
+            reservationPersistenceFailed = true;
+            throw new OperatorError('TASK_PLANNER_ABORTED', 'Model budget reserved but execution was stopped before model dispatch.');
+          }
+        } finally {
+          release();
         }
       };
       const context: TaskPlannerContext = {
