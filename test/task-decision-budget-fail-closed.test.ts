@@ -75,3 +75,44 @@ test('C05 fractional or unsafe persisted usage never rounds down into extra mode
     }
   }
 });
+
+test('C05 fractional and unsafe progress extensions cannot mint planner steps', () => {
+  for (const extension of [0.5, 1.5, -0.25, -1, Number.POSITIVE_INFINITY,
+    Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+    const task = execution();
+    task.progressExtensions = extension;
+    task.plannerIterations = 12;
+    const budget = taskDecisionBudget(task, 1000);
+    assert.equal(budget.plannerIterations.limit, 12);
+    assert.equal(budget.plannerIterations.remaining, 0, String(extension));
+    assert.equal(decisionBudgetExhaustion(budget), 'plannerIterations');
+  }
+  const valid = execution();
+  valid.progressExtensions = 2;
+  valid.plannerIterations = 12;
+  assert.equal(taskDecisionBudget(valid, 1000).plannerIterations.remaining, 2);
+});
+
+test('C05 clock rollback and corrupted or exceeded durable deadline exhaust task time', () => {
+  const task = execution();
+  task.startedAt = '2026-10-25T12:00:00.000Z';
+  task.deadlineAt = '2026-10-25T12:00:05.000Z';
+  for (const now of [
+    Date.parse('2026-10-25T11:59:59.999Z'),
+    Date.parse('2026-10-25T12:00:05.000Z'),
+    Date.parse('2026-10-25T12:00:08.000Z')
+  ]) {
+    const budget = taskDecisionBudget(task, now);
+    assert.equal(budget.elapsedMs.remaining, 0);
+    assert.equal(decisionBudgetExhaustion(budget), 'elapsedMs');
+  }
+  for (const deadlineAt of ['invalid-date', '2026-10-25T11:59:59.000Z']) {
+    task.deadlineAt = deadlineAt;
+    const budget = taskDecisionBudget(task, Date.parse('2026-10-25T12:00:01.000Z'));
+    assert.equal(budget.elapsedMs.remaining, 0);
+  }
+  task.deadlineAt = '2026-10-25T12:00:05.000Z';
+  const healthy = taskDecisionBudget(task, Date.parse('2026-10-25T12:00:01.000Z'));
+  assert.equal(healthy.elapsedMs.used, 1000);
+  assert.equal(healthy.elapsedMs.remaining, 4000);
+});
