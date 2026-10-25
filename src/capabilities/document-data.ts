@@ -30,8 +30,11 @@ export class DocumentDataProvider implements CapabilityProvider{
   async execute(action:ActionRequest):Promise<ActionResult>{
     const started=performance.now();
     if(!this.supports(action)) throw new OperatorError('DOCUMENT_CAPABILITY_UNSUPPORTED','Document/data provider does not support this capability.');
-    const requested=String(action.input.path??'');
-    if(!requested) throw new OperatorError('DOCUMENT_INPUT_INVALID','Document/data action requires input.path.');
+    const requested=action.input.path;
+    if(typeof requested!=='string'||!requested||requested.length>4096||
+      [...requested].some(char=>[0,10,13].includes(char.charCodeAt(0)))) {
+      throw new OperatorError('DOCUMENT_INPUT_INVALID','Document/data action requires an exact bounded path string.');
+    }
     return await this.#scope.withExisting(requested,async resolved=>{
       const bytes=await readStableBoundedDocument(resolved,this.#observationHook);
       const format=detectFormat(resolved,bytes);

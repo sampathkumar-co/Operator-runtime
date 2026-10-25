@@ -47,10 +47,10 @@ export class SandboxedComputeProvider implements CapabilityProvider {
     const started = performance.now();
     try {
       if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Sandboxed compute provider does not support this capability.');
-      const language = String(action.input.language ?? '') as Language;
+      const language = action.input.language;
       if (language !== 'javascript' && language !== 'python') throw new OperatorError('COMPUTE_LANGUAGE_INVALID', 'compute.run language must be javascript or python.');
-      const code = String(action.input.code ?? '');
-      if (!code || Buffer.byteLength(code, 'utf8') > MAX_CODE_BYTES || code.includes('\0')) {
+      const code = action.input.code;
+      if (typeof code !== 'string' || !code || Buffer.byteLength(code, 'utf8') > MAX_CODE_BYTES || code.includes('\0')) {
         throw new OperatorError('COMPUTE_CODE_INVALID', `compute.run code must be 1-${MAX_CODE_BYTES} UTF-8 bytes without NUL.`);
       }
       const timeoutMs = boundedInteger(action.input.timeoutMs ?? 30_000, 1_000, 120_000, 'timeoutMs');
@@ -215,13 +215,13 @@ async function runDocker(executable: string, args: string[], stdinText: string, 
 }
 
 function boundedInteger(input: unknown, min: number, max: number, label: string): number {
-  const value = Number(input);
-  if (!Number.isSafeInteger(value) || value < min || value > max) throw new OperatorError('COMPUTE_INPUT_INVALID', `${label} is invalid.`);
+  const value = input;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) throw new OperatorError('COMPUTE_INPUT_INVALID', `${label} is invalid.`);
   return value;
 }
 
 function boundedNumber(input: unknown, min: number, max: number, label: string): number {
-  const value = Number(input);
-  if (!Number.isFinite(value) || value < min || value > max) throw new OperatorError('COMPUTE_INPUT_INVALID', `${label} is invalid.`);
+  const value = input;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) throw new OperatorError('COMPUTE_INPUT_INVALID', `${label} is invalid.`);
   return value;
 }

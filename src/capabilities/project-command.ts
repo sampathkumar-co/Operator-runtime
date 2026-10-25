@@ -110,11 +110,11 @@ export class ProjectCommandProvider implements CapabilityProvider {
   async resolveRisk(action: ActionRequest): Promise<ActionRisk> {
     if (action.capability === 'project.command.inspect') return 'read';
     if (action.capability !== 'project.command.run') throw new OperatorError('CAPABILITY_RISK_UNRESOLVED', 'Unsupported project command capability.');
-    const projectRoot = await this.#scope.resolveExisting(String(action.input.path ?? action.input.cwd ?? ''));
+    const projectRoot = await this.#scope.resolveExisting(exactRequestedProjectPath(action.input));
     const registry = await this.#readRegistry();
     const project = await this.#matchProject(registry, projectRoot);
     if (!project) throw new OperatorError('PROJECT_COMMANDS_NOT_REGISTERED', 'No trusted command registry entry exists for this project.');
-    const commandId = validateCommandId(String(action.input.commandId ?? ''));
+    const commandId = validateCommandId(action.input.commandId);
     const command = project.commands.find((candidate) => candidate.id === commandId);
     if (!command) throw new OperatorError('PROJECT_COMMAND_NOT_REGISTERED', `Trusted command ${commandId} is not registered for this project.`);
     return command.risk as ActionRisk;
@@ -124,7 +124,7 @@ export class ProjectCommandProvider implements CapabilityProvider {
     const started = performance.now();
     try {
       if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Project command provider does not support this capability.');
-      const projectRoot = await this.#scope.resolveExisting(String(action.input.path ?? action.input.cwd ?? ''));
+      const projectRoot = await this.#scope.resolveExisting(exactRequestedProjectPath(action.input));
       const registry = await this.#readRegistry();
       const project = await this.#matchProject(registry, projectRoot);
 
@@ -161,11 +161,14 @@ export class ProjectCommandProvider implements CapabilityProvider {
       }
 
       if (!project) throw new OperatorError('PROJECT_COMMANDS_NOT_REGISTERED', 'No trusted command registry entry exists for this project.');
-      const commandId = validateCommandId(String(action.input.commandId ?? ''));
+      const commandId = validateCommandId(action.input.commandId);
       const command = project.commands.find((candidate) => candidate.id === commandId);
       if (!command) throw new OperatorError('PROJECT_COMMAND_NOT_REGISTERED', `Trusted command ${commandId} is not registered for this project.`);
 
-      const expectedRisk = String(action.input.expectedRisk ?? '');
+      const expectedRisk = action.input.expectedRisk;
+      if (typeof expectedRisk !== 'string') {
+        throw new OperatorError('PROJECT_COMMAND_RISK_MISMATCH', 'Expected command risk must be an exact string.');
+      }
       if (expectedRisk !== command.risk) {
         throw new OperatorError('PROJECT_COMMAND_RISK_MISMATCH', 'Caller must acknowledge the command risk declared in the trusted registry.', {
           details: { expectedRisk, registeredRisk: command.risk }
@@ -421,8 +424,17 @@ function validateArtifact(input: unknown, commandId: string, index: number): Tru
   };
 }
 
-function validateCommandId(value: string): string {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value)) throw new OperatorError('INVALID_COMMAND_ID', 'commandId must be 1-64 safe identifier characters.');
+function exactRequestedProjectPath(input: Record<string, unknown>): string {
+  const requested = input.path === undefined ? input.cwd : input.path;
+  if (typeof requested !== 'string' || requested.length < 1 || requested.length > 4096 ||
+      [...requested].some(char => [0, 10, 13].includes(char.charCodeAt(0)))) {
+    throw new OperatorError('PROJECT_COMMAND_SCOPE_INVALID', 'Project command scope must be an exact bounded path.');
+  }
+  return requested;
+}
+
+function validateCommandId(value: unknown): string {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value)) throw new OperatorError('INVALID_COMMAND_ID', 'commandId must be 1-64 safe identifier characters.');
   return value;
 }
 
