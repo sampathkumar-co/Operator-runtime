@@ -27,6 +27,29 @@ export interface CapabilityDiscoverySnapshot {
   sourceTruth: 'NOT_AN_EXECUTION_OR_AUTHORITY_GRANT';
 }
 
+const PROBE_TIMEOUT_MS = 200;
+const TIMED_OUT = Symbol('CAPABILITY_DISCOVERY_PROBE_TIMED_OUT');
+
+async function probeBoolean(callback: () => boolean | Promise<boolean>): Promise<'yes' | 'no' | 'indeterminate'> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      Promise.resolve().then(callback),
+      new Promise<typeof TIMED_OUT>(resolve => {
+        timeout = setTimeout(() => resolve(TIMED_OUT), PROBE_TIMEOUT_MS);
+      })
+    ]);
+    if (result === true) return 'yes';
+    if (result === false) return 'no';
+    // A malformed extension return, timeout, or undefined is not a declaration.
+    return 'indeterminate';
+  } catch {
+    return 'indeterminate';
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 /**
  * Model-neutral discovery is not permission negotiation.
  * supports and advertises are called without dispatch and with empty inputs.
@@ -52,13 +75,17 @@ export async function discoverBuiltInCapabilities(
     const providersAdvertising: string[] = [];
     let indeterminate = false;
     for (const provider of providers) {
-      try {
-        if (!await provider.supports(action)) continue;
-        if (provider.advertises && !await provider.advertises(action)) continue;
-        providersAdvertising.push(provider.name);
-      } catch {
-        indeterminate = true;
+      // Untrusted provider implementations must not turn truthy objects or
+      // unresolved promises into supported operations. These probes never dispatch.
+      const support = await probeBoolean(() => provider.supports(action));
+      if (support === 'indeterminate') { indeterminate = true; continue; }
+      if (support === 'no') continue;
+      if (provider.advertises) {
+        const advertised = await probeBoolean(() => provider.advertises!(action));
+        if (advertised === 'indeterminate') { indeterminate = true; continue; }
+        if (advertised === 'no') continue;
       }
+      providersAdvertising.push(provider.name);
     }
     const status: CapabilityProbeStatus = indeterminate ? 'PROBE_INDETERMINATE'
       : providersAdvertising.length > 0 ? 'DECLARED_NOT_EXECUTED'
