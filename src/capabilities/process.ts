@@ -564,7 +564,15 @@ export class ProcessProvider implements CapabilityProvider {
       };
     }
 
-    const sessionId = requiredSessionId(action.input.sessionId);
+    let sessionId: string;
+    try {
+      sessionId = requiredSessionId(action.input.sessionId);
+    } catch (error) {
+      // Invalid session identity is a pre-dispatch failure, not an uncaught
+      // provider exception or a reason to touch any durable session.
+      return failure(action, this.name, started, error instanceof OperatorError
+        ? error : new OperatorError('PROCESS_INPUT_INVALID', 'Managed session identity is invalid.'));
+    }
     const session = this.#sessions.get(sessionId);
     const durable = session ? undefined : await this.#store?.get(sessionId);
     let developerOwned: DeveloperRuntimeOwnershipRecord | undefined;
