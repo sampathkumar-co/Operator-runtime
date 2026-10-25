@@ -79,6 +79,7 @@ export class PostgresProvider implements CapabilityProvider {
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
+      if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'PostgreSQL provider does not support the requested capability.');
       if (typeof action.input.path !== 'string' || !action.input.path || action.input.path.length > 4096) {
         throw new OperatorError('POSTGRES_PROJECT_SCOPE_INVALID', 'A typed, bounded authorized project path is required.');
       }
