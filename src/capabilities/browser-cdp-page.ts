@@ -938,11 +938,20 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       const ancestorName = labelledAncestor?.getAttribute('aria-label') || labelledAncestor?.getAttribute('title') || labelledAncestor?.getAttribute('id');
       if (ancestorName) return trim(ancestorName);
     }
+    const inputType = element.tagName === 'INPUT' ? trim(element.getAttribute('type') || 'text').toLowerCase() : '';
+    // Input buttons typically have no textContent. Their visible labels
+    // come from value/alt, not the hidden implementation name/id. Never
+    // use input.value for text/password fields in a semantic name.
+    const inputActionName = element.tagName === 'INPUT' && ['button', 'submit', 'reset', 'image'].includes(inputType)
+      ? (element.getAttribute('alt') || element.getAttribute('value') ||
+          (inputType === 'submit' ? 'Submit' : inputType === 'reset' ? 'Reset' : ''))
+      : '';
     const explicitRole = trim(element.getAttribute('role')).toLowerCase();
     const nativeText = ['BUTTON', 'SUMMARY', 'A', 'OPTION'].includes(element.tagName) ? readableText(element) : '';
     const roleText = explicitRole && !['textbox', 'searchbox', 'combobox', 'slider'].includes(explicitRole) ? readableText(element) : '';
     return trim(
       element.getAttribute('placeholder')
+      || inputActionName
       || nativeText
       || roleText
       || element.getAttribute('title')
