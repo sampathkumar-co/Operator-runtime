@@ -156,7 +156,8 @@ export async function runFrozenModelDecisionLane(input: {
     results.push({
       id: choice.id, observationSha256: choice.observationSha256, oracleSha256: choice.oracleSha256,
       ...(valid ? { proposedActionId: proposed as string, decisionSha256: digest({ proposedActionId: proposed }) } : {}),
-      matchedOracle: valid && proposed === choice.expectedActionId, failureStage: failed
+      matchedOracle: valid && proposed === choice.expectedActionId,
+      failureStage: valid && proposed !== choice.expectedActionId ? 'model' : failed
     });
   }
   const report = {
