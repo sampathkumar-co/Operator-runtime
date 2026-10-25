@@ -74,3 +74,33 @@ test('C07 stale, ambiguous, non-KNOWN and self-action verification results fail 
     assert.equal(verifyTaskCompletion(task).ok, false);
   }
 });
+
+test('C07 later failed or interrupted verification attempt cannot reuse an earlier successful proof', () => {
+  for (const latestState of ['FAILED', 'INTERRUPTED', 'BLOCKED', 'STARTED'] as const) {
+    const task = fixture([{ path: 'verified', operator: 'equals', value: true }]);
+    const prior = task.execution!.records[0]!;
+    task.execution!.records.push({
+      ...prior,
+      actionId: 'synthetic-verify-second',
+      attempt: prior.attempt + 1,
+      state: latestState,
+      startedAt: '2026-10-24T11:00:03.000Z',
+      finishedAt: latestState === 'STARTED' ? undefined : '2026-10-24T11:00:04.000Z',
+      observation: undefined,
+      evidence: []
+    });
+    assert.equal(verifyGoalOutcomeTruth(task).ok, false, latestState);
+    assert.equal(verifyTaskCompletion(task).ok, false, latestState);
+  }
+});
+
+test('C07 a new successful verification attempt can replace an older failed attempt', () => {
+  const task = fixture([{ path: 'verified', operator: 'equals', value: true }]);
+  const pass = task.execution!.records[0]!;
+  task.execution!.records.unshift({
+    ...pass, actionId: 'synthetic-verify-failed-first', state: 'FAILED',
+    startedAt: '2026-10-24T10:59:54.000Z', finishedAt: '2026-10-24T10:59:55.000Z',
+    observation: undefined, evidence: []
+  });
+  assert.equal(verifyGoalOutcomeTruth(task).ok, true);
+});
