@@ -1297,3 +1297,48 @@ test('custom rendered widgets expose bounded perceptible state for grids, calend
   assert.equal(visuals.find((item: any) => item.name === 'Ocean').perceptibleState.selected, true);
   assert.equal(visuals.find((item: any) => item.name === 'Gateway').perceptibleState.pressed, true);
 });
+
+test('C03 native input submit and image buttons expose visible names consistently in snapshot and locator', t => {
+  const root = new FakeRoot();
+  const submit = new FakeElement('input');
+  submit.id = 'implementation-4242';
+  submit.setAttribute('type', 'submit');
+  submit.setAttribute('value', 'Pay securely');
+  const image = new FakeElement('input');
+  image.setAttribute('type', 'image');
+  image.setAttribute('alt', 'Send order');
+  const reset = new FakeElement('input');
+  reset.setAttribute('type', 'reset');
+  attach(root, submit, image, reset);
+  installDocument(t, root);
+  const snapshot = semanticSnapshotFunction() as any;
+  assert.equal(snapshot.controls.find((x: any) => x.name === 'Pay securely')?.role, 'button');
+  assert.equal(snapshot.controls.find((x: any) => x.name === 'Send order')?.role, 'button');
+  assert.equal(snapshot.controls.find((x: any) => x.name === 'Reset')?.role, 'button');
+  assert.equal((semanticLocatorFunction({ role: 'button', name: 'Pay securely' }) as any).count, 1);
+  assert.equal((semanticLocatorFunction({ role: 'button', name: 'Send order' }) as any).count, 1);
+  const clicked = interactionFunction({
+    operation: 'click', target: { role: 'button', name: 'Pay securely' }, value: null
+  }) as any;
+  assert.equal(clicked.ok, true);
+  assert.equal(clicked.matched.name, 'Pay securely');
+  assert.equal(submit.clicked, true);
+});
+
+test('C03 input ARIA label overrides native value while password values never become semantic names', t => {
+  const root = new FakeRoot();
+  const action = new FakeElement('input');
+  action.setAttribute('type', 'button');
+  action.setAttribute('value', 'Internal label');
+  action.setAttribute('aria-label', 'Approved external label');
+  const password = new FakeElement('input');
+  password.setAttribute('type', 'password');
+  password.value = 'secret-never-expose';
+  attach(root, action, password);
+  installDocument(t, root);
+  const controls = (semanticSnapshotFunction() as any).controls;
+  assert.equal(controls.find((x: any) => x.role === 'button')?.name, 'Approved external label');
+  assert.equal((semanticLocatorFunction({ role: 'button', name: 'Internal label' }) as any).count, 0);
+  assert.equal((semanticLocatorFunction({ role: 'button', name: 'Approved external label' }) as any).count, 1);
+  assert.equal(controls.some((x: any) => String(x.name).includes('secret-never-expose')), false);
+});
