@@ -10,6 +10,7 @@ export const KNOWN_MINIWOB_FIXTURE = '7fd85d71a4b60325c6585396ec4f48377d049838';
 const FULL_SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const TASK = /^miniwob\.[a-z0-9-]+$/;
+const REQUIRED_SEEDS = Object.freeze([0, 42]);
 const hash = x => crypto.createHash('sha256').update(x).digest('hex');
 const gitBlobHash = bytes => crypto.createHash('sha1')
   .update('blob ' + Buffer.byteLength(bytes) + '\0')
@@ -58,9 +59,11 @@ export function verifyFrozenMiniwobRoster(roster, executionConfig = null) {
       cfg.maxModelCallsPerEpisode <= 30, 'bounded model call budget required');
     requireState(Number.isSafeInteger(cfg.maxCostMicrosTotal) && cfg.maxCostMicrosTotal > 0,
       'bounded model spend budget required');
-    requireState(Array.isArray(cfg.seeds) && cfg.seeds.length >= 2 &&
+    requireState(Array.isArray(cfg.seeds) && cfg.seeds.length >= 3 &&
       cfg.seeds.every(x => Number.isSafeInteger(x) && x >= 0) &&
-      new Set(cfg.seeds).size === cfg.seeds.length, 'multiple unique frozen seeds required');
+      new Set(cfg.seeds).size === cfg.seeds.length &&
+      REQUIRED_SEEDS.every(seed => cfg.seeds.includes(seed)),
+      'frozen seeds must include 0, 42 and at least one additional preregistered seed');
     execution = { status: 'CONFIG_LOCKED_NOT_EXECUTED', configSha256: hash(JSON.stringify(cfg)),
       model: cfg.model, modelVersion: cfg.modelVersion, seeds: cfg.seeds,
       maxCostMicrosTotal: cfg.maxCostMicrosTotal, maxModelCallsPerEpisode: cfg.maxModelCallsPerEpisode };

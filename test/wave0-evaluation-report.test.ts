@@ -8,6 +8,8 @@ import { buildWave0EvaluationReport } from '../scripts/wave0-evaluation.mjs';
 
 const sourceCommit = 'a'.repeat(40);
 const d = (char = 'b') => char.repeat(64);
+const expectedSeeds = [0, 42, 2026];
+const preregistered = expectedScenarioIds => ({ suiteDigest: d('a'), expectedScenarioIds, expectedSeeds });
 function record(lane, arm, overrides = {}) {
   return {
     lane, arm, sourceCommit, id: 'run_' + lane + '_' + arm,
@@ -41,6 +43,9 @@ test('partial Lane B with false controller claim records false completion, not p
   assert.equal(output.lanes.B.status, 'PARTIAL');
   assert.equal(output.lanes.B.evidence.falseCompletions, 1);
   assert.equal(output.lanes.B.evidence.verifiedCompletionRate, 0);
+  assert.deepEqual(output.lanes.B.evidence.verifiedCompletionConfidence95, {
+    method: 'wilson', confidenceLevel: 0.95, lower: 0, upper: 0.793450685623
+  });
   assert.equal(output.lanes.A.status, 'NOT_RUN');
 });
 
@@ -73,20 +78,22 @@ test('invalid provenance or fake independent oracle digest is rejected', () => {
 
 test('complete suite coverage never claims release or physical acceptance by itself', () => {
   const ids = Array.from({ length: 50 }, (_, i) => 'scenario_' + i);
-  const records = ids.map((id, i) => record('B', 'mecord_scripted', {
-    id: 'run_' + i, scenarioId: id, model: 'scripted', seed: i
-  }));
+  const records = ids.flatMap((id, i) => expectedSeeds.map(seed => record('B', 'mecord_scripted', {
+    id: 'run_' + i + '_' + seed, scenarioId: id, model: 'scripted', seed
+  })));
   const r = buildWave0EvaluationReport({ sourceCommit, records,
-    preregistered: { suiteDigest: d('a'), expectedScenarioIds: ids } });
+    preregistered: preregistered(ids) });
   assert.equal(r.lanes.B.status, 'REPORTED_FULL_COVERAGE_UNVERIFIED');
   assert.equal(r.lanes.B.physicalAcceptance, 'NOT_VERIFIED');
   assert.equal(r.releaseAcceptance, 'NOT_ACCEPTED');
   assert.equal(r.lanes.C.status, 'NOT_RUN');
+  assert.equal(r.lanes.B.seedCoverage.complete, true);
+  assert.equal(r.lanes.B.seedCoverage.coveredScenarioSeedPairs, 150);
 });
 
 test('unregistered or duplicate test suite must never be marked a completed campaign', () => {
   assert.throws(() => buildWave0EvaluationReport({ sourceCommit,
-    preregistered: { suiteDigest: d('a'), expectedScenarioIds: ['small'] }
+    preregistered: preregistered(['small'])
   }), /preregistered suite/);
   assert.throws(() => buildWave0EvaluationReport({ sourceCommit,
     records: [record('B', 'mecord_scripted', { model: 'scripted' }),
@@ -114,13 +121,13 @@ test('failed outcomes cannot silently use success-stage none as their root cause
 
 test('a fully registered suite with unattributed failures stays PARTIAL', () => {
   const ids = Array.from({ length: 50 }, (_, i) => 'journey_' + i);
-  const runs = ids.map((scenarioId, i) => record('B', 'mecord_scripted', {
-    model: 'scripted', scenarioId, id: 'run_' + i, seed: i,
-    failureStage: i === 0 ? 'unattributed' : 'model'
-  }));
+  const runs = ids.flatMap((scenarioId, i) => expectedSeeds.map(seed => record('B', 'mecord_scripted', {
+    model: 'scripted', scenarioId, id: 'run_' + i + '_' + seed, seed,
+    failureStage: i === 0 && seed === 0 ? 'unattributed' : 'model'
+  })));
   const r = buildWave0EvaluationReport({
     sourceCommit, records: runs,
-    preregistered: { suiteDigest: d('a'), expectedScenarioIds: ids }
+    preregistered: preregistered(ids)
   });
   assert.equal(r.lanes.B.status, 'PARTIAL');
   assert.match(r.lanes.B.reason, /unattributed root cause/);
@@ -132,8 +139,35 @@ test('invalid preregistered scenario names are rejected instead of being treated
   const invalid = Array.from({ length: 50 }, (_, i) => 'journey_' + i);
   invalid[0] = { value: 'object-not-a-scenario-id' };
   assert.throws(() => buildWave0EvaluationReport({
-    sourceCommit, preregistered: { suiteDigest: d('a'), expectedScenarioIds: invalid }
+    sourceCommit, preregistered: preregistered(invalid)
   }), /preregistered suite/);
+});
+
+test('complete coverage requires every preregistered scenario across seeds 0, 42 and the third fixed seed', () => {
+  const ids = Array.from({ length: 50 }, (_, i) => 'seeded_' + i);
+  const records = ids.flatMap((scenarioId, i) => [0, 42].map(seed => record('B', 'mecord_scripted', {
+    model: 'scripted', scenarioId, seed, id: 'seeded_run_' + i + '_' + seed
+  })));
+  const result = buildWave0EvaluationReport({ sourceCommit, records, preregistered: preregistered(ids) });
+  assert.equal(result.lanes.B.status, 'PARTIAL');
+  assert.deepEqual(result.suite.seeds, expectedSeeds);
+  assert.equal(result.lanes.B.seedCoverage.missingScenarioSeedPairs, 50);
+  assert.equal(result.lanes.B.seedCoverage.complete, false);
+  assert.throws(() => buildWave0EvaluationReport({ sourceCommit,
+    preregistered: { suiteDigest: d('a'), expectedScenarioIds: ids, expectedSeeds: [0, 42] }
+  }), /preregistered suite/);
+});
+
+test('Wilson confidence bounds are deterministic for mixed verified outcomes', () => {
+  const result = buildWave0EvaluationReport({ sourceCommit, records: [
+    record('B', 'mecord_scripted', { model: 'scripted', id: 'confidence_1', scenarioId: 'confidence_1',
+      verifiedSuccess: true, claimedSuccess: true, failureStage: 'none' }),
+    record('B', 'mecord_scripted', { model: 'scripted', id: 'confidence_2', scenarioId: 'confidence_2' })
+  ] });
+  assert.equal(result.lanes.B.evidence.verifiedCompletionRate, 0.5);
+  assert.deepEqual(result.lanes.B.evidence.verifiedCompletionConfidence95, {
+    method: 'wilson', confidenceLevel: 0.95, lower: 0.094531205734, upper: 0.905468794266
+  });
 });
 
 test('C01 refuses fractional or precision-losing single-run cost counters', () => {
