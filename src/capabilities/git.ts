@@ -133,13 +133,22 @@ export class GitProvider implements CapabilityProvider {
   }
 }
 
-function boundedGitDiff(result: ActionResult, input: Record<string, unknown>): ActionResult {
+export function boundedGitDiff(result: ActionResult, input: Record<string, unknown>): ActionResult {
   const raw = result.output as { stdout?: unknown; stderr?: unknown; truncated?: unknown } | undefined;
   const bytes = Buffer.from(String(raw?.stdout ?? ''), 'utf8');
   const offset = boundedGitInteger(input.offset, 0, 0, 16 * 1024 * 1024);
   const maxBytes = boundedGitInteger(input.maxBytes, 48 * 1024, 1024, 128 * 1024);
-  const chunk = bytes.subarray(offset, Math.min(bytes.length, offset + maxBytes));
-  const nextOffset = offset + chunk.byteLength;
+  // Offsets count UTF-8 bytes. Cutting through a code point silently replaces
+  // its bytes with U+FFFD, corrupting diffs and preventing exact reconstruction.
+  const boundary = (index: number) =>
+    index === 0 || index >= bytes.length || (bytes[index]! & 0xc0) !== 0x80;
+  if (!boundary(offset)) {
+    throw new OperatorError('GIT_INPUT_INVALID', 'Git diff offset must start at a UTF-8 code point boundary.');
+  }
+  let end = Math.min(bytes.length, offset + maxBytes);
+  while (end > offset && !boundary(end)) end--;
+  const chunk = bytes.subarray(offset, end);
+  const nextOffset = end;
   const truncated = nextOffset < bytes.length || raw?.truncated === true;
   return {
     ...result,
