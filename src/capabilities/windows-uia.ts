@@ -422,6 +422,19 @@ export class WindowsUiaProvider implements CapabilityProvider {
     const scaleX = boundedCaptureNumber(raw.scale_x, 0.0001, 1000, 'scale_x');
     const scaleY = boundedCaptureNumber(raw.scale_y, 0.0001, 1000, 'scale_y');
     const windowId = typeof raw.window_id === 'string' && raw.window_id ? raw.window_id : undefined;
+    // The native helper does not clip authorized regions: the returned pixels
+    // must have the exact requested geometry, not merely claim source=region.
+    // Validate before storing sensitive evidence or leasing pointer authority.
+    if (captureParams.source === 'region') {
+      const region = captureParams.region as {x:number;y:number;width:number;height:number};
+      if (originX !== region.x || originY !== region.y ||
+          sourceWidth !== region.width || sourceHeight !== region.height) {
+        throw new OperatorError('VISUAL_CAPTURE_INVALID', 'Native capture region differs from the authorized coordinates.');
+      }
+    }
+    if (captureParams.source === 'window' && !windowId) {
+      throw new OperatorError('VISUAL_CAPTURE_INVALID', 'Native window capture lacked the resolved window identity.');
+    }
     const sceneKey = windowId ? `desktop:window:${windowId.toLocaleLowerCase()}` : 'visual:screen';
     const tier = renderedTier(action.input.evidenceTier, String(captureParams.source));
     const targetAssociation = optionalCaptureText(action.input.targetAssociation, 'targetAssociation', 512);
