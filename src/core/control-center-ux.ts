@@ -283,7 +283,20 @@ function recoveryItem(candidate: RecoveryCandidateInput): RecoveryCenterItem {
     };
   }
 
-  if (candidate.reconciliationStatus === 'completed' && candidate.verificationStatus === 'passed') {
+  // Contradictory adjudication must never be presented as an approved recovery
+  // action. If reconciliation says no effect but the local runtime says one
+  // exists, neither retry nor rollback is justified by this projection.
+  if (candidate.reconciliationStatus === 'not_applied' && candidate.sideEffectState === 'known') {
+    return {
+      ...base,
+      disposition: 'BLOCKED',
+      recommendedAction: 'ESCALATE',
+      requiresFreshApproval: false,
+      reason: 'Recovery evidence conflicts about whether an effect happened; obtain independent reconciliation before retry or rollback.'
+    };
+  }
+
+  if (candidate.reconciliationStatus === 'completed' && candidate.verificationStatus === 'passed' && candidate.sideEffectState === 'known') {
     return {
       ...base,
       disposition: 'TERMINAL',
@@ -293,7 +306,7 @@ function recoveryItem(candidate: RecoveryCandidateInput): RecoveryCenterItem {
     };
   }
 
-  if (candidate.verificationStatus === 'failed' && candidate.rollbackAvailable) {
+  if (candidate.verificationStatus === 'failed' && candidate.rollbackAvailable && candidate.sideEffectState === 'known') {
     return {
       ...base,
       disposition: 'REVERSIBLE',
