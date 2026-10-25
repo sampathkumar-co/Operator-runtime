@@ -1,0 +1,47 @@
+name: C11 Exact-Source Qualification Evidence (Non-Publishing)
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/wave4-qualification-evidence.mjs'
+      - 'test/wave4-qualification-evidence.test.ts'
+      - '.github/workflows/c11-qualification-evidence.yml'
+      - 'package.json'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/wave4-qualification-evidence.mjs'
+      - 'test/wave4-qualification-evidence.test.ts'
+      - '.github/workflows/c11-qualification-evidence.yml'
+      - 'package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualification-evidence-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Exercise exact-source evidence aggregation and adversarial rejection
+        run: node --experimental-strip-types --test test/wave4-qualification-evidence.test.ts
+      - name: Emit honest source-only qualification manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/wave4-qualification-evidence.mjs > "$RUNNER_TEMP/c11-qualification-evidence.json"
+          node -e "const fs=require('fs');const r=JSON.parse(fs.readFileSync(process.argv[1]));if(r.candidateSha!==process.env.GITHUB_SHA||r.qualificationStatus!=='INCOMPLETE'||r.counts.notRun!==9||r.publicationAllowed!==false||!/^[0-9a-f]{64}$/.test(r.manifestSha256))throw Error('C11 source-only qualification truth invalid')" "$RUNNER_TEMP/c11-qualification-evidence.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: c11-qualification-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/c11-qualification-evidence.json
+          retention-days: 30
+          if-no-files-found: error
