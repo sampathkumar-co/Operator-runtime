@@ -44,6 +44,7 @@ export class ProjectTransactionProvider implements CapabilityProvider {
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
+      if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Project transaction provider does not support this capability.');
       if (action.risk !== 'destructive') {
         throw new OperatorError('TRANSACTION_DESTRUCTIVE_RISK_REQUIRED', 'Automatic rollback transactions must be authorized as destructive before execution.');
       }
