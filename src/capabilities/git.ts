@@ -154,6 +154,9 @@ export function boundedGitDiff(result: ActionResult, input: Record<string, unkno
     };
   }
   const bytes = Buffer.from(String(raw?.stdout ?? ''), 'utf8');
+  if (offset > bytes.length) {
+    throw new OperatorError('GIT_INPUT_INVALID', 'Git diff offset exceeds available source bytes.');
+  }
   // Offsets count UTF-8 bytes. Cutting through a code point silently replaces
   // its bytes with U+FFFD, corrupting diffs and preventing exact reconstruction.
   const boundary = (index: number) =>
@@ -220,6 +223,9 @@ export function structuredGitStatus(result: ActionResult, input: Record<string, 
     entries.push(entry);
   }
   const offset = boundedGitInteger(input.offset, 0, 0, 1_000_000);
+  if (offset > entries.length) {
+    throw new OperatorError('GIT_INPUT_INVALID', 'Git status offset exceeds available entries.');
+  }
   const maxBytes = boundedGitInteger(input.maxBytes, 64 * 1024, 1024, 128 * 1024);
   const page: Array<Record<string, unknown>> = [];
   let bytes = 2;
