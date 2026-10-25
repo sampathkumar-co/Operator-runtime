@@ -183,8 +183,15 @@ export function evaluateOperationTraceCoverage(
   }
   const terminal=[...ordered].reverse().find((event)=>event.stage==='COMPLETE');
   const verify=[...ordered].reverse().find((event)=>event.stage==='VERIFY');
-  if (terminal?.outcome==='OK' && verify?.outcome!=='OK' && !missingStages.includes('VERIFY')) {
-    outOfOrderStages.push('VERIFY');
+  const lastDispatch=[...ordered].reverse().find((event)=>event.stage==='DISPATCH');
+  // An earlier successful verification cannot prove the final state of an
+  // operation if a later dispatch might have changed it. Coverage must agree
+  // with the independent SLO verifier, not merely first-seen stage ordering.
+  if (terminal?.outcome==='OK' && !missingStages.includes('VERIFY')) {
+    const freshProof = verify?.outcome==='OK'
+      && Date.parse(verify.at) < Date.parse(terminal.at)
+      && (!lastDispatch || Date.parse(lastDispatch.at) < Date.parse(verify.at));
+    if (!freshProof) outOfOrderStages.push('VERIFY');
   }
   return {
     traceId: ordered[0]!.traceId,
