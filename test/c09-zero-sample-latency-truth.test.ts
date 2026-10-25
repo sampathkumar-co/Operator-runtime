@@ -20,11 +20,11 @@ test('C09 no completed trace remains explicitly not measured, not a fictional ze
   assert.equal(pending.terminalTraces, 0);
   assert.equal(pending.endToEndMeasurement, 'NOT_OBSERVED');
 });
-test('C09 completed zero-millisecond trace is a genuine measurement and stays distinct from missing', () => {
+test('C09 causally ordered completed trace is measured rather than classified missing', () => {
   const actual = summarizeOperationStageLatency([
-    row('t1','REQUEST',0), row('t1','COMPLETE',0)
+    row('t1','REQUEST',0), row('t1','COMPLETE',1)
   ]);
   assert.equal(actual.terminalTraces, 1);
   assert.equal(actual.endToEndMeasurement, 'MEASURED');
-  assert.equal(actual.p50EndToEndMs, 0);
+  assert.equal(actual.p50EndToEndMs, 1);
 });
