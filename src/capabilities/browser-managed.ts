@@ -6,7 +6,7 @@ import type { ActionRequest, ActionResult, CapabilityExecutionContext, Capabilit
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { safeChildEnvironment } from '../core/child-environment.ts';
-import { BrowserCdpProvider } from './browser-cdp.ts';
+import { BrowserCdpProvider, boundedDiscoveryJson } from './browser-cdp.ts';
 import { assertLoopbackEndpoint } from './browser-cdp-page.ts';
 
 const SCORE: CapabilityScore = {
@@ -148,7 +148,8 @@ async function endpointHealthy(endpoint: string): Promise<boolean> {
   try {
     const response = await fetch(new URL('/json/version', url), { redirect: 'error', signal: AbortSignal.timeout(1_500) });
     if (!response.ok) return false;
-    const payload = await response.json() as { Browser?: unknown; webSocketDebuggerUrl?: unknown };
+    const payload = await boundedDiscoveryJson(response) as { Browser?: unknown; webSocketDebuggerUrl?: unknown };
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
     if (typeof payload.Browser !== 'string' || !/(Chrome|Chromium|Edg)/i.test(payload.Browser)) return false;
     if (typeof payload.webSocketDebuggerUrl !== 'string') return false;
     const websocket = new URL(payload.webSocketDebuggerUrl);
