@@ -268,3 +268,28 @@ test('C04 exact bounded UIA selector still permits an explicitly scoped semantic
   assert.equal((calls[0]!.params as any).value, 'নমস্কার');
   await provider.close();
 });
+
+test('C08 mutating UIA transport-write and post-input capture failures cannot be automatically replayed', async () => {
+  for (const code of ['UIA_SIDECAR_WRITE_FAILED', 'UIA_OPERATION_FAILED',
+    'INPUT_AFTER_CAPTURE_FAILED', 'INPUT_AFTER_CAPTURE_INVALID']) {
+    let calls = 0;
+    const provider = new WindowsUiaProvider({
+      platform: 'win32',
+      client: {
+        async call() {
+          calls += 1;
+          throw new OperatorError(code, 'Native operation may have been dispatched', { retryable: true });
+        },
+        close() {}
+      }
+    });
+    const result = await provider.execute({
+      id: 'uncertain-uia-' + code, capability: 'app.operate', risk: 'external', provenance,
+      input: { operation: 'invoke', selector: { automationId: 'save' } }
+    });
+    assert.equal(calls, 1, code);
+    assert.equal(result.error?.sideEffectState, 'uncertain', code);
+    assert.equal(result.error?.retryable, false, code);
+    await provider.close();
+  }
+});
