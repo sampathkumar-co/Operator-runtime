@@ -109,7 +109,7 @@ export function controlCenterBrowserRequestAllowed(
 /** Only routes actually used by the browser UI get cookie-based authority. */
 export function browserUiRouteAllowed(method: string, pathname: string): boolean {
   if (method === 'GET') {
-    return /^\/v1\/(?:tasks(?:\/[^/]+)?|teams(?:\/[^/]+)?|studio\/runs(?:\/[^/]+)?|desired-state(?:\/[^/]+)?|activity|devices|enterprise-policy|procedures|world\/entities|control-center\/(?:runtime|approvals|recovery|onboarding|diagnostics))$/.test(pathname);
+    return /^\/v1\/(?:tasks(?:\/[^/]+)?|teams(?:\/[^/]+)?|studio\/runs(?:\/[^/]+)?|desired-state(?:\/[^/]+)?|activity|devices|enterprise-policy|procedures|world\/entities|control-center\/(?:runtime|approvals|recovery|onboarding|diagnostics(?:\/export)?))$/.test(pathname);
   }
   if (method === 'POST') {
     return pathname === '/v1/goals'
