@@ -110,6 +110,7 @@ export class DockerProvider implements CapabilityProvider {
         throw new OperatorError('INVALID_DOCKER_OPERATION', 'Docker manage operation must be start, stop, or restart.');
       }
       const services = validateServices(action.input.services);
+      const timeoutMs = boundedInteger(action.input.timeoutMs, 60_000, 1_000, 5 * 60_000);
       const expectedCurrentFingerprint = action.input.expectedCurrentFingerprint;
       if (typeof expectedCurrentFingerprint !== 'string') {
         throw new OperatorError('DOCKER_FINGERPRINT_REQUIRED', 'A typed fingerprint from fresh docker.inspect is required.');
@@ -143,7 +144,6 @@ export class DockerProvider implements CapabilityProvider {
         });
       }
       const ids = [...new Set(selected.map((container) => container.id))].sort();
-      const timeoutMs = boundedInteger(action.input.timeoutMs, 60_000, 1_000, 5 * 60_000);
       await this.#run(before.context, [operation, ...ids], timeoutMs, executionContext.signal);
 
       const after = await this.#inspectProject(before.root, executionContext.signal);
@@ -205,8 +205,8 @@ export class DockerProvider implements CapabilityProvider {
     if (operation === 'restart') {
       return reconciliation('uncertain', 'A final running state cannot prove that a restart actually occurred.');
     }
-    const services = validateServices(action.input.services);
     try {
+      const services = validateServices(action.input.services);
       if (typeof action.input.path !== 'string' || !action.input.path.trim()) {
         return reconciliation('uncertain', 'Docker reconcile requires an exact previously approved project path.');
       }
