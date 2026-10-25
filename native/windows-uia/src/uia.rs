@@ -60,6 +60,7 @@ pub struct ElementSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bounds: Option<ElementBounds>,
     pub patterns: PatternSupport,
+    pub is_password: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -548,10 +549,15 @@ impl UiaEngine {
         let expand_pattern = element.get_pattern::<UIExpandCollapsePattern>().ok();
         let scroll_pattern = element.get_pattern::<UIScrollPattern>().ok();
         let legacy_iaccessible = element.get_pattern::<UILegacyIAccessiblePattern>().is_ok();
-        let value = value_pattern
-            .as_ref()
-            .and_then(|pattern| pattern.get_value().ok())
-            .map(|value| truncate(value, 512));
+        // UIA value patterns can exist on protected edit controls. Treat an
+        // unavailable IsPassword property as protected and, critically, do
+        // not call ValuePattern::CurrentValue for protected elements at all.
+        let is_password = element.is_password().unwrap_or(true);
+        let value = public_value(is_password, || {
+            value_pattern
+                .as_ref()
+                .and_then(|pattern| pattern.get_value().ok())
+        });
         let selected = selection_pattern.as_ref().and_then(|pattern| pattern.is_selected().ok());
         let expand_collapse_state = expand_pattern
             .as_ref()
@@ -595,11 +601,23 @@ impl UiaEngine {
                 scroll: scroll_pattern.is_some(),
                 legacy_iaccessible,
             },
+            is_password,
             value,
             selected,
             expand_collapse_state,
             scroll,
         }
+    }
+}
+
+fn public_value<F>(is_password: bool, read_value: F) -> Option<String>
+where
+    F: FnOnce() -> Option<String>,
+{
+    if is_password {
+        None
+    } else {
+        read_value().map(|value| truncate(value, 512))
     }
 }
 
@@ -671,7 +689,8 @@ fn truncate(mut value: String, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_scroll_amount, scroll_postcondition, truncate};
+    use super::{parse_scroll_amount, public_value, scroll_postcondition, truncate};
+    use std::cell::Cell;
     use uiautomation::types::ScrollAmount;
 
     #[test]
@@ -693,5 +712,21 @@ mod tests {
         assert!(!scroll_postcondition(60.0, 50.0, ScrollAmount::SmallIncrement));
         assert!(scroll_postcondition(0.0, 0.0, ScrollAmount::SmallDecrement));
         assert!(scroll_postcondition(-1.0, -1.0, ScrollAmount::SmallIncrement));
+    }
+
+    #[test]
+    fn protected_values_are_never_read_or_returned() {
+        let called = Cell::new(false);
+        let value = public_value(true, || {
+            called.set(true);
+            Some("never-export-this-secret".into())
+        });
+        assert_eq!(value, None);
+        assert!(!called.get());
+
+        assert_eq!(
+            public_value(false, || Some("public-value".into())),
+            Some("public-value".into())
+        );
     }
 }
