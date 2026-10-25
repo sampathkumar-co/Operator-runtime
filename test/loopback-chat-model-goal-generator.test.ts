@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import { LoopbackChatModelGoalGenerator } from '../src/core/loopback-chat-model-goal-generator.ts';
 import { BoundedModelGoalInference } from '../src/core/bounded-model-goal-inference.ts';
 
-async function local(t: test.TestContext, handler: http.RequestListener) {
+async function local(t: TestContext, handler: http.RequestListener) {
   const server = http.createServer(handler);
   await new Promise<void>((resolve,reject)=>{
     server.once('error',reject); server.listen(0,'127.0.0.1',resolve);
