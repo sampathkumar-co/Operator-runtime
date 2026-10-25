@@ -1,0 +1,34 @@
+name: C04 Deterministic Windows UIA Fixture
+on:
+  pull_request:
+    paths:
+      - 'test/fixtures/windows-uia-contract-app/**'
+      - '.github/workflows/c04-deterministic-uia-fixture.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compile-and-describe:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4 current immutable ref
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build deterministic accessibility test app without running the desktop UI
+        shell: pwsh
+        run: dotnet build test/fixtures/windows-uia-contract-app/WindowsUiaContractApp.csproj --configuration Release --nologo
+      - name: Verify headless control contract and offline behavior declaration
+        shell: pwsh
+        run: |
+          $project = 'test/fixtures/windows-uia-contract-app'
+          $dll = Join-Path $project 'bin/Release/net8.0-windows/WindowsUiaContractApp.dll'
+          $result = (dotnet $dll --describe | Out-String | ConvertFrom-Json)
+          if ($result.schemaVersion -ne 1 -or $result.deterministic -ne $true) { throw 'Fixture contract is invalid' }
+          if ($result.networkAccess -ne $false -or $result.backgroundActions -ne $false) { throw 'Fixture unexpectedly advertises privileged effects' }
+          $ids = @($result.controlIds)
+          if ($ids.Count -lt 20 -or ($ids | Sort-Object -Unique).Count -ne $ids.Count) { throw 'Fixture identifiers are missing or repeated' }
+          foreach ($id in @('name-field','password-field','item-list','item-tree','item-table','open-dialog-button','open-file-button','notification-button')) {
+            if ($id -notin $ids) { throw "Missing UIA control $id" }
+          }
