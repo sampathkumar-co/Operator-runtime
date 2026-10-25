@@ -178,8 +178,9 @@ async function sha256(file) {
 }
 
 function validRuntimeRelativePath(input) {
-  const value = String(input ?? '');
-  if (!value || value.includes('\\') || path.posix.isAbsolute(value) || path.posix.normalize(value) !== value) {
+  if (typeof input !== 'string') throw new Error('Runtime manifest contains an unsafe file path.');
+  const value = input;
+  if (!value || value.includes('\\') || path.posix.isAbsolute(value) || path.posix.normalize(value) !== value || value === '.') {
     throw new Error('Runtime manifest contains an unsafe file path.');
   }
   if (value === '..' || value.startsWith('../') || value.includes('/../')) {
@@ -192,8 +193,8 @@ export function validateRuntimeManifest(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Runtime manifest must be an object.');
   if (input.schemaVersion !== 1 || input.package !== PACKAGE_NAME) throw new Error('Runtime manifest identity is invalid.');
   if (input.platform !== 'win32' || input.arch !== 'x64') throw new Error('Runtime manifest platform is invalid.');
-  if (!/^\d+\.\d+\.\d+(?:-rc\.[1-9]\d*)?$/.test(String(input.version ?? ''))) throw new Error('Runtime manifest version is invalid.');
-  if (!/^[0-9a-f]{40}$/i.test(String(input.sourceCommit ?? ''))) throw new Error('Runtime manifest source commit is invalid.');
+  if (typeof input.version !== 'string' || !/^\d+\.\d+\.\d+(?:-rc\.[1-9]\d*)?$/.test(input.version)) throw new Error('Runtime manifest version is invalid.');
+  if (typeof input.sourceCommit !== 'string' || !/^[0-9a-f]{40}$/i.test(input.sourceCommit)) throw new Error('Runtime manifest source commit is invalid.');
   if (!Array.isArray(input.files) || input.files.length < REQUIRED_RUNTIME_FILES.length || input.files.length > 4096) {
     throw new Error('Runtime manifest file list is invalid.');
   }
@@ -201,8 +202,9 @@ export function validateRuntimeManifest(input) {
   const files = input.files.map((entry) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('Runtime manifest file entry is invalid.');
     const relativePath = validRuntimeRelativePath(entry.path);
-    const sizeBytes = Number(entry.sizeBytes);
-    const digest = String(entry.sha256 ?? '').toLowerCase();
+    const sizeBytes = entry.sizeBytes;
+    if (typeof entry.sha256 !== 'string') throw new Error('Runtime manifest SHA-256 is invalid.');
+    const digest = entry.sha256.toLowerCase();
     if (seen.has(relativePath)) throw new Error(`Runtime manifest contains duplicate path ${relativePath}.`);
     if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 1 || sizeBytes > 64 * 1024 * 1024) {
       throw new Error(`Runtime manifest size is invalid for ${relativePath}.`);
