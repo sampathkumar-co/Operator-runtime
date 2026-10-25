@@ -56,8 +56,13 @@ function campaign(c, name) {
 function summarize(records) {
   const latency = records.map(x => x.endToEndMs).sort((a, b) => a - b);
   const stageMs = Object.fromEntries(STAGES.map(stage => {
-    const nums = records.map(x => x.stageTimingsMs[stage] ?? 0).sort((a, b) => a - b);
-    return [stage, { p50: quantile(nums, .5), p95: quantile(nums, .95), p99: quantile(nums, .99) }];
+    // Absence is not zero latency. Count observed stages separately so
+    // dropping instrumentation cannot make a candidate look faster.
+    const nums = records.flatMap(x =>
+      Object.hasOwn(x.stageTimingsMs, stage) ? [x.stageTimingsMs[stage]] : []
+    ).sort((a, b) => a - b);
+    return [stage, { observed: nums.length, missing: records.length - nums.length,
+      p50: quantile(nums, .5), p95: quantile(nums, .95), p99: quantile(nums, .99) }];
   }));
   const sum = key => records.reduce((total, item) => {
     const next = total + item[key];
@@ -105,7 +110,11 @@ export function compareMatchedPerformance({ baseline, candidate }) {
   const introducedHumanInterventionJourneys = keys.filter(key =>
     newRows.get(key).humanInterventions > oldRows.get(key).humanInterventions
   ).length;
+  const missingStageInstrumentation = STAGES.filter(stage =>
+    b.stageMs[stage].observed < a.stageMs[stage].observed
+  );
   const reasons = [
+    ...(missingStageInstrumentation.length ? ['STAGE_TELEMETRY_COVERAGE_REGRESSION'] : []),
     ...(b.p50Ms > a.p50Ms ? ['P50_LATENCY_REGRESSION'] : []),
     ...(b.p95Ms > a.p95Ms ? ['P95_LATENCY_REGRESSION'] : []),
     ...(b.p99Ms > a.p99Ms ? ['P99_LATENCY_REGRESSION'] : []),
@@ -128,6 +137,7 @@ export function compareMatchedPerformance({ baseline, candidate }) {
     regressionDiagnostics: {
       introducedFalseCompletionJourneys,
       introducedHumanInterventionJourneys,
+      missingStageInstrumentation,
       reasons
     },
     sourceTruth: 'SELF_REPORTED_INPUT_NOT_AUTHENTICATED',
