@@ -59,6 +59,50 @@ function optionalCoordinate(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+/** The provider's verification RPC can complete successfully while its
+ * requested postconditions remain false or inconclusive. Such responses are
+ * never success receipts for recovering an uncertain browser interaction. */
+export function browserVerificationProven(result: ActionResult): boolean {
+  if (!result?.ok || !result.output || typeof result.output !== 'object') return false;
+  const output = result.output as Record<string, unknown>;
+  if (output.status !== 'VERIFIED' || !Array.isArray(output.checks) || !output.checks.length) return false;
+  return output.checks.every(check => check && typeof check === 'object' &&
+    (check as Record<string, unknown>).pass === true);
+}
+export function normalizeBrowserVerificationExpectations(value: unknown): JsonMap {
+  const keys = ['exists', 'value', 'checked', 'selected', 'expanded', 'current',
+    'active', 'urlContains', 'titleContains', 'textContains'];
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new OperatorError('INVALID_BROWSER_VERIFICATION', 'Expected browser postconditions must be an object.');
+  }
+  const record = value as JsonMap;
+  const present = Object.keys(record);
+  if (!present.length || present.length > keys.length ||
+      present.some(key => !keys.includes(key)) ||
+      !present.some(key => record[key] !== undefined)) {
+    throw new OperatorError('INVALID_BROWSER_VERIFICATION', 'At least one supported browser postcondition is required and unknown keys are refused.');
+  }
+  for (const key of present) {
+    const expected = record[key];
+    if (expected === undefined) {
+      throw new OperatorError('INVALID_BROWSER_VERIFICATION', 'Undefined browser expectation values are invalid.');
+    }
+    if (['exists', 'checked', 'selected', 'expanded', 'active'].includes(key)) {
+      if (typeof expected !== 'boolean') {
+        throw new OperatorError('INVALID_BROWSER_VERIFICATION', 'Boolean browser postconditions require exact Boolean values.');
+      }
+    } else if (key === 'value') {
+      if (!((typeof expected === 'string' && expected.length <= 2048) ||
+            (typeof expected === 'number' && Number.isFinite(expected)))) {
+        throw new OperatorError('INVALID_BROWSER_VERIFICATION', 'Browser value expectation must be a bounded scalar.');
+      }
+    } else if (typeof expected !== 'string' || !expected.trim() || expected.length > 2048) {
+      throw new OperatorError('INVALID_BROWSER_VERIFICATION', 'Browser string postconditions require a non-empty bounded string.');
+    }
+  }
+  return record;
+}
+
 const MAX_TABS = 100;
 const MAX_CDP_DISCOVERY_BYTES = 1024 * 1024;
 
@@ -257,8 +301,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
           ...(action.intent ? { intent: action.intent } : {})
         };
         const verification = await this.execute(verificationAction, context);
-        if (!verification.ok) {
-          return browserReconciliation('uncertain', 'Explicit browser post-state verification did not prove the interaction outcome.');
+        if (!browserVerificationProven(verification)) {
+          return browserReconciliation('uncertain', 'Browser verification returned no fresh VERIFIED result with passing postcondition checks; the side effect remains uncertain.');
         }
         return browserReconciled(action, this.name, 'Explicit browser verification proves the interaction post-state.', {
           targetId,
@@ -419,19 +463,12 @@ export class BrowserCdpProvider implements CapabilityProvider {
 
   async #verify(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
     const targetId = requiredTargetId(action.input.targetId);
-    const rawExpect = action.input.expect && typeof action.input.expect === 'object' && !Array.isArray(action.input.expect)
-      ? action.input.expect as JsonMap
-      : {};
+    const rawExpect = normalizeBrowserVerificationExpectations(action.input.expect);
     const targetProvided = action.input.target && typeof action.input.target === 'object' && !Array.isArray(action.input.target);
     const targetSpec = targetProvided ? normalizeTargetSpec(action.input.target) : undefined;
     if (targetSpec && !targetSpec.ref && !targetSpec.css && !targetSpec.text && !targetSpec.renderedColor && !(targetSpec.role && targetSpec.name)) {
       throw new OperatorError('INVALID_BROWSER_TARGET', 'Verification target must use an observed ref, css, text, renderedColor, or role+name.');
     }
-    const expectationKeys = ['exists', 'value', 'checked', 'selected', 'expanded', 'current', 'active', 'urlContains', 'titleContains', 'textContains'];
-    if (!expectationKeys.some((key) => rawExpect[key] !== undefined)) {
-      throw new OperatorError('INVALID_BROWSER_VERIFICATION', 'At least one bounded verification expectation is required.');
-    }
-
     const tabs = await this.#listTargets(signal);
     const target = requireTarget(tabs, targetId);
     const session = this.#sessions.get(target);
