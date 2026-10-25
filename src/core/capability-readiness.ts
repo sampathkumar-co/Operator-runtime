@@ -1,10 +1,13 @@
 import type { PermissionProfile } from './types.ts';
 import type { CapabilityDiscoverySnapshot } from './capability-discovery.ts';
 import { OperatorError } from './errors.ts';
+import { CAPABILITY_RISK_RULES } from './capability-policy.ts';
 
 const MAX_ITEMS = 128;
 const CAPABILITY = /^[A-Za-z][A-Za-z0-9._:-]{0,255}$/;
 const PROVIDER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const RISKS = new Set(['read', 'write', 'external', 'system', 'destructive', 'dynamic']);
+const MAX_ROOT_BYTES = 4096;
 type Advertised =
   | 'PROVIDER_DECLARED_NOT_EXECUTION_TESTED'
   | 'SCOPE_NOT_LISTED'
@@ -72,12 +75,19 @@ export function buildContextualCapabilityReadiness(input: {
       input.declaration?.schemaVersion !== 1 ||
       input.declaration.provenance !== 'CURRENT_REGISTERED_PROVIDER_DECLARATIONS' ||
       input.declaration.sourceTruth !== 'NOT_AN_EXECUTION_OR_AUTHORITY_GRANT' ||
+      input.declaration.probeMode !== 'BOUNDED_EMPTY_INPUT_NO_DISPATCH' ||
+      !Number.isSafeInteger(input.declaration.registeredProviders) ||
+      input.declaration.registeredProviders < 0 ||
+      input.declaration.registeredProviders > MAX_ITEMS ||
       !Array.isArray(input.declaration.capabilities) ||
       input.declaration.capabilities.length > MAX_ITEMS ||
       !Array.isArray(input.permissions?.allowedCapabilities) ||
       !Array.isArray(input.permissions?.allowedRoots) ||
       input.permissions.allowedCapabilities.length > MAX_ITEMS ||
       input.permissions.allowedRoots.length > MAX_ITEMS ||
+      input.permissions.allowedRoots.some(root => typeof root !== 'string' ||
+        !root.trim() || root !== root.trim() || Buffer.byteLength(root, 'utf8') > MAX_ROOT_BYTES ||
+        root.includes(String.fromCharCode(0))) ||
       typeof input.emergencyStopped !== 'boolean') {
     invalid('A bounded truthful current provider declaration and request authority profile are mandatory.');
   }
@@ -96,6 +106,16 @@ export function buildContextualCapabilityReadiness(input: {
         !Array.isArray(entry.providerNames) ||
         entry.providerNames.length > MAX_ITEMS ||
         entry.providerNames.some(name=>typeof name !== 'string' || !PROVIDER.test(name)) ||
+        new Set(entry.providerNames).size !== entry.providerNames.length ||
+        !RISKS.has(entry.canonicalRisk) ||
+        !Object.hasOwn(CAPABILITY_RISK_RULES, entry.capability) ||
+        CAPABILITY_RISK_RULES[entry.capability] !== entry.canonicalRisk ||
+        entry.providerNames.length > input.declaration.registeredProviders ||
+        typeof entry.mayRequireTypedInput !== 'boolean' ||
+        (entry.status === 'DECLARED_NOT_EXECUTED' && entry.providerNames.length === 0) ||
+        (entry.status === 'NOT_ADVERTISED_WITH_EMPTY_INPUT' && entry.providerNames.length !== 0) ||
+        (entry.canonicalRisk === 'dynamic' &&
+          entry.dynamicRiskStatus !== 'REQUIRES_TYPED_INPUT_AND_FRESH_AUTHORIZATION') ||
         !['DECLARED_NOT_EXECUTED','NOT_ADVERTISED_WITH_EMPTY_INPUT',
           'PROBE_INDETERMINATE'].includes(entry.status) ||
         entry.authorizationStatus !== 'NOT_CHECKED' ||
