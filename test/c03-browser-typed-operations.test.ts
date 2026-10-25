@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { BrowserCdpInspectProvider } from '../src/capabilities/browser-cdp.ts';
+import { BrowserCdpInspectProvider, browserVerificationProven, normalizeBrowserVerificationExpectations } from '../src/capabilities/browser-cdp.ts';
 import { validateNavigationUrl } from '../src/capabilities/browser-cdp-page.ts';
 
 test('C03 browser URL validation never stringifies forged array or object destinations', () => {
@@ -57,4 +57,52 @@ test('C03 rejects malformed browser operations before contacting any CDP endpoin
       assert.notEqual(result.error?.code,'ECONNREFUSED','input validation must precede CDP');
     }
   } finally { provider.close(); }
+});
+
+test('C03/C07 only genuinely passed browser goal postconditions may certify a reconciled interaction', async () => {
+  const provider=new BrowserCdpInspectProvider('http://127.0.0.1:65534');
+  const action:any={
+    id:'attempt-postcondition',capability:'browser.interact',risk:'external',
+    input:{targetId:'tab1',operation:'click',target:{ref:'b-c0ff33-1-2'},expect:{expanded:true}},
+    provenance:{kind:'runtime'}
+  };
+  const sample=(status:string,checks:any[])=>({
+    ok:true,capability:'browser.verify',provider:'browser.cdp',
+    output:{status,targetId:'tab1',checks},evidence:[],durationMs:0
+  });
+  const responses=[
+    [sample('NOT_COMPLETE',[{field:'expanded',pass:false}]),'uncertain'],
+    [sample('INCONCLUSIVE',[{field:'expanded',pass:false}]),'uncertain'],
+    [sample('VERIFIED',[]),'uncertain'],
+    [sample('VERIFIED',[{field:'expanded',pass:false}]),'uncertain'],
+    [sample('VERIFIED',[{field:'expanded',pass:true}]),'completed']
+  ] as const;
+  try {
+    for(const [verification,expected] of responses) {
+      (provider as any).execute=async()=>verification;
+      assert.equal(browserVerificationProven(verification as any),expected==='completed');
+      const reconciled=await provider.reconcile({action});
+      assert.equal(reconciled.status,expected);
+      if (expected !== 'completed') assert.equal(reconciled.result,undefined,
+        'uncertain reconciliation never fabricates an ActionResult success');
+    }
+  } finally { provider.close(); }
+});
+
+test('C03 browser verification refuses vacuous, unknown or coercible expectations',()=>{
+  assert.deepEqual(normalizeBrowserVerificationExpectations({exists:false}),{exists:false});
+  assert.deepEqual(normalizeBrowserVerificationExpectations({expanded:true,titleContains:'Dashboard'}),{expanded:true,titleContains:'Dashboard'});
+  let coercions=0;
+  const poisoned={toString(){coercions++;return 'Checkout complete';}};
+  for(const input of [
+    {},null,[],{unsupported:true},{exists:undefined},{exists:'true'},
+    {checked:['true']},{selected:1},{active:null},{expanded:'false'},
+    {urlContains:''},{titleContains:'  '},{textContains:poisoned},
+    {urlContains:['https://example.com']},{current:0},
+    {value:['success']},{value:poisoned}
+  ]) {
+    assert.throws(()=>normalizeBrowserVerificationExpectations(input),
+      (error:any)=>error?.code==='INVALID_BROWSER_VERIFICATION');
+  }
+  assert.equal(coercions,0);
 });
