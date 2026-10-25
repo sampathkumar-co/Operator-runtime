@@ -63,7 +63,11 @@ export class DockerProvider implements CapabilityProvider {
     const started = performance.now();
     try {
       if (action.capability === 'docker.inspect') {
-        const rootInput = String(action.input.path ?? '').trim();
+        const pathValue = action.input.path;
+        if (pathValue !== undefined && (typeof pathValue !== 'string' || pathValue.length > 4096)) {
+          throw new OperatorError('INVALID_DOCKER_PROJECT_PATH', 'Docker project scope must be an exact bounded string.');
+        }
+        const rootInput = pathValue === undefined ? '' : (pathValue as string).trim();
         if (rootInput) {
           const state = await this.#inspectProject(rootInput, executionContext.signal);
           return success(action, started, {
@@ -101,17 +105,24 @@ export class DockerProvider implements CapabilityProvider {
         ]);
       }
 
-      const operation = String(action.input.operation ?? '');
+      const operation = typeof action.input.operation === 'string' ? action.input.operation : '';
       if (!['start', 'stop', 'restart'].includes(operation)) {
         throw new OperatorError('INVALID_DOCKER_OPERATION', 'Docker manage operation must be start, stop, or restart.');
       }
       const services = validateServices(action.input.services);
-      const expectedCurrentFingerprint = String(action.input.expectedCurrentFingerprint ?? '');
+      const expectedCurrentFingerprint = action.input.expectedCurrentFingerprint;
+      if (typeof expectedCurrentFingerprint !== 'string') {
+        throw new OperatorError('DOCKER_FINGERPRINT_REQUIRED', 'A typed fingerprint from fresh docker.inspect is required.');
+      }
       if (!/^[0-9a-f]{64}$/i.test(expectedCurrentFingerprint)) {
         throw new OperatorError('DOCKER_FINGERPRINT_REQUIRED', 'A fresh expectedCurrentFingerprint from docker.inspect is required.');
       }
 
-      const before = await this.#inspectProject(String(action.input.path ?? ''), executionContext.signal);
+      const projectPath = action.input.path;
+      if (typeof projectPath !== 'string' || !projectPath.trim() || projectPath.length > 4096) {
+        throw new OperatorError('INVALID_DOCKER_PROJECT_PATH', 'Docker manage requires an exact non-empty authorized project path.');
+      }
+      const before = await this.#inspectProject(projectPath, executionContext.signal);
       if (before.fingerprint !== expectedCurrentFingerprint) {
         throw new OperatorError('DOCKER_STATE_CHANGED', 'Docker project state changed after the supplied precondition was captured.', {
           retryable: true,
@@ -196,7 +207,10 @@ export class DockerProvider implements CapabilityProvider {
     }
     const services = validateServices(action.input.services);
     try {
-      const state = await this.#inspectProject(String(action.input.path ?? ''), context.signal);
+      if (typeof action.input.path !== 'string' || !action.input.path.trim()) {
+        return reconciliation('uncertain', 'Docker reconcile requires an exact previously approved project path.');
+      }
+      const state = await this.#inspectProject(action.input.path, context.signal);
       const selected = state.containers.filter((container) => services.includes(container.service));
       const missing = services.filter((service) => !selected.some((container) => container.service === service));
       if (missing.length > 0) {
@@ -339,16 +353,21 @@ export class DockerProvider implements CapabilityProvider {
 }
 
 function boundedInteger(input: unknown, fallback: number, min: number, max: number): number {
-  const value = Number(input ?? fallback);
-  if (!Number.isFinite(value)) return fallback;
-  return Math.min(Math.max(Math.trunc(value), min), max);
+  if (input === undefined) return fallback;
+  if (typeof input !== 'number' || !Number.isSafeInteger(input) || input < min || input > max) {
+    throw new OperatorError('INVALID_DOCKER_TIMEOUT', 'Docker timeout must be an exact bounded integer in milliseconds.');
+  }
+  return input;
 }
 
 function validateServices(input: unknown): string[] {
   if (!Array.isArray(input) || input.length === 0 || input.length > MAX_SERVICES) {
     throw new OperatorError('DOCKER_SERVICES_REQUIRED', `services must contain 1-${MAX_SERVICES} Compose service names.`);
   }
-  const services = [...new Set(input.map(String))];
+  if (input.some(service => typeof service !== 'string')) {
+    throw new OperatorError('INVALID_DOCKER_SERVICE', 'Docker service identity must be an exact string.');
+  }
+  const services = [...new Set(input as string[])];
   for (const service of services) {
     if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(service)) {
       throw new OperatorError('INVALID_DOCKER_SERVICE', 'Docker service names must use bounded alphanumeric/._- characters.');
