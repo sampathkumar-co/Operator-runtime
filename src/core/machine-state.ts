@@ -157,8 +157,11 @@ function importantStateFromResult(result: ActionResult): Record<string, unknown>
     const commandKind = text(command.kind);
     if (commandKind && /^[a-z][a-z0-9_-]{0,63}$/i.test(commandKind)) state.commandKind = commandKind;
     if (typeof validation.passed === 'boolean') state.validationPassed = validation.passed;
-    const exitCode = Number(execution.exitCode);
-    if (Number.isSafeInteger(exitCode) && exitCode >= -1_000_000 && exitCode <= 1_000_000) state.exitCode = exitCode;
+    const exitCode = execution.exitCode;
+    // Never turn null, an empty string, a numeric string, or a forged object
+    // into a valid zero exit status in durable machine evidence.
+    if (typeof exitCode === 'number' && Number.isSafeInteger(exitCode)
+      && exitCode >= -1_000_000 && exitCode <= 1_000_000) state.exitCode = exitCode;
   }
   if (result.capability.startsWith('postgres.')) {
     const profileId = text(output.profileId);
@@ -168,11 +171,13 @@ function importantStateFromResult(result: ActionResult): Record<string, unknown>
     if (schema && /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/.test(schema)) state.schema = schema;
     if (table && /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/.test(table)) state.table = table;
     for (const key of ['rowCount', 'limit', 'offset']) {
-      const value = Number(output[key]);
-      if (Number.isSafeInteger(value) && value >= 0 && value <= 10_000) state[key] = value;
+      const value = output[key];
+      if (typeof value === 'number' && Number.isSafeInteger(value)
+        && value >= 0 && value <= 10_000) state[key] = value;
     }
     if (Array.isArray(output.columns)) {
-      const columns = output.columns.map(String).filter((column) => column === '*' || /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/.test(column)).slice(0, 50);
+      const columns = output.columns.filter((column): column is string =>
+        typeof column === 'string' && (column === '*' || /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/.test(column))).slice(0, 50);
       if (columns.length) state.columns = columns;
     }
     if (Array.isArray(output.profiles)) state.profileCount = Math.min(output.profiles.length, 1000);
@@ -193,12 +198,14 @@ function normalizeDockerServices(input: unknown): Array<{ service: string; conta
   for (const item of input.slice(0, 50)) {
     const raw = record(item);
     const service = text(raw.service);
-    const containers = Number(raw.containers ?? 0);
+    const containers = raw.containers ?? 0;
     const states = Array.isArray(raw.states)
-      ? [...new Set(raw.states.map(String).filter((state) => /^[a-z][a-z0-9_-]{0,63}$/i.test(state)))].sort().slice(0, 20)
+      ? [...new Set(raw.states.filter((state): state is string =>
+        typeof state === 'string' && /^[a-z][a-z0-9_-]{0,63}$/i.test(state)))].sort().slice(0, 20)
       : [];
     if (!service || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(service)) continue;
-    if (!Number.isSafeInteger(containers) || containers < 0 || containers > 1000) continue;
+    if (typeof containers !== 'number' || !Number.isSafeInteger(containers)
+      || containers < 0 || containers > 1000) continue;
     output.push({ service, containers, states });
   }
   return output.sort((a, b) => a.service.localeCompare(b.service));
