@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { validateWave0Record, buildWave0EvaluationReport } from './wave0-evaluation.mjs';
+import { validateWave0Record } from './wave0-evaluation.mjs';
 
 const SHA=/^[0-9a-f]{40}$/;
 const DIGEST=/^[0-9a-f]{64}$/;
@@ -57,7 +57,9 @@ export function createSanitizedEvaluationTrace(input) {
  if(steps.some((step,i)=>i>0&&steps[i-1].sideEffectState==='uncertain'&&step.phase==='DISPATCH')){
    deny('Uncertain prior side effect cannot be silently followed by another dispatch.');
  }
- const independentReport=buildWave0EvaluationReport({sourceCommit:input.sourceCommit,records:[run]});
+ // A single Lane C arm is NOT a paired cohort. Keep only the exact
+ // run-level digest here; the separate campaign reporter authenticates pairing.
+ const scorerRecordDigest=hash(JSON.stringify(run));
  const header={
    kind:'header',version:1,sourceCommit:input.sourceCommit,
    suiteDigest:input.suiteDigest,
@@ -77,7 +79,8 @@ export function createSanitizedEvaluationTrace(input) {
    claimedSuccess:run.claimedSuccess,
    failureStage:run.failureStage,
    resultEvidenceDigest:run.resultEvidenceDigest,
-   reportDigest:independentReport.reportDigest,
+   scorerRecordDigest,
+   campaignCoverage:'PARTIAL_UNVERIFIED',
    stepDigest,
    physicalAcceptance:'NOT_VERIFIED',
    releaseAuthorization:'NOT_GRANTED'
