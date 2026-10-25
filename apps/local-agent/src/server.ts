@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { applyBoundedHttpServerPolicy, requireLiteralLoopbackBindHost } from '../../../src/core/network-authority.ts';
 import { PRODUCT_VERSION } from '../../../src/core/product-identity.ts';
+import { buildContextualCapabilityReadiness } from '../../../src/core/capability-readiness.ts';
 import type { ActionRequest, ActionResult, PermissionProfile } from '../../../src/core/types.ts';
 import type { OperatorRuntime } from '../../../src/core/runtime.ts';
 import type { AgentKernel } from '../../../src/core/agent-kernel.ts';
@@ -517,6 +518,18 @@ export function createLocalAgentServer(options: {
       return;
     }
     const requestPermissions = requestPermissionDecision.permissions;
+
+    if (pathname === '/v1/capabilities/readiness' && req.method === 'GET') {
+      const [declaration, emergency] = await Promise.all([
+        options.runtime.inspectCapabilityDeclarations(),
+        options.emergencyStop ? options.emergencyStop.status() : Promise.resolve({ engaged:false })
+      ]);
+      send(res, 200, { ok: true, snapshot: buildContextualCapabilityReadiness({
+        declaration, permissions: requestPermissions,
+        platform: process.platform, emergencyStopped: emergency.engaged === true
+      }) });
+      return;
+    }
 
     if (pathname === '/v1/gateway/execute' && req.method === 'POST') {
       if (!options.gateway) {
