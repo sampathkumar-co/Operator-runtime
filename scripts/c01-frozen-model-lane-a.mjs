@@ -59,6 +59,8 @@ export async function runFrozenModelLaneA(input) {
       input.cases.length > 200 ||
       !Number.isSafeInteger(input.maxOutputTokens) || input.maxOutputTokens < 16 ||
       input.maxOutputTokens > 4096 ||
+      !Number.isSafeInteger(input.maxCostMicrosPerCall) ||
+      input.maxCostMicrosPerCall < 0 || input.maxCostMicrosPerCall > 2_000_000 ||
       !Number.isSafeInteger(input.maxLatencyMs) || input.maxLatencyMs < 100 ||
       input.maxLatencyMs > 45000) fail('Explicit bounded model, exact source and frozen cases are required.');
   const scenarios = input.cases.map(entry => ({...entry,
@@ -70,6 +72,7 @@ export async function runFrozenModelLaneA(input) {
   for (const scenario of scenarios) {
     const start = performance.now();
     let choiceId;
+    let costMicros = input.maxCostMicrosPerCall; // unmetered/timeout => reserve full spending ceiling
     let failureStage = 'model';
     const controller = new AbortController();
     let expired = false, timer;
@@ -90,6 +93,10 @@ export async function runFrozenModelLaneA(input) {
         timeout
       ]);
       if (expired || controller.signal.aborted) throw Error('Model returned after deadline.');
+      if (Number.isSafeInteger(result?.costMicros) &&
+          result.costMicros >= 0 && result.costMicros <= input.maxCostMicrosPerCall) {
+        costMicros = result.costMicros;
+      }
       const text = result?.text;
       if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > 1024) {
         failureStage = 'schema';
@@ -132,7 +139,7 @@ export async function runFrozenModelLaneA(input) {
         modelChoice:choiceId ?? null, verified, failureStage
       }),
       latencyMs: performance.now() - start,
-      costMicros: 0, // Unmetered model costs must not be reported as free.
+      costMicros, // unmetered cost pessimistically charged at owner-provided maximum
       humanInterventions: 0,
       unauthorizedEffects: 0
     });
@@ -146,7 +153,7 @@ export async function runFrozenModelLaneA(input) {
     status: report.lanes.A.status,
     reportDigest: report.reportDigest,
     independentScorer: 'EXACT_FROZEN_CHOICE',
-    costAccounting: 'NOT_METERED_BY_THIS_HARNESS',
+    costAccounting: 'ACTUAL_WHEN_PROVIDED_ELSE_MAX_RESERVATION',
     sourcePhysicalAcceptance: 'NOT_VERIFIED',
     taskExecution: 'NOT_RUN',
     modelCalls: records.length,
