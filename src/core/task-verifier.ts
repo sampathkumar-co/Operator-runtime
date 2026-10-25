@@ -373,7 +373,13 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
     // verification was attempted, a failed/latest attempt cannot fall back to
     // pre-action state and promote an unverified goal to success.
     const safeInitialOnly = !latestMutation && !latestVerifyAttempt;
-    const inspect = verify ?? (safeInitialOnly ? lastSucceeded(records, `${prefix}inspect-app-target`) : undefined);
+    // A newer failed or unfinished initial read supersedes its previous
+    // success even when no mutation was attempted. Never certify a no-op from
+    // a stale inspection after a later contradictory/failed observation.
+    const latestInitialAttempt = [...records].reverse().find(record =>
+      record.stepKey === `${prefix}inspect-app-target`);
+    const inspect = verify ?? (safeInitialOnly && latestInitialAttempt?.state === 'SUCCEEDED'
+      ? latestInitialAttempt : undefined);
     const state = observationState(inspect);
     const elements = Array.isArray(state.uiaElements) ? state.uiaElements.map(asRecord) : [];
     const selector = asRecord(verify ? (goal.verifySelector ?? goal.selector) : goal.selector);
