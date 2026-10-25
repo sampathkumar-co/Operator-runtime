@@ -135,9 +135,22 @@ export class GitProvider implements CapabilityProvider {
 
 export function boundedGitDiff(result: ActionResult, input: Record<string, unknown>): ActionResult {
   const raw = result.output as { stdout?: unknown; stderr?: unknown; truncated?: unknown } | undefined;
-  const bytes = Buffer.from(String(raw?.stdout ?? ''), 'utf8');
   const offset = boundedGitInteger(input.offset, 0, 0, 16 * 1024 * 1024);
   const maxBytes = boundedGitInteger(input.maxBytes, 48 * 1024, 1024, 128 * 1024);
+  // A process-level stdout cap is not a paginated source. Advancing offsets
+  // through the already truncated bytes creates a zero-progress retry loop.
+  if (raw?.truncated === true) {
+    return {
+      ...result, ok: false, evidence: [],
+      output: { stdout: '', stderr: '', offset, returnedBytes: 0, truncated: true },
+      error: {
+        code: 'GIT_DIFF_SOURCE_TRUNCATED',
+        message: 'Git subprocess output was incomplete; cannot prove a complete paginated diff.',
+        retryable: false
+      }
+    };
+  }
+  const bytes = Buffer.from(String(raw?.stdout ?? ''), 'utf8');
   // Offsets count UTF-8 bytes. Cutting through a code point silently replaces
   // its bytes with U+FFFD, corrupting diffs and preventing exact reconstruction.
   const boundary = (index: number) =>
@@ -201,7 +214,8 @@ function structuredGitStatus(result: ActionResult, input: Record<string, unknown
   }
   const nextOffset = offset + page.length;
   const truncated = nextOffset < entries.length || raw?.truncated === true;
-  return { ...result, output: { branch, detached, clean: entries.length === 0, entries: page, offset, returnedBytes: bytes, truncated, ...(truncated ? { nextOffset } : {}) } };
+  // A truncated status source cannot prove a clean worktree.
+  return { ...result, output: { branch, detached, clean: entries.length === 0 && raw?.truncated !== true, entries: page, offset, returnedBytes: bytes, truncated, ...(truncated ? { nextOffset } : {}) } };
 }
 
 async function validatePublicLiteralPaths(
