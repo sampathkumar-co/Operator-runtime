@@ -57,7 +57,9 @@ export class DocumentDataProvider implements CapabilityProvider{
         const extracted=extract(format,bytes);
         if(action.capability.endsWith('.extract')) {
           if(format==='csv'){
-            output=boundCsvExtract(base,extracted,action.input.offset,maxBytes);
+            const complete={...base,...extracted};
+            output=action.input.offset===undefined && Buffer.byteLength(JSON.stringify(complete),'utf8')<=maxBytes
+              ? complete : boundCsvExtract(base,extracted,action.input.offset,maxBytes);
           }else output={...base,...extracted};
         }
         else output={...base,...render(format,bytes,extracted)};
