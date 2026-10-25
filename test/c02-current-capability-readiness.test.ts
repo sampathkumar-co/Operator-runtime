@@ -107,3 +107,38 @@ test('C02 authenticated local API only publishes true current registry and reque
   assert.equal(json.includes(root),false,'authorized root paths must never be included');
   assert.equal(json.includes(token),false,'agent bearer token must never be disclosed');
 });
+
+test('C02 malformed root declarations cannot falsely advertise filesystem readiness', async () => {
+  const snapshot = await discoverBuiltInCapabilities([]);
+  for (const roots of [[''], [' '], [null], [42], ['  /approved/path  '], ['a'.repeat(4100)],
+    ['/approved' + String.fromCharCode(0) + '/path']] as unknown[][]) {
+    assert.throws(() => buildContextualCapabilityReadiness({
+      declaration: snapshot, permissions: { ...permissions, allowedRoots: roots as string[] },
+      platform: 'win32', emergencyStopped: false
+    }), (error: any) => error?.code === 'CAPABILITY_READINESS_INVALID');
+  }
+});
+
+test('C02 source readiness does not trust malformed or self-contradictory provider declarations', async () => {
+  const snapshot = await discoverBuiltInCapabilities([]);
+  const first = snapshot.capabilities[0]!;
+  const mutated = (changes: Record<string, unknown>) => ({
+    ...snapshot, capabilities: [{ ...first, ...changes }, ...snapshot.capabilities.slice(1)]
+  });
+  for (const declaration of [
+    { ...snapshot, probeMode: 'ACTUAL_EXECUTION' },
+    { ...snapshot, registeredProviders: -1 },
+    { ...snapshot, registeredProviders: 1.5 },
+    mutated({ canonicalRisk: 'UNKNOWN_RISK' }),
+    mutated({ providerNames: ['duplicate', 'duplicate'] }),
+    mutated({ status: 'DECLARED_NOT_EXECUTED', providerNames: [] }),
+    mutated({ status: 'NOT_ADVERTISED_WITH_EMPTY_INPUT', providerNames: ['claimed-provider'] }),
+    mutated({ mayRequireTypedInput: 'probably' }),
+    mutated({ canonicalRisk: 'dynamic', dynamicRiskStatus: undefined })
+  ]) {
+    assert.throws(() => buildContextualCapabilityReadiness({
+      declaration: declaration as any, permissions,
+      platform: 'linux', emergencyStopped: false
+    }), (error: any) => error?.code === 'CAPABILITY_READINESS_INVALID');
+  }
+});
