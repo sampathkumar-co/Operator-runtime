@@ -1,0 +1,42 @@
+name: C11 All Main Release Entry Points Gated
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/npm-remote-release.yml'
+      - '.github/workflows/npm-bootstrap-release.yml'
+      - '.github/workflows/windows-production-release.yml'
+      - '.github/workflows/c11-npm-release-gates.yml'
+      - 'scripts/wave4-publication-gate.mjs'
+      - 'certification/wave4-owner-key.json'
+      - 'test/c11-npm-publication-gate.test.ts'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/npm-remote-release.yml'
+      - '.github/workflows/npm-bootstrap-release.yml'
+      - '.github/workflows/windows-production-release.yml'
+      - '.github/workflows/c11-npm-release-gates.yml'
+      - 'scripts/wave4-publication-gate.mjs'
+      - 'certification/wave4-owner-key.json'
+      - 'test/c11-npm-publication-gate.test.ts'
+
+permissions:
+  contents: read
+
+jobs:
+  source-release-gate-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Require Wave4 source and owner trust pins before all main npm/Windows publication
+        run: node --experimental-strip-types --test test/c11-npm-publication-gate.test.ts test/wave4-publication-gate.test.ts test/wave4-release-workflow-enforcement.test.ts
+      - name: Publication explicitly prohibited in source CI
+        run: echo 'C11_NPM_STAGING=NOT_RUN;OWNER_KEY=NOT_ENROLLED;PRODUCTION_RELEASE=NOT_AUTHORIZED'
