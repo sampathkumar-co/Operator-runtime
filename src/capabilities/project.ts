@@ -31,7 +31,12 @@ export class ProjectInspectProvider implements CapabilityProvider {
   async execute(action: ActionRequest): Promise<ActionResult> {
     const started = performance.now();
     if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Project inspect provider does not support this capability.');
-    const root = await this.#scope.resolveExisting(String(action.input.path ?? ''));
+    const requested = action.input.path;
+    if (typeof requested !== 'string' || !requested || requested.length > 4096 ||
+        [...requested].some(ch => [0, 10, 13].includes(ch.charCodeAt(0)))) {
+      throw new OperatorError('PROJECT_SCOPE_INVALID', 'Project inspection requires an exact bounded authorized path.');
+    }
+    const root = await this.#scope.resolveExisting(requested);
     const names = await fs.readdir(root);
     const has = (name: string) => names.includes(name);
     // Resolve each manifest independently under the approved scope. Merely
