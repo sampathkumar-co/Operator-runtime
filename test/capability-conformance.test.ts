@@ -201,3 +201,65 @@ test('tampered conformance receipt fails closed', () => {
   tampered.verifierId = 'forged-verifier';
   assert.throws(() => validateCapabilityConformanceReceipt(tampered), /id does not match/);
 });
+
+test('C02 conformance rejects coercible identities, dates, reasons and cost metrics', () => {
+  const at = '2026-10-06T00:00:00.000Z';
+  const base = {
+    suite: 'SANDBOX' as const, manifestDigest: capabilityManifestDigest(manifest),
+    verifierId: 'trusted-verifier', independent: true, passed: true,
+    evidenceArtifactIds: ['d'.repeat(64)], observedAt: at
+  };
+  let coercions = 0;
+  const imposter = { toString() { coercions++; return 'trusted-verifier'; } };
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ['verifier', { verifierId: ['trusted-verifier'] }],
+    ['object verifier', { verifierId: imposter }],
+    ['digest', { manifestDigest: ['a'.repeat(64)] }],
+    ['timestamp', { observedAt: [at] }],
+    ['evidence digest', { evidenceArtifactIds: [['d'.repeat(64)]] }]
+  ];
+  for (const [label, changes] of cases) {
+    assert.throws(() => createCapabilityConformanceReceipt({
+      ...base, ...changes
+    } as any), (error: any) => error?.code === 'CAPABILITY_CERTIFICATION_INVALID', label);
+  }
+  const perf = {
+    ...base, suite: 'PERFORMANCE' as const
+  };
+  for (const metrics of [
+    { p95LatencyMs: '20' }, { failureRate: '0.01' },
+    { peakMemoryMb: [64] }, [], { p95LatencyMs: Infinity }
+  ]) {
+    assert.throws(() => createCapabilityConformanceReceipt({
+      ...perf, metrics: metrics as any
+    }), (error: any) => error?.code === 'CAPABILITY_CERTIFICATION_INVALID');
+  }
+  assert.equal(coercions, 0, 'Untrusted objects must never execute coercion hooks.');
+});
+
+test('C02 malformed certification and revocation policy fields fail closed', () => {
+  const items = receipts();
+  const certifiedAt = '2026-10-06T00:01:00.000Z';
+  for (const policy of [
+    { maxP95LatencyMs: '100' },
+    { maxFailureRate: [0.01] },
+    { maxPeakMemoryMb: true }
+  ]) {
+    assert.throws(() => certifyCapabilityExtension({
+      manifest, receipts: items, policy: policy as any, certifiedAt
+    }), (error: any) => error?.code === 'CAPABILITY_CERTIFICATION_INVALID');
+  }
+  const certification = certifyCapabilityExtension({ manifest, receipts: items, certifiedAt });
+  for (const reasonCode of [['SECURITY'], { toString: () => 'SECURITY' }]) {
+    assert.throws(() => createCapabilityRevocation({
+      certificationId: certification.id, manifestDigest: certification.manifestDigest,
+      reasonCode: reasonCode as any, evidenceArtifactIds: ['a'.repeat(64)]
+    }), (error: any) => error?.code === 'CAPABILITY_CERTIFICATION_INVALID');
+  }
+  for (const hash of [['a'.repeat(64)], { toString: () => 'a'.repeat(64) }]) {
+    assert.throws(() => createCapabilityRevocation({
+      certificationId: hash as any, manifestDigest: certification.manifestDigest,
+      reasonCode: 'SECURITY', evidenceArtifactIds: ['a'.repeat(64)]
+    }), (error: any) => error?.code === 'CAPABILITY_CERTIFICATION_INVALID');
+  }
+});
