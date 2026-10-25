@@ -195,5 +195,5 @@ test('C05 simultaneous local-model reservations commit in sequence with no lost 
   const persisted = await new TaskStore(f.state).get(task.id);
   assert.equal(persisted.execution?.modelCallCount, 4);
   assert.equal(persisted.execution?.modelReservedTokens, 1010);
-  assert.equal(await fs.readFile(path.join(f.root, 'verified.txt'), 'utf8'), 'trusted\\n');
+  assert.equal(await fs.readFile(path.join(f.root, 'verified.txt'), 'utf8'), f.goal.content);
 });
