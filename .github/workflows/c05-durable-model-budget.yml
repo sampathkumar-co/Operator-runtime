@@ -1,0 +1,37 @@
+name: C05 Durable Model Cost Reservations
+
+on:
+  pull_request:
+    paths:
+      - 'src/core/durable-model-call-budget-ledger.ts'
+      - 'src/core/persistent-data-catalog.ts'
+      - 'src/core/bounded-model-goal-inference.ts'
+      - 'test/durable-model-call-budget-ledger.test.ts'
+      - '.github/workflows/c05-durable-model-budget.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/core/durable-model-call-budget-ledger.ts'
+      - 'src/core/persistent-data-catalog.ts'
+      - 'src/core/bounded-model-goal-inference.ts'
+      - 'test/durable-model-call-budget-ledger.test.ts'
+      - '.github/workflows/c05-durable-model-budget.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  cost-reservation-fail-closed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - run: node --experimental-strip-types --test test/durable-model-call-budget-ledger.test.ts test/bounded-model-goal-inference.test.ts
+      - name: Disclose absent runtime integration and real-model qualification
+        run: echo 'C05_LEDGER_PERSISTENCE_CONTRACT=SOURCE_TESTED;REAL_MODEL=NOT_RUN;RUNTIME_WIRING=NOT_RUN;RELEASE=NOT_AUTHORIZED'
