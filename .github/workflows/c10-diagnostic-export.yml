@@ -1,0 +1,43 @@
+name: C10 Safe Diagnostic Bundle Export
+on:
+  pull_request:
+    paths:
+      - 'src/core/control-center-diagnostic-export.ts'
+      - 'apps/local-agent/src/server.ts'
+      - 'apps/local-agent/src/control-center-session.ts'
+      - 'apps/local-agent/src/control-center.ts'
+      - 'apps/control-center/src/**'
+      - 'test/control-center-diagnostic-export.test.ts'
+      - '.github/workflows/c10-diagnostic-export.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/core/control-center-diagnostic-export.ts'
+      - 'apps/local-agent/src/server.ts'
+      - 'apps/local-agent/src/control-center-session.ts'
+      - 'apps/local-agent/src/control-center.ts'
+      - 'apps/control-center/src/**'
+      - 'test/control-center-diagnostic-export.test.ts'
+      - '.github/workflows/c10-diagnostic-export.yml'
+permissions:
+  contents: read
+jobs:
+  exported-diagnostics-leak-and-auth-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Check fixed-allowlist export and local auth boundary
+        run: node --experimental-strip-types --test test/control-center-diagnostic-export.test.ts test/control-center-browser-login.test.ts test/control-center-r4-api.test.ts test/control-center-troubleshooting.test.ts
+      - name: Assert generated dashboard is source reproducible
+        run: |
+          node apps/control-center/scripts/build.mjs
+          git diff --exit-code -- apps/local-agent/src/control-center.ts
+      - name: State source acceptance limit
+        run: echo 'PRODUCTION_PACKAGE=UNCHANGED;DIAGNOSTICS=NO_SECRETS_BY_ALLOWLIST;PHYSICAL_UI_ACCEPTANCE=NOT_RUN;NPM_PUBLICATION=BLOCKED'
