@@ -556,17 +556,36 @@ async function terminateSidecar(child: ChildProcessWithoutNullStreams): Promise<
   if (child.exitCode === null && child.signalCode === null) throw new OperatorError('UIA_SIDECAR_TERMINATE_FAILED', 'Windows UIA sidecar remained alive after shutdown.', { retryable: false });
 }
 
-function normalizeSelector(input: unknown) {
-  const raw = input && typeof input === 'object' ? input as Record<string, unknown> : {};
-  const text = (key: string) => typeof raw[key] === 'string' ? String(raw[key]).trim().slice(0, 512) || undefined : undefined;
-  const processId = Number.isInteger(raw.processId) && Number(raw.processId) > 0 ? Number(raw.processId) : undefined;
-  return {
+function normalizeSelector(input: unknown, exactMutationTarget = false) {
+  if (exactMutationTarget && (!input || typeof input !== 'object' || Array.isArray(input))) {
+    throw new OperatorError('INVALID_UIA_SELECTOR', 'Mutating UIA operation requires a semantic selector object.');
+  }
+  const raw = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const text = (key: string) => {
+    const candidate = raw[key];
+    if (candidate === undefined) return undefined;
+    if (typeof candidate !== 'string' || !candidate.trim() || (exactMutationTarget && candidate.trim().length > 512)) {
+      if (exactMutationTarget) throw new OperatorError('INVALID_UIA_SELECTOR', 'UIA mutation selector must have exact bounded string fields.');
+      return undefined;
+    }
+    return candidate.trim().slice(0, 512) || undefined;
+  };
+  const processId = Number.isSafeInteger(raw.processId) && Number(raw.processId) > 0 && Number(raw.processId) <= 0x7fffffff
+    ? Number(raw.processId) : undefined;
+  if (exactMutationTarget && raw.processId !== undefined && processId === undefined) {
+    throw new OperatorError('INVALID_UIA_SELECTOR', 'UIA mutation process identity is invalid.');
+  }
+  const selector = {
     name: text('name'),
     automation_id: text('automationId'),
     class_name: text('className'),
     control_type: text('controlType'),
     process_id: processId
   };
+  if (exactMutationTarget && Object.values(selector).every(value => value === undefined)) {
+    throw new OperatorError('INVALID_UIA_SELECTOR', 'Mutating UIA operation requires at least one exact target identity.');
+  }
+  return selector;
 }
 
 function normalizeObserveMs(value: unknown): number {
@@ -602,8 +621,8 @@ function normalizeScrollAmount(value: unknown, field: string): string | undefine
 }
 
 function normalizeOperateInput(input: Record<string, unknown>) {
-  const operation = String(input.operation ?? '');
-  if (!(UIA_OPERATIONS as readonly string[]).includes(operation)) {
+  const operation = input.operation;
+  if (typeof operation !== 'string' || !(UIA_OPERATIONS as readonly string[]).includes(operation)) {
     throw new OperatorError('INVALID_UIA_OPERATION', `operation must be ${UIA_OPERATIONS.join(', ')}.`);
   }
   const horizontalAmount = normalizeScrollAmount(input.horizontalAmount, 'horizontalAmount');
@@ -611,10 +630,15 @@ function normalizeOperateInput(input: Record<string, unknown>) {
   if (operation === 'scroll' && horizontalAmount === undefined && verticalAmount === undefined) {
     throw new OperatorError('INVALID_UIA_SCROLL_AMOUNT', 'scroll requires horizontalAmount or verticalAmount.');
   }
+  if ((operation === 'set_value' && typeof input.value !== 'string') ||
+      (input.value !== undefined && (typeof input.value !== 'string' ||
+        Buffer.byteLength(input.value, 'utf8') > 64 * 1024 || input.value.includes('\\0')))) {
+    throw new OperatorError('INVALID_UIA_VALUE', 'UIA value must be a bounded string, required for set_value.');
+  }
   return {
     operation,
-    selector: normalizeSelector(input.selector),
-    value: input.value === undefined ? undefined : String(input.value),
+    selector: normalizeSelector(input.selector, true),
+    value: input.value,
     horizontal_amount: horizontalAmount,
     vertical_amount: verticalAmount,
     wait_ms: normalizeWaitMs(input.waitMs)
