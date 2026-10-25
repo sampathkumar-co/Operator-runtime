@@ -40,7 +40,7 @@ const PUBLIC_UIA_ERROR_CODES = new Set([
   'INVALID_UIA_OPERATION', 'INVALID_UIA_SCROLL_AMOUNT',
   'INVALID_UIA_SELECTOR', 'INVALID_UIA_VALUE', 'INVALID_UIA_INSPECT_LIMIT',
   'INPUT_AFTER_CAPTURE_INVALID', 'INPUT_AFTER_CAPTURE_FAILED',
-  'INPUT_AFTER_WINDOW_CHANGED', 'INPUT_CAPTURE_INVALID',
+  'INPUT_AFTER_WINDOW_CHANGED', 'INPUT_AFTER_SOURCE_CHANGED', 'INPUT_CAPTURE_INVALID',
   'INPUT_CAPTURE_MISMATCH', 'INPUT_CAPTURE_REVALIDATION_FAILED',
   'INPUT_CAPTURE_STALE', 'INPUT_KEYS_INVALID',
   'INPUT_OPERATION_INVALID', 'INPUT_POINT_OUTSIDE_CAPTURE',
@@ -51,6 +51,7 @@ const UNCERTAIN_UIA_MUTATION_ERRORS = new Set([
   'UIA_SIDECAR_WRITE_FAILED', 'EXECUTION_ABORTED', 'UIA_OPERATION_FAILED',
   'UIA_SIDECAR_PROTOCOL_INVALID',
   'INPUT_AFTER_CAPTURE_FAILED', 'INPUT_AFTER_CAPTURE_INVALID',
+  'INPUT_AFTER_WINDOW_CHANGED', 'INPUT_AFTER_SOURCE_CHANGED',
   'VISUAL_CAPTURE_ARTIFACT_REQUIRED', 'UIA_PROVIDER_FAILED'
 ]);
 const CAPTURE_LEASE_MS = 90_000;
@@ -561,6 +562,16 @@ export class WindowsUiaProvider implements CapabilityProvider {
     if (afterPng.length < 16 || afterPng.length > 8 * 1024 * 1024) {
       throw new OperatorError('INPUT_AFTER_CAPTURE_INVALID', 'Physical input was dispatched but AFTER capture returned an invalid PNG payload.', { retryable: false });
     }
+    // The post-input capture is observational proof, not authority to persist
+    // pixels from a different scope or native window. The input has already
+    // been dispatched, so any mismatch is an UNCERTAIN result, never a retry.
+    if (afterRaw.source !== lease.captureParams.source) {
+      throw new OperatorError('INPUT_AFTER_SOURCE_CHANGED', 'Physical input was dispatched but AFTER capture used a different source.', { retryable: false });
+    }
+    const afterWindowId = typeof afterRaw.window_id === 'string' && afterRaw.window_id ? afterRaw.window_id : undefined;
+    if (lease.windowId && afterWindowId !== lease.windowId) {
+      throw new OperatorError('INPUT_AFTER_WINDOW_CHANGED', 'Physical input was dispatched but AFTER capture resolved to a different window.', { retryable: false });
+    }
     const afterSha256 = crypto.createHash('sha256').update(afterPng).digest('hex');
     const afterObservedAt = Date.now();
     const after = {
@@ -574,12 +585,8 @@ export class WindowsUiaProvider implements CapabilityProvider {
       width: boundedCaptureInteger(afterRaw.returned_width, 1, 1280, 'after.returned_width'),
       height: boundedCaptureInteger(afterRaw.returned_height, 1, 720, 'after.returned_height'),
       ...(typeof afterRaw.window_id === 'string' && afterRaw.window_id ? { windowId: afterRaw.window_id } : {}),
-      mimeType: 'image/png',
-      ...await this.#visualOutput(afterPng, afterBase64, String(afterRaw.source))
+      mimeType: 'image/png'
     };
-    if (lease.windowId && after.windowId !== lease.windowId) {
-      throw new OperatorError('INPUT_AFTER_WINDOW_CHANGED', 'Physical input was dispatched but AFTER capture resolved to a different window.', { retryable: false });
-    }
     const afterRenderedEvidence = createRenderedEvidence({
       tier: lease.tier,
       sceneKey: lease.sceneKey,
@@ -606,7 +613,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
       operation,
       before: { ...before, renderedEvidence: lease.renderedEvidence },
       native,
-      after: { ...after, renderedEvidence: afterRenderedEvidence },
+      after: { ...after, ...await this.#visualOutput(afterPng, afterBase64, String(afterRaw.source)), renderedEvidence: afterRenderedEvidence },
       ...(renderedDelta ? { renderedDelta } : {}),
       postcondition: {
         dispatched: true,
