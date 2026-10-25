@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Source-pinned SHA-256 of the owner's Ed25519 SPKI public key for Wave 4 release acceptance",
+  "status": "NOT_ENROLLED",
+  "publicKeySpkiSha256": null,
+  "note": "No release owner trust anchor has been reviewed and enrolled. A separate source-reviewed PR must pin a non-secret Ed25519 public key fingerprint after identity verification. Never add any private signing key or bearer token to this repository."
+}
