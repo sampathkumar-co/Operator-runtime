@@ -537,3 +537,33 @@ test('npm package metadata is canonical before publication', async () => {
   assert.match(readme, /proprietary Mecord Connect Runtime License in `LICENSE`/);
   assert.match(readme, /Dual-use disclosure: `DISCLOSURE`/);
 });
+
+test('C11 npm manifest refuses coerced path, length and source provenance identities',()=>{
+  const baseline=manifest();
+  const originals=baseline.files as Array<{path:string;sizeBytes:number;sha256:string}>;
+  assert.equal(validateRuntimeManifest(baseline).files.length,5);
+  for(const fields of [
+    {path:[originals[0]!.path]},
+    {path:{toString:()=>originals[0]!.path}},
+    {path:'.'},
+    {sizeBytes:'1'},
+    {sizeBytes:true},
+    {sizeBytes:[1]},
+    {sha256:['b'.repeat(64)]},
+    {sha256:{toString:()=> 'b'.repeat(64)}}
+  ]) {
+    assert.throws(()=>validateRuntimeManifest(manifest({files:[
+      {...originals[0],...fields},...originals.slice(1)
+    ]})), /unsafe file path|size is invalid|SHA-256 is invalid/,
+      JSON.stringify(Object.keys(fields)));
+  }
+  for (const field of [
+    {sourceCommit:['a'.repeat(40)]},
+    {sourceCommit:{toString:()=> 'a'.repeat(40)}},
+    {version:['2.0.7-rc.1']},
+    {version:{toString:()=> '2.0.7-rc.1'}}
+  ]) {
+    assert.throws(()=>validateRuntimeManifest(manifest(field)),
+      /source commit|version is invalid/);
+  }
+});
