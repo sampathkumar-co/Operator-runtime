@@ -275,8 +275,18 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
   if (kind === 'trusted-project-command') {
     const record = lastSucceeded(records, `${prefix}run-command`);
     const state = observationState(record);
-    const expectedKind = String(goal.commandKind ?? '');
-    const ok = Boolean(record && expectedKind && state.commandKind === expectedKind && state.exitCode === 0 && state.validationPassed !== false);
+    const expectedKind = typeof goal.commandKind === 'string' ? goal.commandKind : '';
+    const observed = record?.observation;
+    const start = Date.parse(record?.startedAt ?? '');
+    const finish = Date.parse(record?.finishedAt ?? '');
+    const seen = observed?.schemaVersion === 2 ? Date.parse(observed.observedAt) : NaN;
+    const ok = Boolean(record && ['lint', 'test', 'build'].includes(expectedKind)
+      && record.capability === 'project.command.run'
+      && observed?.schemaVersion === 2 && observed.capability === record.capability
+      && observed.epistemicStatus === 'KNOWN' && observed.ambiguous === false
+      && Number.isFinite(start) && Number.isFinite(finish) && Number.isFinite(seen)
+      && start <= seen && seen <= finish
+      && state.commandKind === expectedKind && state.exitCode === 0 && state.validationPassed === true);
     return outcome(true, ok, ok
       ? 'Trusted command kind, zero exit status, and registered artifact validation are proven by durable execution evidence.'
       : 'Trusted command completion is missing a matching zero-exit validated machine observation.', versions(record));
