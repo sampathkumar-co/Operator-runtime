@@ -24,7 +24,7 @@ function recordStep(value,index){
     !PROVIDERS.has(value.providerClass)||
     typeof value.durationMs!=='number'||!Number.isFinite(value.durationMs)||
     value.durationMs<0||value.durationMs>120000||
-    !DIGEST.test(value.evidenceDigest??'')||
+    typeof value.evidenceDigest!=='string'||!DIGEST.test(value.evidenceDigest)||
     !count(value.actionOrdinal,1000)){
    deny('Each step must have exact sequence, bounded categorical fields and an evidence SHA; raw user content is forbidden.');
  }
@@ -47,8 +47,8 @@ function recordStep(value,index){
  * evaluation report. It cannot establish physical release acceptance.
  */
 export function createSanitizedEvaluationTrace(input) {
- if(!input||typeof input!=='object'||!SHA.test(input.sourceCommit??'')||
-    !textId(input.runId)||!DIGEST.test(input.suiteDigest??'')||
+ if(!input||typeof input!=='object'||typeof input.sourceCommit!=='string'||!SHA.test(input.sourceCommit)||
+    !textId(input.runId)||typeof input.suiteDigest!=='string'||!DIGEST.test(input.suiteDigest)||
     !Array.isArray(input.steps)||input.steps.length<1||input.steps.length>1000||
     !input.record||typeof input.record!=='object'){
    deny('Pinned source, suite, run identity, standard evaluation record and bounded steps required.');
