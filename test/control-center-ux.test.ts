@@ -281,3 +281,30 @@ test('C10 known applied effect with failed independent proof still offers fresh-
   assert.equal(model.items[0]?.recommendedAction, 'ROLLBACK');
   assert.equal(model.items[0]?.requiresFreshApproval, true);
 });
+
+test('C10 forged object identifiers cannot acquire an approval or recovery display identity', () => {
+  const fake = { toString: () => 'legitimate-action' };
+  const approval = {
+    actionId:'legitimate-action', approvalRequestId:'request-1',
+    capability:'file.replace', risk:'write', status:'pending',
+    createdAt:'2026-10-06T11:59:00.000Z', pendingExpiresAt:'2026-10-06T12:05:00.000Z'
+  };
+  for (const key of ['actionId','approvalRequestId','capability','createdAt','pendingExpiresAt'] as const) {
+    assert.throws(
+      () => buildApprovalCenterModel([{...approval,[key]:fake} as any],NOW),
+      (e:any)=>e?.code==='CONTROL_CENTER_UX_INVALID',
+      key
+    );
+  }
+  const recovery = {
+    actionId:'legitimate-action', capability:'file.replace',
+    retryable:true, sideEffectState:'none', executionPhase:'pre_dispatch', updatedAt:NOW
+  };
+  for (const key of ['actionId','capability','updatedAt'] as const) {
+    assert.throws(
+      () => buildRecoveryCenterModel([{...recovery,[key]:fake} as any]),
+      (e:any)=>e?.code==='CONTROL_CENTER_UX_INVALID',
+      key
+    );
+  }
+});
