@@ -94,3 +94,25 @@ test('C01 recorder never overwrites an existing evidence directory', async t => 
   assert.equal((await fs.readFile(path.join(first.directory, 'steps.jsonl'), 'utf8')).trim().length > 0, true);
   await assert.rejects(recordWave0Bundle({ inputPath, outputDirectory, sourceCommit }), /EEXIST/);
 });
+
+test('C01 evidence recorder refuses oversized inputs before creating any output directory', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wave0-evidence-bound-test-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const oversized = path.join(root, 'oversized.json');
+  const handle = await fs.open(oversized, 'w');
+  try { await handle.truncate(32 * 1024 * 1024 + 1); } finally { await handle.close(); }
+  const outputDirectory = path.join(root, 'out');
+  await assert.rejects(recordWave0Bundle({
+    inputPath: oversized, outputDirectory, sourceCommit
+  }), /input evidence size invalid/);
+  await assert.rejects(fs.stat(outputDirectory), (error: any) => error?.code === 'ENOENT');
+});
+test('C01 evidence recorder rejects non-object campaign roots rather than spreading array fields', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wave0-evidence-shape-test-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const inputPath = path.join(root, 'array.json');
+  await fs.writeFile(inputPath, '[]');
+  await assert.rejects(recordWave0Bundle({
+    inputPath, outputDirectory: path.join(root, 'out'), sourceCommit
+  }), /input evidence must be a JSON object/);
+});
