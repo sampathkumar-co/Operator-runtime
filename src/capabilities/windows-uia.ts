@@ -632,7 +632,7 @@ function normalizeOperateInput(input: Record<string, unknown>) {
   }
   if ((operation === 'set_value' && typeof input.value !== 'string') ||
       (input.value !== undefined && (typeof input.value !== 'string' ||
-        Buffer.byteLength(input.value, 'utf8') > 64 * 1024 || input.value.includes('\\0')))) {
+        Buffer.byteLength(input.value, 'utf8') > 64 * 1024 || input.value.includes(String.fromCharCode(0))))) {
     throw new OperatorError('INVALID_UIA_VALUE', 'UIA value must be a bounded string, required for set_value.');
   }
   return {
