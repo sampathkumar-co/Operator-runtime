@@ -108,6 +108,9 @@ export class TrustedReviewedModelTaskIntake {
     // A long inference may finish after Stop, scope revocation, or intent replacement.
     // Discard its valid JSON rather than issuing a review against stale rights.
     const refreshed = await this.#authority.currentApprovedScope(input.principal);
+    if (input.signal?.aborted) {
+      denied('TASK_MODEL_INFERENCE_ABORTED', 'Model review generation was cancelled after inference.');
+    }
     if (!refreshed || normalizedScope(refreshed) !== normalizedScope(input.request)) {
       denied('TASK_MODEL_INTAKE_SCOPE_DENIED',
         'Approved model objective or resource scope changed while inference was running.');
