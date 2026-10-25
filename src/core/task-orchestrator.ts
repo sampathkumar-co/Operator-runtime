@@ -398,6 +398,27 @@ export class TaskOrchestrator {
       const planningController = new AbortController();
       this.#planningControllers.set(task.id, planningController);
       const planningSignal = AbortSignal.any([signal, planningController.signal]);
+      const reserveModelBudget = async (maxTokens: number): Promise<void> => {
+        if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 100_000) {
+          throw new OperatorError('TASK_MODEL_BUDGET_INVALID', 'Model token reservation must be a positive bounded integer.');
+        }
+        if (planningSignal.aborted) {
+          throw new OperatorError('TASK_PLANNER_ABORTED', 'Stopped planner cannot reserve another model call.');
+        }
+        const available = taskDecisionBudget(current, this.#wallNow());
+        if (available.modelCalls.remaining < 1 || available.tokens.remaining < maxTokens ||
+            available.elapsedMs.remaining < 1) {
+          throw new OperatorError('TASK_MODEL_BUDGET_EXHAUSTED', 'Durable task model budget is exhausted.');
+        }
+        // Charge before transmitting the model prompt. Timeouts, provider
+        // refusal and crashes never silently refund an uncertain call.
+        current.modelCallCount = (current.modelCallCount ?? 0) + 1;
+        current.modelReservedTokens = (current.modelReservedTokens ?? 0) + maxTokens;
+        const control = await this.#persistRunState(task, assertLease);
+        if (control || planningSignal.aborted) {
+          throw new OperatorError('TASK_PLANNER_ABORTED', 'Model budget reserved but execution was stopped before model dispatch.');
+        }
+      };
       const context: TaskPlannerContext = {
         task,
         goal,
@@ -405,7 +426,8 @@ export class TaskOrchestrator {
         intelligence,
         budget,
         decisionBudget,
-        signal: planningSignal
+        signal: planningSignal,
+        reserveModelBudget
       };
       let decision: PlannerDecision;
       let rawDecision: unknown;
@@ -447,6 +469,9 @@ export class TaskOrchestrator {
           return await this.#fail(task, 'TASK_PLANNER_FAILED', reason, assertLease);
         }
       } finally {
+        // A provider which ignores cancellation may retain the callback.
+        // Revoke reservation access after ANY terminal planner decision.
+        planningController.abort('TASK_PLANNER_SETTLED');
         this.#planningControllers.delete(task.id);
       }
       if (decision.type === 'complete') {
