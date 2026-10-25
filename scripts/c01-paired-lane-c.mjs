@@ -63,6 +63,14 @@ export async function runPairedLaneC(input) {
   const records = [];
   const pairs = [];
   for (const c of input.cases) {
+    const promptDigest = hash(c.prompt);
+    const budget = Object.freeze({
+      maxSteps: input.maxSteps,
+      maxOutputTokens: input.maxOutputTokens,
+      maxCostMicros: input.maxCostMicrosPerArm,
+      deadlineMs: input.deadlineMs
+    });
+    const budgetDigest = hash(JSON.stringify(budget));
     const ordering = c.seed % 2 === 0 ? ['mecord','direct'] : ['direct','mecord'];
     const completed = {};
     const sanitized = Object.freeze({
@@ -93,13 +101,8 @@ export async function runPairedLaneC(input) {
           Promise.resolve().then(() => input.runArm({
             arm, scenario:sanitized, modelId:input.modelId,
             modelConfigDigest:input.modelConfigDigest,
-            promptDigest:hash(c.prompt),
-            budget:Object.freeze({
-              maxSteps:input.maxSteps,
-              maxOutputTokens:input.maxOutputTokens,
-              maxCostMicros:input.maxCostMicrosPerArm,
-              deadlineMs:input.deadlineMs
-            }),
+            promptDigest,
+            budget,
             signal:controller.signal
           })),
           deadline
@@ -117,7 +120,7 @@ export async function runPairedLaneC(input) {
       }
       if (!execution || typeof execution !== 'object' ||
           typeof execution.claimedSuccess !== 'boolean' ||
-          execution.observedPromptDigest !== hash(c.prompt) ||
+          execution.observedPromptDigest !== promptDigest ||
           execution.observedModelConfigDigest !== input.modelConfigDigest ||
           !integer(execution.humanInterventions,0,1000) ||
           (execution.costMicros !== undefined &&
@@ -149,6 +152,7 @@ export async function runPairedLaneC(input) {
         provider:arm === 'mecord' ? 'mecord' : 'direct-tools',
         runnerDigest:input.runnerDigest, modelConfigDigest:input.modelConfigDigest,
         environmentDigest:input.environmentDigest,
+        promptDigest, budgetDigest,
         independentOracleDigest:c.independentOracleDigest,
         resultEvidenceDigest:oracle.resultEvidenceDigest,
         claimedSuccess:execution.claimedSuccess,
