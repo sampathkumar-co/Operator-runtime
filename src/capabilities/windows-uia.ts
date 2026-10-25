@@ -4,6 +4,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
+import type { ArtifactStore } from '../core/artifact-store.ts';
 import { OperatorError } from '../core/errors.ts';
 import { reconcileFromDurableResult } from '../core/reconciliation-coverage.ts';
 import { safeChildEnvironment } from '../core/child-environment.ts';
@@ -43,7 +44,7 @@ const PUBLIC_UIA_ERROR_CODES = new Set([
   'INPUT_CAPTURE_MISMATCH', 'INPUT_CAPTURE_REVALIDATION_FAILED',
   'INPUT_CAPTURE_STALE', 'INPUT_KEYS_INVALID',
   'INPUT_OPERATION_INVALID', 'INPUT_POINT_OUTSIDE_CAPTURE',
-  'VISUAL_CAPTURE_INVALID', 'VISUAL_INPUT_INVALID'
+  'VISUAL_CAPTURE_INVALID', 'VISUAL_CAPTURE_ARTIFACT_REQUIRED', 'VISUAL_INPUT_INVALID'
 ]);
 const UNCERTAIN_UIA_MUTATION_ERRORS = new Set([
   'UIA_SIDECAR_TIMEOUT', 'UIA_SIDECAR_CLOSED', 'UIA_SIDECAR_EXITED',
@@ -53,6 +54,7 @@ const UNCERTAIN_UIA_MUTATION_ERRORS = new Set([
   'UIA_PROVIDER_FAILED'
 ]);
 const CAPTURE_LEASE_MS = 90_000;
+const MAX_INLINE_VISUAL_BYTES = 96 * 1024;
 const MAX_CAPTURE_LEASES = 32;
 const AFTER_CAPTURE_SETTLE_MS = 200;
 const SCROLL_AMOUNTS = ['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment'] as const;
@@ -101,6 +103,7 @@ export type WindowsUiaOptions = {
   binaryPath?: string;
   timeoutMs?: number;
   platform?: NodeJS.Platform;
+  artifactStore?: Pick<ArtifactStore, 'put'>;
   client?: { call(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>; close(): void | Promise<void> };
 };
 
@@ -286,9 +289,11 @@ export class WindowsUiaProvider implements CapabilityProvider {
   #platform: NodeJS.Platform;
   #client: { call(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>; close(): void | Promise<void> };
   #captureLeases = new Map<string, CaptureLease>();
+  #artifactStore?: Pick<ArtifactStore, 'put'>;
 
   constructor(options: WindowsUiaOptions = {}) {
     this.#platform = options.platform ?? process.platform;
+    this.#artifactStore = options.artifactStore;
     const binary = options.binaryPath
       ?? process.env.OPERATOR_WINDOWS_UIA_PATH
       ?? path.join(process.cwd(), 'native', 'windows-uia', 'target', 'release', 'operator-windows-uia.exe');
@@ -377,6 +382,21 @@ export class WindowsUiaProvider implements CapabilityProvider {
     }
   }
 
+  async #visualOutput(png: Buffer, base64: string, source: string): Promise<Record<string, unknown>> {
+    if (png.byteLength <= MAX_INLINE_VISUAL_BYTES) return { imageBase64: base64 };
+    if (!this.#artifactStore) {
+      throw new OperatorError('VISUAL_CAPTURE_ARTIFACT_REQUIRED',
+        'Large private screenshot requires a configured sensitive artifact store; raw image cannot cross the bounded tool-result channel.',
+        { retryable: false });
+    }
+    const record=await this.#artifactStore.put({
+      bytes: png,kind:'screenshot',mediaType:'image/png',privacy:'sensitive',
+      metadata:{source,transport:'immutable-artifact-reference'}
+    });
+    return {imageArtifactId:record.id,imageSha256:record.blobDigest,
+      imageByteLength:record.bytes,imagePrivacy:'sensitive'};
+  }
+
   async #capture(action: ActionRequest, signal?: AbortSignal): Promise<unknown> {
     this.#pruneCaptureLeases();
     const captureParams = normalizeVisualCaptureInput(action.input);
@@ -430,6 +450,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
       ...(windowId ? { windowId } : {}),
       sceneKey, tier, ...(targetAssociation ? { targetAssociation } : {}), renderedEvidence
     };
+    const visualPayload = await this.#visualOutput(png, pngBase64, String(captureParams.source));
     this.#captureLeases.set(captureId, lease);
     while (this.#captureLeases.size > MAX_CAPTURE_LEASES) {
       const oldest = this.#captureLeases.keys().next().value as string | undefined;
@@ -452,7 +473,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
       ...(lease.windowId ? { windowId: lease.windowId } : {}),
       renderedEvidence,
       mimeType: 'image/png',
-      imageBase64: pngBase64
+      ...visualPayload
     };
   }
 
@@ -554,7 +575,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
       height: boundedCaptureInteger(afterRaw.returned_height, 1, 720, 'after.returned_height'),
       ...(typeof afterRaw.window_id === 'string' && afterRaw.window_id ? { windowId: afterRaw.window_id } : {}),
       mimeType: 'image/png',
-      imageBase64: afterBase64
+      ...await this.#visualOutput(afterPng, afterBase64, String(afterRaw.source))
     };
     if (lease.windowId && after.windowId !== lease.windowId) {
       throw new OperatorError('INPUT_AFTER_WINDOW_CHANGED', 'Physical input was dispatched but AFTER capture resolved to a different window.', { retryable: false });
