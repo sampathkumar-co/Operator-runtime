@@ -523,6 +523,23 @@ export class TaskOrchestrator {
       }
 
       const inputHash = sha256(canonicalJson(decision.input));
+      // An observed write with NO_PROGRESS is not permission to mutate the
+      // same target again under a new attempt ID. A distinct bounded recovery
+      // action remains possible, but the identical failed mutation is fenced.
+      const priorKnownNoProgress = current.records.find(record =>
+        record.state === 'FAILED' && record.risk !== 'read' &&
+        record.sideEffectState === 'known' && /NO_PROGRESS/i.test(record.errorCode ?? '') &&
+        record.capability === decision.capability && record.stepKey === decision.key &&
+        record.inputHash === inputHash
+      );
+      if (priorKnownNoProgress) {
+        await this.#recordRejectedDecision(task, decision, 'TASK_NO_PROGRESS_REPLAY_DENIED',
+          'A known-effect no-progress mutation cannot be replayed with identical step identity and input.', {
+            retryAllowed: false, reobserveAllowed: true, replanAllowed: true
+          }, assertLease);
+        return await this.#fail(task, 'TASK_NO_PROGRESS_REPLAY_DENIED',
+          'Planner repeated a known-effect no-progress mutation without a distinct recovery action.', assertLease);
+      }
       const previous = [...current.records].reverse().find((record) => record.stepKey === decision.key && record.inputHash === inputHash);
       const recoveryReplay = previous?.state === 'STARTED' ? previous : undefined;
       if (!recoveryReplay && detectPlannerLoop(current.records, decision.key, inputHash)) {
