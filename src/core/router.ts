@@ -1,4 +1,4 @@
-import type { ActionRequest, ActionRisk, CapabilityProvider, CapabilityScore } from './types.ts';
+import type { ActionRequest, ActionRisk, CapabilityProvider, CapabilityScore, ProviderCapabilitySchema } from './types.ts';
 import { OperatorError } from './errors.ts';
 import type { ProviderLearning } from './provider-learning.ts';
 
@@ -87,6 +87,27 @@ export class CapabilityRouter {
 
   providers(): readonly CapabilityProvider[] {
     return [...this.#providers];
+  }
+
+  /** Returns only schemas declared by providers that currently support the exact
+   * typed action. A declaration is never treated as authority or availability. */
+  async capabilitySchemas(action: ActionRequest): Promise<Array<ProviderCapabilitySchema & { provider: string }>> {
+    const schemas: Array<ProviderCapabilitySchema & { provider: string }> = [];
+    for (const provider of this.#providers) {
+      if (!provider.capabilitySchemas || !await provider.supports(action)) continue;
+      const declared = provider.capabilitySchemas().filter((entry) => entry.capability === action.capability);
+      for (const entry of declared) {
+        if (!entry || entry.inputSchemaVersion !== 1 || entry.cancellation !== 'required'
+          || !['read', 'write', 'external', 'system', 'destructive', 'dynamic'].includes(entry.risk)
+          || !Number.isSafeInteger(entry.inputMaxBytes) || entry.inputMaxBytes < 1
+          || entry.inputMaxBytes > 4 * 1024 * 1024 || !Array.isArray(entry.resourceKinds)
+          || entry.resourceKinds.some((kind) => typeof kind !== 'string' || kind.length < 1 || kind.length > 128)) {
+          throw new OperatorError('CAPABILITY_SCHEMA_INVALID', `Provider ${provider.name} returned an invalid capability schema.`);
+        }
+        schemas.push({ ...structuredClone(entry), provider: provider.name });
+      }
+    }
+    return schemas.sort((a, b) => a.provider.localeCompare(b.provider));
   }
 
   async initializeAll(): Promise<void> {

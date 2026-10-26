@@ -126,8 +126,20 @@ export interface ProviderReconciliationResult {
   evidence: Evidence[];
 }
 
+/** Immutable provider declaration used for planning. It is descriptive only:
+ * authorization and provider support are re-checked at execution time. */
+export interface ProviderCapabilitySchema {
+  capability: string;
+  risk: ActionRisk | 'dynamic';
+  inputSchemaVersion: 1;
+  inputMaxBytes: number;
+  cancellation: 'required';
+  resourceKinds: string[];
+}
+
 export interface CapabilityProvider {
   name: string;
+  capabilitySchemas?(): readonly ProviderCapabilitySchema[];
   supports(action: ActionRequest): boolean | Promise<boolean>;
   advertises?(action: ActionRequest): boolean | Promise<boolean>;
   score(action: ActionRequest): CapabilityScore | Promise<CapabilityScore>;

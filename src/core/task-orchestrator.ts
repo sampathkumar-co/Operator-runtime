@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import type { OperatorRuntime } from './runtime.ts';
-import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, ExecutionPhase, IntentBinding, PermissionProfile, SideEffectState } from './types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, ExecutionPhase, IntentBinding, PermissionProfile, ProviderCapabilitySchema, SideEffectState } from './types.ts';
 import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskObservationDomain, TaskObservationSummaryV2, TaskRejectedDecision } from './task.ts';
 import { addTaskNode, createTask, finalizeTask, setNodeState, stableTaskExecutionNodeKey } from './task.ts';
 import { TaskStore } from './task-store.ts';
@@ -398,6 +398,7 @@ export class TaskOrchestrator {
       const planningController = new AbortController();
       this.#planningControllers.set(task.id, planningController);
       const planningSignal = AbortSignal.any([signal, planningController.signal]);
+      const capabilitySchemas = await declaredSchemasForGoal(this.#runtime, task, goal, planningSignal);
       // Model callbacks may call reserveModelBudget concurrently. Serialize
       // durable writes, not merely arithmetic, so an older persisted snapshot
       // cannot overwrite the final charge after a later callback completes.
@@ -450,7 +451,8 @@ export class TaskOrchestrator {
         budget,
         decisionBudget,
         signal: planningSignal,
-        reserveModelBudget
+        reserveModelBudget,
+        capabilitySchemas
       };
       let decision: PlannerDecision;
       let rawDecision: unknown;
@@ -2883,6 +2885,77 @@ function detectPlannerLoop(records: TaskActionRecord[], stepKey: string, inputHa
     if (tail.join('\0') === prior.join('\0') && tail.join('\0') === earlier.join('\0')) return true;
   }
   return false;
+}
+
+async function declaredSchemasForGoal(
+  runtime: OperatorRuntime,
+  task: TaskCapsule,
+  goal: SemanticTaskGoal,
+  signal: AbortSignal
+): Promise<Array<ProviderCapabilitySchema & {
+  provider: string; action: 'observe' | 'action' | 'verify'; stepKey: string;
+}>> {
+  if (goal.kind !== 'autonomous-workflow' || signal.aborted) return [];
+  const requests: Array<{ action: ActionRequest; phase: 'observe' | 'action' | 'verify'; stepKey: string }> = [];
+  for (const step of goal.steps) {
+    for (const phase of ['observe', 'action', 'verify'] as const) {
+      const planned = step[phase];
+      const risk = capabilityRiskRule(planned.capability);
+      // Dynamic risk cannot be inferred from a declaration. It remains eligible
+      // for ordinary execution, but not model-authored plan composition.
+      if (risk === 'dynamic') continue;
+      requests.push({
+        phase, stepKey: step.key,
+        action: {
+          id: `plan-schema:${task.id}:${step.key}:${phase}`,
+          capability: planned.capability,
+          risk,
+          input: structuredClone(planned.input),
+          provenance: { kind: 'runtime' },
+          taskId: task.id,
+          ...(planned.target === undefined ? {} : { target: planned.target })
+        }
+      });
+    }
+  }
+  const output: Array<ProviderCapabilitySchema & {
+    provider: string; action: 'observe' | 'action' | 'verify'; stepKey: string;
+  }> = [];
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (!signal.aborted) {
+      const request = requests[cursor++];
+      if (!request) return;
+      const schemas = await boundedSchemaLookup(runtime, request.action, signal);
+      for (const schema of schemas) output.push({ ...schema, action: request.phase, stepKey: request.stepKey });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(8, requests.length) }, () => worker()));
+  return output.sort((a, b) => a.stepKey.localeCompare(b.stepKey)
+    || a.action.localeCompare(b.action) || a.provider.localeCompare(b.provider));
+}
+
+async function boundedSchemaLookup(
+  runtime: OperatorRuntime,
+  action: ActionRequest,
+  signal: AbortSignal
+): Promise<Array<ProviderCapabilitySchema & { provider: string }>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    const stopped = new Promise<never>((_, reject) => {
+      onAbort = () => reject(new OperatorError('TASK_PLANNER_ABORTED', 'Capability schema lookup was canceled.'));
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    });
+    const timeout = new Promise<[]>(resolve => { timer = setTimeout(() => resolve([]), 250); });
+    return await Promise.race([runtime.capabilitySchemas(action), timeout, stopped]);
+  } catch {
+    return [];
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
 }
 function sameBrowserDestination(actualRaw: string, expectedRaw: string): boolean {
   try {
