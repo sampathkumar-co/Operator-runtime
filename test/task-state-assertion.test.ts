@@ -131,3 +131,31 @@ test('C07 assertion envelope rejects holes, accessors, hidden fields and forged 
     normalizeTaskStateAssertions([valid])
   ));
 });
+
+test('C07 proof arrays never dispatch inherited map or custom prototype methods', () => {
+  let executed = 0;
+  class ExecutableArray extends Array<string> {
+    override map<U>(callbackfn: (value: string, index: number, array: string[]) => U): U[] {
+      executed++;
+      throw Error('untrusted inherited map must never run');
+    }
+  }
+  const inherited = new ExecutableArray();
+  inherited.push('matched');
+  const patched = ['matched'];
+  Object.setPrototypeOf(patched, Object.assign(Object.create(Array.prototype), {
+    map() { executed++; throw Error('untrusted map must never run'); }
+  }));
+  for (const value of [inherited, patched]) {
+    assert.throws(() => normalizeTaskStateAssertions([
+      { path: 'browser.options', operator: 'includes', value }
+    ]), (error: any) => error?.code === 'TASK_GOAL_INVALID');
+  }
+  assert.equal(executed, 0);
+  const valid = normalizeTaskStateAssertions([
+    { path: 'browser.options', operator: 'includes', value: ['matched'] }
+  ]);
+  assert.doesNotThrow(() => assertTaskMachineState(
+    { browser: { options: [['matched'], ['other']] } }, valid
+  ));
+});
