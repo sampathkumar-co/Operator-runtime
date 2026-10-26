@@ -1147,6 +1147,22 @@ export class TaskOrchestrator {
         return task;
       }
       await this.#recordLearning(task, result, 'failed', learningContext);
+      // A planner fallback must never outrank authoritative side-effect truth.
+      // Even a trusted plugin can request a new strategy, but it cannot
+      // reinterpret an uncertain dispatched write as safe to repeat.
+      if (risk !== 'read' && (latestRecord.sideEffectState ?? 'uncertain') === 'uncertain') {
+        latestRecord.state = 'BLOCKED';
+        setNodeState(task, latestNode.id, 'BLOCKED');
+        task.state = 'BLOCKED';
+        task.evidence.push(evidence('strategy_reconcile', 'info',
+          'Blocked planner fallback because the previous mutation has uncertain effects.', {
+            code: failureDecision.code, strategy: failureDecision.strategy,
+            actionId: latestRecord.actionId, risk,
+            sideEffectState: latestRecord.sideEffectState ?? 'uncertain'
+          }));
+        await this.#persistRunState(task, assertLease);
+        return task;
+      }
       if (planner.fallback?.(postActionContext, decision, observation)) {
         latestRecord.state = 'FAILED';
         setNodeState(task, latestNode.id, 'SKIPPED');
