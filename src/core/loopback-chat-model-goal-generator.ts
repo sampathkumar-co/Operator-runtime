@@ -29,10 +29,23 @@ function boundedResult(value: unknown): string {
   const response = value as Record<string, unknown>;
   const choices = response.choices;
   const first = Array.isArray(choices) && choices.length === 1 ? choices[0] : null;
-  const message = first && typeof first === 'object' && !Array.isArray(first)
-    ? (first as Record<string, unknown>).message : null;
+  const selected = first && typeof first === 'object' && !Array.isArray(first)
+    ? first as Record<string, unknown> : null;
+  // A syntactically valid JSON prefix is still unsafe if the model declares
+  // token truncation, filtering, or tool-call handoff rather than completion.
+  if (selected && Object.hasOwn(selected, 'finish_reason') && selected.finish_reason !== 'stop') {
+    rejected('TASK_MODEL_RESPONSE_INVALID', 'Local model proposal did not finish normally.');
+  }
+  const message = selected?.message;
   const content = message && typeof message === 'object' && !Array.isArray(message)
     ? (message as Record<string, unknown>).content : null;
+  if (message && typeof message === 'object' && !Array.isArray(message)) {
+    const record = message as Record<string, unknown>;
+    if ((Object.hasOwn(record, 'role') && record.role !== 'assistant') ||
+        Object.hasOwn(record, 'tool_calls') || Object.hasOwn(record, 'function_call')) {
+      rejected('TASK_MODEL_RESPONSE_INVALID', 'Local model proposal cannot contain tool calls or a nonassistant role.');
+    }
+  }
   if (typeof content !== 'string' || !content.trim() || Buffer.byteLength(content, 'utf8') > 24 * 1024) {
     rejected('TASK_MODEL_RESPONSE_INVALID', 'Local model must return a bounded JSON response message.');
   }
