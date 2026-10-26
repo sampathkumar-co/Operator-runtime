@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { reconcileFromDurableResult } from '../core/reconciliation-coverage.ts';
@@ -52,13 +52,15 @@ export class GitWriteProvider implements CapabilityProvider {
   }
   score(): CapabilityScore { return SCORE; }
 
-  async reconcile(request: ProviderReconciliationRequest): Promise<ProviderReconciliationResult> {
+  async reconcile(request: ProviderReconciliationRequest, context: CapabilityExecutionContext = {}): Promise<ProviderReconciliationResult> {
+    assertGitWriteNotStopped(context.signal, false);
     return reconcileFromDurableResult(this.name, request.action.capability, request.priorResult);
   }
 
-  async execute(action: ActionRequest): Promise<ActionResult> {
+  async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
+      assertGitWriteNotStopped(context.signal, false);
       if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Git write provider does not support this capability.');
       // Fail before any Git process or checkpoint can change repository refs.
       const operation = action.input.operation;
@@ -99,7 +101,9 @@ export class GitWriteProvider implements CapabilityProvider {
         }
       }
       resolveSupportedGitExecutable(gitEnvironment({}));
+      assertGitWriteNotStopped(context.signal, false);
       const before = await this.#inspectState(cwd);
+      assertGitWriteNotStopped(context.signal, false);
       if (before.fingerprint !== expectedCurrentFingerprint) {
         throw new OperatorError('GIT_WRITE_STATE_CHANGED', 'Repository state changed after the supplied write precondition was captured.', {
           retryable: true,
@@ -107,6 +111,7 @@ export class GitWriteProvider implements CapabilityProvider {
         });
       }
 
+      assertGitWriteNotStopped(context.signal, false);
       const checkpointResult = await this.#checkpoint.execute({
         id: `${action.id}:checkpoint`,
         capability: 'git.checkpoint.create',
@@ -118,6 +123,10 @@ export class GitWriteProvider implements CapabilityProvider {
         throw new OperatorError(checkpointResult.error?.code ?? 'GIT_CHECKPOINT_FAILED', checkpointResult.error?.message ?? 'Unable to create pre-write checkpoint.');
       }
       const checkpoint = checkpointResult.output as { id: string };
+      // Checkpoint creation itself may modify owned recovery refs. If Stop
+      // arrived during that asynchronous phase, never begin the user Git
+      // mutation; preserve uncertainty rather than pretending zero effects.
+      assertGitWriteNotStopped(context.signal, true);
 
       if (operation === 'stage') return await this.#stage(action, started, before, checkpoint.id);
       if (operation === 'unstage') return await this.#unstage(action, started, before, checkpoint.id);
@@ -131,7 +140,13 @@ export class GitWriteProvider implements CapabilityProvider {
         capability: action.capability,
         provider: this.name,
         evidence: [evidence('git_write', 'fail', op.message, { code: op.code })],
-        error: { code: op.code, message: op.message, retryable: op.retryable },
+        error: {
+          code: op.code, message: op.message, retryable: op.retryable,
+          ...(op.details && ['none','known','uncertain'].includes(String(op.details.sideEffectState))
+            ? { sideEffectState: op.details.sideEffectState as 'none' | 'known' | 'uncertain' } : {}),
+          ...(op.details && ['pre_dispatch','dispatched','effect_observed','reconciled'].includes(String(op.details.executionPhase))
+            ? { executionPhase: op.details.executionPhase as 'pre_dispatch' | 'dispatched' | 'effect_observed' | 'reconciled' } : {})
+        },
         durationMs: Math.round(performance.now() - started)
       };
     }
@@ -221,6 +236,20 @@ export class GitWriteProvider implements CapabilityProvider {
     if (!result.ok) throw new OperatorError(result.error?.code ?? 'GIT_STATE_INSPECTION_FAILED', result.error?.message ?? 'Unable to inspect Git state.');
     return (result.output as { current: RepoState }).current;
   }
+}
+
+function assertGitWriteNotStopped(signal: AbortSignal | undefined, checkpointMayExist: boolean): void {
+  if (!signal?.aborted) return;
+  throw new OperatorError('EXECUTION_ABORTED',
+    checkpointMayExist
+      ? 'Git write stopped after recovery checkpoint preparation; no new user Git mutation was started.'
+      : 'Git write stopped before execution.', {
+      retryable: false,
+      details: {
+        sideEffectState: checkpointMayExist ? 'uncertain' : 'none',
+        executionPhase: checkpointMayExist ? 'dispatched' : 'pre_dispatch'
+      }
+    });
 }
 
 function validatePaths(input: unknown): string[] {
