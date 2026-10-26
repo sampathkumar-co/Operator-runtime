@@ -109,3 +109,29 @@ test('C07 rejects executable or hidden envelope fields before reading them', () 
   }
   assert.equal(invoked, false);
 });
+
+test('C07 verification probe list cannot hide slots, getters, symbols or extra fields', () => {
+  const ordinary = request('file.read').probes[0];
+  const sparse = new Array(2);
+  sparse[1] = ordinary;
+  const extraField = Object.assign([ordinary], { policy: 'allow-all' });
+  const symbolField = [ordinary] as unknown[] & Record<symbol, unknown>;
+  symbolField[Symbol('hidden-probe')] = 'authorize';
+  let getterCalls = 0;
+  const getterArray = [ordinary];
+  Object.defineProperty(getterArray, '0', {
+    enumerable: true, configurable: true,
+    get() { getterCalls++; throw Error('probe getter must not run'); }
+  });
+  const hiddenIndex = [ordinary];
+  Object.defineProperty(hiddenIndex, '0', { enumerable: false, value: ordinary });
+  const customPrototype = [ordinary];
+  Object.setPrototypeOf(customPrototype, Object.create(Array.prototype));
+
+  for (const probes of [sparse, extraField, symbolField, getterArray, hiddenIndex, customPrototype]) {
+    assert.throws(() => normalizeCanonicalVerificationRequest({ probes }),
+      (error: any) => error?.code === 'CANONICAL_VERIFICATION_INVALID');
+  }
+  assert.equal(getterCalls, 0);
+  assert.equal(normalizeCanonicalVerificationRequest({ probes: [ordinary] }).probes.length, 1);
+});
