@@ -55,7 +55,9 @@ function normalizedProbeJson(value: unknown): Record<string, unknown> {
       throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input must contain plain objects.');
     }
     visited.add(node);
-    for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(node))) {
+    for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(node))) {
+      // Array length is an intrinsic non-enumerable own data property.
+      if (Array.isArray(node) && key === 'length') continue;
       if (!('value' in descriptor) || !descriptor.enumerable) {
         throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input contains hidden or executable properties.');
       }
