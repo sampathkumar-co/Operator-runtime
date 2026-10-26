@@ -91,8 +91,12 @@ function relayProjection(input: unknown, observedMs: number): ControlCenterRunti
     ? raw.state : configured ? 'UNKNOWN' : 'DISABLED';
   const continuity = raw.continuity === 'automatic' || raw.continuity === 'disabled'
     ? raw.continuity : 'unknown';
-  const updatedAt = optionalIso(raw.updatedAt);
-  const ageMs = updatedAt ? Math.max(0, observedMs - Date.parse(updatedAt)) : undefined;
+  // A relay heartbeat from the future is not evidence of present freshness.
+  // Do not clamp a skewed/forged timestamp to zero age and report FRESH.
+  const candidateUpdatedAt = optionalIso(raw.updatedAt);
+  const updatedAt = candidateUpdatedAt && Date.parse(candidateUpdatedAt) <= observedMs
+    ? candidateUpdatedAt : undefined;
+  const ageMs = updatedAt ? observedMs - Date.parse(updatedAt) : undefined;
   const freshness: RuntimeFreshness = !configured || state === 'DISABLED'
     ? 'NOT_APPLICABLE'
     : ageMs === undefined ? 'UNKNOWN'
