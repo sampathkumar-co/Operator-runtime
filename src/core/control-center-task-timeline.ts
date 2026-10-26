@@ -1,0 +1,199 @@
+import type { RuntimeControlProjection } from './runtime-projection.ts';
+import type { Evidence, EvidenceStatus } from './types.ts';
+import type { TaskActionRecord, TaskCapsule } from './task.ts';
+
+export type ControlCenterRecoveryState = 'NONE' | 'APPROVAL_REQUIRED' | 'RECONCILE_REQUIRED' | 'ESCALATION_REQUIRED';
+
+export interface ControlCenterTaskTimeline {
+  schemaVersion: 1;
+  task: { id: string; objective: string; state: TaskCapsule['state']; createdAt: string; updatedAt: string };
+  planning: {
+    plannerId: string;
+    modelIdentity: { status: 'NOT_RECORDED'; reason: string };
+  };
+  cost: {
+    reserved: { calls: number; tokens: number; ceilingMicros: number };
+    actual: { status: 'NOT_RECORDED'; costMicros: null; inputTokens: null; outputTokens: null; reason: string };
+  };
+  verification: RuntimeControlProjection['verification'];
+  recovery: { state: ControlCenterRecoveryState; code?: string; guidance: string };
+  evidence: { total: number; classified: number; pass: number; fail: number; info: number; truncated: boolean };
+  timeline: ControlCenterTaskTimelineEvent[];
+  truncated: boolean;
+}
+
+export interface ControlCenterTaskTimelineEvent {
+  id: string;
+  kind: 'TASK_CREATED' | 'ACTION' | 'TASK_FAILURE';
+  at: string;
+  finishedAt?: string;
+  title: string;
+  state: string;
+  attempt?: number;
+  risk?: string;
+  provider?: string;
+  observation?: { channel: string; domain: string; at: string; epistemicStatus?: string };
+  error?: { code: string; message?: string; executionPhase?: string; sideEffectState?: string };
+  evidence: Array<{ kind: string; status: EvidenceStatus; message: string; timestamp: string }>;
+}
+
+const MAX_EVENTS = 500;
+const MAX_EVENT_EVIDENCE = 50;
+const MAX_CLASSIFIED_EVIDENCE = 100_000;
+
+export function buildControlCenterTaskTimeline(
+  task: TaskCapsule,
+  projection: RuntimeControlProjection
+): ControlCenterTaskTimeline {
+  const execution = task.execution;
+  const records = execution?.records ?? [];
+  const events = [
+    ...records.map(actionEvent),
+    ...task.failures.map((failure, index): ControlCenterTaskTimelineEvent => ({
+      id: `failure:${index}:${bounded(failure.code, 256)}`,
+      kind: 'TASK_FAILURE',
+      at: failure.at,
+      title: 'Task failure',
+      state: 'FAILED',
+      error: { code: bounded(failure.code, 256), message: bounded(failure.message, 1024) },
+      evidence: []
+    }))
+  ].sort((left, right) => left.at.localeCompare(right.at));
+  const visibleEvents = events.slice(-MAX_EVENTS);
+  const taskEvidence = evidenceSummary(task.evidence, records);
+  const recovery = recoveryProjection(task, projection, records);
+
+  return {
+    schemaVersion: 1,
+    task: {
+      id: bounded(task.id, 128),
+      objective: bounded(task.userObjective, 1024),
+      state: task.state,
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt
+    },
+    planning: {
+      plannerId: bounded(execution?.plannerId ?? 'not-started', 256),
+      modelIdentity: {
+        status: 'NOT_RECORDED',
+        reason: 'This task contract records the planner identity, but not a trustworthy model identifier.'
+      }
+    },
+    cost: {
+      reserved: {
+        calls: safeCount(execution?.modelCallCount),
+        tokens: safeCount(execution?.modelReservedTokens),
+        ceilingMicros: safeCount(execution?.modelReservedCostMicros)
+      },
+      actual: {
+        status: 'NOT_RECORDED',
+        costMicros: null,
+        inputTokens: null,
+        outputTokens: null,
+        reason: 'Reservations are safety ceilings, not provider billing. Actual token and cost settlement is not present in this task record.'
+      }
+    },
+    verification: projection.verification,
+    recovery,
+    evidence: taskEvidence,
+    timeline: [createdEvent(task), ...visibleEvents],
+    truncated: events.length > visibleEvents.length
+  };
+}
+
+function createdEvent(task: TaskCapsule): ControlCenterTaskTimelineEvent {
+  return {
+    id: `task:${bounded(task.id, 128)}`,
+    kind: 'TASK_CREATED',
+    at: task.createdAt,
+    title: 'Task created',
+    state: 'PENDING',
+    evidence: []
+  };
+}
+
+function actionEvent(record: TaskActionRecord): ControlCenterTaskTimelineEvent {
+  const observation = record.observation;
+  return {
+    id: bounded(record.actionId, 512),
+    kind: 'ACTION',
+    at: record.startedAt,
+    ...(record.finishedAt ? { finishedAt: record.finishedAt } : {}),
+    title: bounded(record.capability, 256),
+    state: record.state,
+    attempt: record.attempt,
+    risk: record.risk,
+    ...(observation?.provider ? { provider: bounded(observation.provider, 256) } : {}),
+    ...(observation ? { observation: {
+      channel: observation.channel,
+      domain: observation.domain,
+      at: observation.observedAt,
+      ...(observation.schemaVersion === 2 ? { epistemicStatus: observation.epistemicStatus } : {})
+    } } : {}),
+    ...(record.errorCode ? { error: {
+      code: bounded(record.errorCode, 256),
+      ...(record.executionPhase ? { executionPhase: record.executionPhase } : {}),
+      ...(record.sideEffectState ? { sideEffectState: record.sideEffectState } : {})
+    } } : {}),
+    evidence: record.evidence.slice(-MAX_EVENT_EVIDENCE).map(projectEvidence)
+  };
+}
+
+function recoveryProjection(
+  task: TaskCapsule,
+  projection: RuntimeControlProjection,
+  records: TaskActionRecord[]
+): ControlCenterTaskTimeline['recovery'] {
+  if (projection.reconciliationRequired) {
+    return {
+      state: 'RECONCILE_REQUIRED',
+      code: projection.blocker?.code ?? 'ACTION_RECONCILIATION_REQUIRED',
+      guidance: 'A side effect remains uncertain. Do not retry it; use the separately authorized reconciliation path.'
+    };
+  }
+  if (projection.pendingApproval || records.at(-1)?.errorCode === 'APPROVAL_REQUIRED') {
+    return {
+      state: 'APPROVAL_REQUIRED',
+      code: 'APPROVAL_REQUIRED',
+      guidance: 'Review the effect in the trusted local approval surface. This timeline cannot grant approval.'
+    };
+  }
+  if (task.state === 'FAILED' || task.state === 'BLOCKED') {
+    return {
+      state: 'ESCALATION_REQUIRED',
+      ...(projection.blocker?.code ? { code: bounded(projection.blocker.code, 256) } : {}),
+      guidance: 'No retry authority is recorded. Inspect the error and recovery center before choosing a next action.'
+    };
+  }
+  return { state: 'NONE', guidance: 'No unresolved recovery requirement is recorded for this task.' };
+}
+
+function evidenceSummary(taskEvidence: Evidence[], records: TaskActionRecord[]): ControlCenterTaskTimeline['evidence'] {
+  const total = taskEvidence.length + records.reduce((count, record) => count + record.evidence.length, 0);
+  const summary = { total, classified: 0, pass: 0, fail: 0, info: 0, truncated: total > MAX_CLASSIFIED_EVIDENCE };
+  for (const items of [taskEvidence, ...records.map((record) => record.evidence)]) {
+    for (const item of items) {
+      if (summary.classified >= MAX_CLASSIFIED_EVIDENCE) return summary;
+      summary.classified += 1;
+      summary[item.status] += 1;
+    }
+  }
+  return summary;
+}
+
+function projectEvidence(item: Evidence): ControlCenterTaskTimelineEvent['evidence'][number] {
+  return {
+    kind: bounded(item.kind, 256),
+    status: item.status,
+    message: bounded(item.message, 1024),
+    timestamp: item.timestamp
+  };
+}
+
+function safeCount(value: number | undefined): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function bounded(value: string, max: number): string {
+  return String(value ?? '').slice(0, max).replace(/[\r\n\0]/g, ' ');
+}
