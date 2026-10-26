@@ -83,6 +83,7 @@ export interface RealisticJourneyRunnerInput {
     requiredEvidenceDigests: readonly string[];
     executorIds: readonly string[];
     verifierIds: readonly string[];
+    signal: AbortSignal;
   }): Promise<Omit<IndependentCampaignEvidence, 'trustedVerifierPublicKeys'> | undefined>;
 }
 
@@ -175,8 +176,15 @@ async function bounded<T>(
 ): Promise<T> {
   if (parent?.aborted) throw new Error('CANCELLED');
   const controller = new AbortController();
-  const cancel = () => controller.abort();
+  let rejectCancel!: (reason: Error) => void;
+  const cancelled = new Promise<never>((_, reject) => { rejectCancel = reject; });
+  const cancel = () => {
+    controller.abort();
+    rejectCancel(new Error('CANCELLED'));
+  };
   parent?.addEventListener('abort', cancel, { once: true });
+  // Cover an abort racing with listener registration, not only entry state.
+  if (parent?.aborted) cancel();
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
@@ -185,7 +193,12 @@ async function bounded<T>(
     }, deadlineMs);
   });
   try {
-    return await Promise.race([Promise.resolve().then(() => callback(controller.signal)), timeout]);
+    const result = await Promise.race([
+      Promise.resolve().then(() => callback(controller.signal)), timeout, cancelled
+    ]);
+    if (parent?.aborted) throw new Error('CANCELLED');
+    if (controller.signal.aborted) throw new Error('TIMEOUT');
+    return result;
   } finally {
     if (timer) clearTimeout(timer);
     parent?.removeEventListener('abort', cancel);
@@ -296,9 +309,9 @@ export async function runRealisticJourneyCampaign(
   const campaignDigest = digest(canonicalJson(body));
   let trust: IndependentCampaignEvidence | undefined;
   try {
-    const supplied = await input.authenticateEvidence({ campaignDigest,
+    const supplied = await bounded(signal => input.authenticateEvidence({ campaignDigest,
       requiredEvidenceDigests: [...requiredEvidence].sort(), executorIds: [input.executorId],
-      verifierIds: [...verifierIds].sort() });
+      verifierIds: [...verifierIds].sort(), signal }), input.deadlineMs, input.signal);
     if (supplied) {
       // The evidence supplier must never be allowed to provide its own public keys.
       if (Object.hasOwn(supplied, 'trustedVerifierPublicKeys')) {
