@@ -277,7 +277,8 @@ function uniquePaths(input: unknown, label: string): string[] {
 function uniqueBoundedIds(input: unknown, label: string): string[] {
   if (!Array.isArray(input) || input.length > MAX_VERIFICATION_ITEMS) throw invalid(`${label} is invalid.`);
   const values = input.map((item) => {
-    const value = String(item ?? '');
+    if (typeof item !== 'string') throw invalid(`${label} contains an invalid id.`);
+    const value = item;
     if (!/^[A-Za-z0-9._:@/+\-=]{1,256}$/.test(value)) throw invalid(`${label} contains an invalid id.`);
     return value;
   });
@@ -289,13 +290,15 @@ function sha256Text(value: string): string {
 }
 
 function digest(input: unknown, label: string): string {
-  const value = String(input ?? '').toLowerCase();
+  if (typeof input !== 'string') throw invalid(`${label} must be SHA-256.`);
+  const value = input.toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(value)) throw invalid(`${label} must be SHA-256.`);
   return value;
 }
 
 function integer(input: unknown, min: number, max: number, label: string): number {
-  const value = Number(input);
+  if (typeof input !== 'number') throw invalid(`${label} is invalid.`);
+  const value = input;
   if (!Number.isSafeInteger(value) || value < min || value > max) throw invalid(`${label} is invalid.`);
   return value;
 }
