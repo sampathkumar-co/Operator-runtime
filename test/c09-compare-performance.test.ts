@@ -213,3 +213,46 @@ test('C09 refuses per-journey model cost increases hidden by equal aggregate spe
   assert.equal(comparison.observedCandidateNotWorse, false);
   assert.equal(comparison.releaseAcceptance, 'NOT_ACCEPTED');
 });
+
+test('C09 a disastrous individual journey cannot hide beneath better p50 p95 and p99', () => {
+  const before = Array.from({ length: 200 }, (_, i) =>
+    sample(100, { scenarioId: 'matched_' + i }));
+  const after = before.map((row, i) =>
+    sample(i === 187 ? 450 : 70, { scenarioId: row.scenarioId }));
+  const result = compareMatchedPerformance({
+    baseline: make(100, { records: before }),
+    candidate: make(70, { sourceCommit: '9'.repeat(40), records: after })
+  });
+  assert.ok(result.candidate.p50Ms < result.baseline.p50Ms);
+  assert.ok(result.candidate.p95Ms < result.baseline.p95Ms);
+  assert.ok(result.candidate.p99Ms < result.baseline.p99Ms);
+  assert.equal(result.regressionDiagnostics.severeMatchedJourneyLatencyRegressions, 1);
+  assert.equal(result.regressionDiagnostics.maxSevereJourneyLatencyIncreaseMs, 350);
+  assert.deepEqual(result.regressionDiagnostics.reasons,
+    ['SEVERE_MATCHED_JOURNEY_LATENCY_REGRESSION']);
+  assert.equal(result.observedCandidateNotWorse, false);
+  assert.equal(result.releaseAcceptance, 'NOT_ACCEPTED');
+  assert.equal(JSON.stringify(result).includes('matched_187'), false,
+    'private journey IDs should not appear in release summary');
+});
+
+test('C09 small per-journey latency shifts remain diagnostics rather than a total prohibition', () => {
+  const baselineRows = [
+    sample(200, { scenarioId: 'one' }),
+    sample(200, { scenarioId: 'two' }),
+    sample(200, { scenarioId: 'three' })
+  ];
+  const candidateRows = [
+    sample(280, { scenarioId: 'one' }),
+    sample(100, { scenarioId: 'two' }),
+    sample(100, { scenarioId: 'three' })
+  ];
+  const result = compareMatchedPerformance({
+    baseline: make(200, { records: baselineRows }),
+    candidate: make(100, { sourceCommit: '9'.repeat(40), records: candidateRows })
+  });
+  assert.equal(result.regressionDiagnostics.severeMatchedJourneyLatencyRegressions, 0);
+  assert.equal(result.regressionDiagnostics.maxSevereJourneyLatencyIncreaseMs, 0);
+  assert.equal(result.observedCandidateNotWorse, false,
+    'aggregate p99 degradation is still independently evaluated');
+});
