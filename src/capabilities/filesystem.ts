@@ -374,6 +374,14 @@ export class FilesystemProvider implements CapabilityProvider {
         // for the original search root.
         const entries = await this.#scope.withExisting(current.dir, async (scopedDir) => {
           assertFilesystemNotCancelled(signal);
+          // A child replaced by a symlink to ANOTHER authorized directory is
+          // still the wrong observed resource, even though it stays in scope.
+          const observed = process.platform === 'win32' ? path.normalize(current.dir).toLowerCase() : path.normalize(current.dir);
+          const resolved = process.platform === 'win32' ? path.normalize(scopedDir).toLowerCase() : path.normalize(scopedDir);
+          if (resolved !== observed) {
+            throw new OperatorError('FILE_SEARCH_DIRECTORY_CHANGED',
+              'Recursive search target changed its observed directory identity.');
+          }
           const stat = await fs.lstat(scopedDir);
           if (!stat.isDirectory() || stat.isSymbolicLink()) {
             throw new OperatorError('FILE_SEARCH_DIRECTORY_CHANGED',
