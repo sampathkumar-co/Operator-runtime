@@ -10,6 +10,8 @@ type LocalModelOptIn = {
   enabled?: string;
   /** Local-only Ollama model name, never a URL or external provider token. */
   modelId?: string;
+  /** Separate owner opt-in before making any additional model calls for checkpoints. */
+  composeEnabled?: string;
 };
 
 /**
@@ -19,6 +21,12 @@ type LocalModelOptIn = {
  */
 export function optionalLocalModelPlanners(config: LocalModelOptIn): TaskPlanner[] | undefined {
   const enabled = config.enabled;
+  if (config.composeEnabled !== undefined && !['', '0', '1'].includes(config.composeEnabled)) {
+    throw new OperatorError('TASK_MODEL_CONFIG_INVALID', 'Dynamic composition requires exact opt-in 1 or disabled 0.');
+  }
+  if (config.composeEnabled === '1' && enabled !== '1') {
+    throw new OperatorError('TASK_MODEL_CONFIG_INVALID', 'Dynamic composition requires separate local model planning opt-in.');
+  }
   if (enabled === undefined || enabled === '' || enabled === '0') {
     if (config.modelId) {
       throw new OperatorError('TASK_MODEL_CONFIG_INVALID',
@@ -40,6 +48,7 @@ export function optionalLocalModelPlanners(config: LocalModelOptIn): TaskPlanner
     new ProjectQualityGatePlanner(),
     new SemanticTaskPlanner(),
     new SemanticWorkflowPlanner(),
-    new LocalModelAutonomousWorkflowPlanner({ model: config.modelId })
+    new LocalModelAutonomousWorkflowPlanner({ model: config.modelId,
+      enableLoopbackComposition: config.composeEnabled === '1' })
   ];
 }
