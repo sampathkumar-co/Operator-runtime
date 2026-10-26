@@ -591,9 +591,6 @@ function validateRecord(
     throw corrupt('Developer Worktree phase must be a literal known state.');
   }
   const phase = raw.phase as DeveloperWorktreePhase;
-  if (!['CREATING', 'ACTIVE', 'RELEASING', 'RELEASED'].includes(phase)) {
-    throw corrupt('Developer Worktree phase is invalid.');
-  }
   const createdAt = canonicalIso(raw.createdAt, 'createdAt');
   const updatedAt = canonicalIso(raw.updatedAt, 'updatedAt');
   if (Date.parse(updatedAt) < Date.parse(createdAt)) {
