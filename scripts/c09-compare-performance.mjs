@@ -115,6 +115,19 @@ export function compareMatchedPerformance({ baseline, candidate }) {
   const increasedCostJourneys = keys.filter(key =>
     newRows.get(key).costMicros > oldRows.get(key).costMicros
   ).length;
+  // Percentiles alone are not matched-pair tests. On a large workload, a
+  // catastrophic slowdown for one frozen user journey can disappear beneath
+  // improved p50/p95/p99 and still breach the operator's task deadline.
+  // This conservative diagnostic only vetoes a >2x AND >=100ms increase.
+  // It does not disclose scenario identifiers from the frozen evidence.
+  const severeMatchedLatency = keys.filter(key => {
+    const beforeMs = oldRows.get(key).endToEndMs;
+    const afterMs = newRows.get(key).endToEndMs;
+    return afterMs > beforeMs * 2 && afterMs - beforeMs >= 100;
+  });
+  const severeMatchedJourneyLatencyRegressions = severeMatchedLatency.length;
+  const maxSevereJourneyLatencyIncreaseMs = severeMatchedLatency.reduce((max, key) =>
+    Math.max(max, newRows.get(key).endToEndMs - oldRows.get(key).endToEndMs), 0);
   const missingStageInstrumentation = STAGES.filter(stage =>
     b.stageMs[stage].observed < a.stageMs[stage].observed
   );
@@ -130,6 +143,7 @@ export function compareMatchedPerformance({ baseline, candidate }) {
     ...(b.p50Ms > a.p50Ms ? ['P50_LATENCY_REGRESSION'] : []),
     ...(b.p95Ms > a.p95Ms ? ['P95_LATENCY_REGRESSION'] : []),
     ...(b.p99Ms > a.p99Ms ? ['P99_LATENCY_REGRESSION'] : []),
+    ...(severeMatchedJourneyLatencyRegressions ? ['SEVERE_MATCHED_JOURNEY_LATENCY_REGRESSION'] : []),
     ...(!noLostVerifiedJourneys ? ['LOST_VERIFIED_JOURNEY'] : []),
     ...(b.verifiedSuccesses < a.verifiedSuccesses ? ['VERIFIED_COMPLETION_REGRESSION'] : []),
     ...(b.falseCompletionCount > a.falseCompletionCount ? ['FALSE_COMPLETION_TOTAL_INCREASE'] : []),
@@ -173,6 +187,8 @@ export function compareMatchedPerformance({ baseline, candidate }) {
       introducedFalseCompletionJourneys,
       introducedHumanInterventionJourneys,
       increasedCostJourneys,
+      severeMatchedJourneyLatencyRegressions,
+      maxSevereJourneyLatencyIncreaseMs,
       missingStageInstrumentation,
       lostStageInstrumentationJourneys,
       reasons
