@@ -44,15 +44,16 @@ test('C10 task timeline pages recover all older records without duplicate or inv
   assert.equal(current.timeline.length, 501);
   assert.equal(current.timeline[0]?.kind, 'TASK_CREATED');
   assert.equal(current.page.totalEvents, 621);
+  assert.match(current.page.snapshot, /^[0-9a-f]{64}$/);
   assert.equal(current.page.nextBefore, 121);
   assert.equal(current.truncated, true);
   const older = buildControlCenterTaskTimeline(task, projection, {
-    before: current.page.nextBefore!, limit: 100
+    before: current.page.nextBefore!, limit: 100, snapshot: current.page.snapshot
   });
   assert.equal(older.timeline.length, 100);
   assert.equal(older.page.nextBefore, 21);
   const oldest = buildControlCenterTaskTimeline(task, projection, {
-    before: older.page.nextBefore!, limit: 100
+    before: older.page.nextBefore!, limit: 100, snapshot: current.page.snapshot
   });
   assert.equal(oldest.timeline.length, 21);
   assert.equal(oldest.page.nextBefore, null);
@@ -66,6 +67,22 @@ test('C10 task timeline pages recover all older records without duplicate or inv
   assert.equal(current.evidence.total, 620);
   assert.equal(older.evidence.pass, 620, 'history pagination cannot rewrite total evidence truth');
   assert.equal(older.cost.actual.status, 'NOT_RECORDED');
+});
+
+test('C10 a concurrent task history update invalidates an older-page cursor', () => {
+  const task = longTask();
+  const current = buildControlCenterTaskTimeline(task, projectTaskRuntime(task));
+  const options = { before: current.page.nextBefore!, snapshot: current.page.snapshot, limit: 100 };
+  const initialOlder = buildControlCenterTaskTimeline(task, projectTaskRuntime(task), options);
+  assert.equal(initialOlder.timeline.length, 100);
+  task.failures.push({
+    at: '2026-10-01T00:00:00.001Z',
+    code: 'CONCURRENT_EVENT',
+    message: 'An independent read failed after the first page.'
+  });
+  task.updatedAt = new Date(Date.UTC(2026, 9, 1, 0, 12, 0)).toISOString();
+  assert.throws(() => buildControlCenterTaskTimeline(task, projectTaskRuntime(task), options),
+    /TASK_TIMELINE_SNAPSHOT_STALE/);
 });
 
 test('C10 invalid or out-of-snapshot history cursor fails closed', () => {
@@ -86,7 +103,7 @@ test('C10 authenticated read-only history UI is source-backed and contains no HT
   const ui = await fs.readFile(path.join(root, 'apps/control-center/src/task-timeline.js'), 'utf8');
   assert.ok(server.includes("requestUrl.searchParams.get('before')"));
   assert.ok(server.includes('TASK_TIMELINE_CURSOR_INVALID'));
-  assert.ok(app.includes('"/timeline?before="+before+"&limit=100"'));
+  assert.ok(app.includes('"/timeline?before="+before+"&limit=100&snapshot="+encodeURIComponent(snapshot)'));
   assert.ok(ui.includes('Load earlier actions'));
   assert.ok(ui.includes('document.createDocumentFragment()'));
   assert.equal(ui.includes('innerHTML'), false);
