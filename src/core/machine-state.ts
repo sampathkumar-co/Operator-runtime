@@ -134,8 +134,11 @@ function importantStateFromResult(result: ActionResult): Record<string, unknown>
       }
       const value = text(element.value);
       if (value !== undefined) item.valueHash = sha256(value);
-      const processId = Number(element.processId ?? element.process_id);
-      if (Number.isSafeInteger(processId) && processId > 0 && processId <= 0x7fffffff) item.processId = processId;
+      const processId = element.processId ?? element.process_id;
+      // A UIA process identity is proof metadata, never a JS coercion target.
+      // Numeric strings, booleans and arrays must not become trusted PIDs.
+      if (typeof processId === 'number' && Number.isSafeInteger(processId) &&
+          processId > 0 && processId <= 0x7fffffff) item.processId = processId;
       for (const [source, destination] of [
         ['enabled', 'enabled'], ['isEnabled', 'enabled'], ['offscreen', 'offscreen'],
         ['isOffscreen', 'offscreen'], ['focused', 'focused'], ['hasKeyboardFocus', 'focused'],
@@ -221,7 +224,10 @@ function evidenceRef(item: Evidence): string {
   return sha256(canonicalJson({ kind: item.kind, status: item.status, timestamp: item.timestamp }));
 }
 function isSafeScalar(value: unknown): value is string | number | boolean | null {
-  return value === null || typeof value === 'boolean' || typeof value === 'number'
+  // JSON.stringify(NaN/Infinity) produces null. Accepting those numbers
+  // collapses distinct observations into the same content-addressed proof.
+  return value === null || typeof value === 'boolean'
+    || (typeof value === 'number' && Number.isFinite(value))
     || (typeof value === 'string' && value.length <= 256 && !/[\r\n\0]/.test(value));
 }
 function record(value: unknown): Record<string, unknown> {
