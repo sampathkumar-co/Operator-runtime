@@ -58,6 +58,11 @@ test('C11 duplicate and malformed workflow pages fail closed', async () => {
   }), /page is malformed/);
   await assert.rejects(fetchReleaseWorkflowRuns({
     repository: 'org/repo', sha, token: 'dummy',
-    getJson: async () => ({ workflow_runs: filler })
+    getJson: async (url: string) => {
+      const page = Number(new URL(url, 'https://api.github.com').searchParams.get('page'));
+      return { workflow_runs: filler.map(item => ({
+        ...item, id: (page - 1) * 100 + item.id
+      })) };
+    }
   }), /bounded pagination window/);
 });
