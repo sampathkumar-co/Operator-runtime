@@ -49,12 +49,22 @@ test('C09 a separate writer instance still wakes exact device and sequence waite
   assert.equal((await second)?.deliveryId, secondId);
   controller.abort();
   assert.equal(await cancelled, null);
-  // Different device with the same sequence must not observe the result.
-  // Explicit abort avoids relying on a real-time 2-second test timeout.
-  const distinct = await reader.waitFor(wrongDevice, 1, crypto.randomUUID(), 10);
-  assert.equal(distinct, null);
+  // Different device with the same sequence cannot satisfy the waiting
+  // delivery ID. Keep a referenced watchdog active: the production waiter
+  // timers are deliberately unref'ed and must not pin the process alone.
   await writer.put(wrongDevice, 1, crypto.randomUUID(), { ok: true });
-  assert.equal(await wrong, null, 'wrong delivery identity cannot be accepted');
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const guarded = Promise.race([
+      wrong,
+      new Promise<never>((_, reject) => {
+        watchdog = setTimeout(() => reject(new Error('cross-process result poll did not resolve')), 1_000);
+      })
+    ]);
+    assert.equal(await guarded, null, 'wrong delivery identity cannot be accepted');
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
+  }
 });
 
 test('C09 corrupt or unavailable shared state fails all waiters, never looks like a clean timeout', async t => {
