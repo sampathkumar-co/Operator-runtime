@@ -347,3 +347,65 @@ test('C05 provider-neutral inference is bounded even if an injected provider ign
     (error: any) => error?.code === 'TASK_MODEL_SUBGOAL_TIMEOUT');
   assert.equal(ctx.task.execution!.plannerState.activeSubgoalId, undefined);
 });
+
+
+test('C05 explicit loopback composer inserts only one source-bound read-only verification checkpoint', async () => {
+  const ctx = context();
+  const state = ctx.task.execution!.plannerState;
+  const plan = state.durablePlan as ReturnType<typeof createDurableTaskPlan>;
+  for (const step of plan.subgoals) step.resourceScope = ['/SECRET_PROJECT_PATH'];
+  const observation = ctx.task.execution!.records[0]!.observation!;
+  observation.stateVersion = 'a'.repeat(64);
+  ctx.capabilitySchemas = [{ provider: 'project', stepKey: 'setup', action: 'verify',
+    capability: 'project.inspect', risk: 'read', inputSchemaVersion: 1,
+    inputMaxBytes: 1024, cancellation: 'required', resourceKinds: ['project'] } as any];
+  let modelCalls = 0, reservations = 0;
+  ctx.reserveModelBudget = async maxTokens => { reservations++; assert.ok(maxTokens > 100 && maxTokens < 10000); };
+  const planner = new LocalModelAutonomousWorkflowPlanner({
+    model: 'local-model:latest', now: () => TIME, enableLoopbackComposition: true,
+    fetchFn: (async (_url, init) => {
+      modelCalls++;
+      const prompt = String(JSON.parse(String(init?.body)).prompt);
+      for (const secret of ['SECRET_', '/SECRET_PROJECT_PATH', 'private.example']) {
+        assert.equal(prompt.includes(secret), false, 'untrusted prompt contained protected task information');
+      }
+      if (prompt.includes('Fresh observation reference:')) {
+        const ref = prompt.match(/Fresh observation reference: ([a-f0-9]{64})/)?.[1];
+        assert.ok(ref, 'composer receives an opaque observed-state reference');
+        return new Response(JSON.stringify({ response: JSON.stringify({
+          operation: 'insert_checkpoint', observationRef: ref, beforeIndex: 0, schemaIndex: 0
+        }) }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ response: '{"index":0}' }), { status: 200 });
+    }) as typeof fetch
+  });
+  const decision = await planner.next(ctx);
+  assert.equal(modelCalls, 2);
+  assert.equal(reservations, 2);
+  assert.equal((state.durablePlan as typeof plan).revision, 2);
+  const inserted = (state.durablePlan as typeof plan).subgoals.filter(s => s.key.startsWith('dynamic-checkpoint:'));
+  assert.equal(inserted.length, 1);
+  assert.deepEqual(inserted[0]!.execution.action, plan.subgoals[0]!.successContract);
+  assert.equal(decision.type, 'step');
+  if (decision.type === 'step') {
+    assert.equal(decision.key, 'autonomous:3:observe');
+    assert.equal(decision.capability, 'project.inspect');
+    assert.deepEqual(decision.input, {});
+  }
+});
+
+test('C05 local model composer remains disabled unless separately opted in', async () => {
+  const ctx = context();
+  const state = ctx.task.execution!.plannerState;
+  for (const step of state.durablePlan.subgoals) step.resourceScope = ['/SECRET_PROJECT_PATH'];
+  ctx.task.execution!.records[0]!.observation!.stateVersion = 'a'.repeat(64);
+  ctx.capabilitySchemas = [{ provider: 'project', stepKey: 'setup', action: 'verify',
+    capability: 'project.inspect', risk: 'read', inputSchemaVersion: 1,
+    inputMaxBytes: 1024, cancellation: 'required', resourceKinds: ['project'] } as any];
+  let calls = 0;
+  const planner = new LocalModelAutonomousWorkflowPlanner({ model: 'local-model:latest', now: () => TIME,
+    fetchFn: (async () => { calls++; return new Response(JSON.stringify({ response: '{"index":0}' }), { status: 200 }); }) as typeof fetch });
+  await planner.next(ctx);
+  assert.equal(calls, 1, 'default opt-in may rank READY goals but must not compose checkpoints');
+  assert.equal(state.durablePlan.revision, 1);
+});
