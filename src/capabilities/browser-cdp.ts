@@ -830,6 +830,23 @@ export class BrowserCdpProvider implements CapabilityProvider {
     if (action.input.expectDownload !== undefined && typeof action.input.expectDownload !== 'boolean') {
       throw new OperatorError('INVALID_DOWNLOAD_INTERACTION', 'expectDownload must be an exact Boolean.');
     }
+    // A tab ID is not a site permission: an approved download must be bound
+    // to the exact declared HTTP(S) origin at the moment of interaction.
+    if (action.input.expectDownload === true) {
+      const approvedOrigin = action.input.expectedOrigin;
+      if (typeof approvedOrigin !== 'string') {
+        throw new OperatorError('BROWSER_DOWNLOAD_ORIGIN_DENIED', 'Download requires an exact approved browser origin.');
+      }
+      let checked: URL;
+      try { checked = new URL(approvedOrigin); }
+      catch { throw new OperatorError('BROWSER_DOWNLOAD_ORIGIN_DENIED', 'Download origin is not a valid URL.'); }
+      if (!['http:', 'https:'].includes(checked.protocol) || checked.origin !== approvedOrigin
+          || checked.username || checked.password) {
+        throw new OperatorError('BROWSER_DOWNLOAD_ORIGIN_DENIED', 'Download origin must be a canonical approved HTTP(S) origin.');
+      }
+    } else if (action.input.expectedOrigin !== undefined) {
+      throw new OperatorError('INVALID_DOWNLOAD_INTERACTION', 'expectedOrigin is only valid for an expected browser download.');
+    }
     if (action.input.downloadTimeoutMs !== undefined &&
         (typeof action.input.downloadTimeoutMs !== 'number' ||
          !Number.isSafeInteger(action.input.downloadTimeoutMs) ||
@@ -879,6 +896,17 @@ export class BrowserCdpProvider implements CapabilityProvider {
         );
       }
       const before = await pageIdentity(session);
+      if (expectDownload) {
+        const approved = action.input.expectedOrigin as string;
+        let activeOrigin = '';
+        let observedOrigin = '';
+        try { activeOrigin = new URL(target.url).origin; } catch { /* No confirmed site identity. */ }
+        try { observedOrigin = new URL(before.url).origin; } catch { /* No confirmed document identity. */ }
+        if (activeOrigin !== approved || observedOrigin !== approved) {
+          throw new OperatorError('BROWSER_DOWNLOAD_ORIGIN_DENIED',
+            'The exact initiating tab and freshly observed page must remain inside the approved download origin.');
+        }
+      }
       const interaction = await performSemanticInteraction(session, {
         operation,
         target: targetSpec,
