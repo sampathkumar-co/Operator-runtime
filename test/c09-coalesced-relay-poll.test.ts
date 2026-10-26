@@ -43,25 +43,26 @@ test('C09 a separate writer instance still wakes exact device and sequence waite
   const wrong = reader.waitFor(wrongDevice, 1, crypto.randomUUID(), 2_000);
   const controller = new AbortController();
   const cancelled = reader.waitFor(device, 3, crypto.randomUUID(), 2_000, controller.signal);
-  await writer.put(device, 1, firstId, { ok: true, output: { step: 1 } });
-  await writer.put(device, 2, secondId, { ok: true, output: { step: 2 } });
-  assert.equal((await first)?.deliveryId, firstId);
-  assert.equal((await second)?.deliveryId, secondId);
-  controller.abort();
-  assert.equal(await cancelled, null);
-  // Different device with the same sequence cannot satisfy the waiting
-  // delivery ID. Keep a referenced watchdog active: the production waiter
-  // timers are deliberately unref'ed and must not pin the process alone.
-  await writer.put(wrongDevice, 1, crypto.randomUUID(), { ok: true });
+  // Start the referenced watchdog BEFORE any awaits on unref'ed production
+  // waiter timers. Otherwise node:test may leave no event-loop handle and
+  // cancel a legitimate in-flight cross-process read without checking it.
   let watchdog: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    watchdog = setTimeout(() => reject(new Error('cross-process result poll did not resolve')), 5_000);
+  });
   try {
-    const guarded = Promise.race([
-      wrong,
-      new Promise<never>((_, reject) => {
-        watchdog = setTimeout(() => reject(new Error('cross-process result poll did not resolve')), 1_000);
-      })
-    ]);
-    assert.equal(await guarded, null, 'wrong delivery identity cannot be accepted');
+    await writer.put(device, 1, firstId, { ok: true, output: { step: 1 } });
+    await writer.put(device, 2, secondId, { ok: true, output: { step: 2 } });
+    const [one, two] = await Promise.race([Promise.all([first, second]), deadline]);
+    assert.equal(one?.deliveryId, firstId);
+    assert.equal(two?.deliveryId, secondId);
+    controller.abort();
+    assert.equal(await cancelled, null);
+    // A result for a different device/sequence/delivery ID cannot satisfy
+    // this existing waiter even though the same sequence number is used.
+    await writer.put(wrongDevice, 1, crypto.randomUUID(), { ok: true });
+    assert.equal(await Promise.race([wrong, deadline]), null,
+      'wrong delivery identity cannot be accepted');
   } finally {
     if (watchdog) clearTimeout(watchdog);
   }
