@@ -364,7 +364,19 @@ export class FilesystemProvider implements CapabilityProvider {
       while (queue.length > 0 && results.length < maxResults && visited < MAX_SEARCH_VISITS) {
         assertFilesystemNotCancelled(signal);
         const current = queue.shift()!;
-        const entries = await fs.readdir(current.dir, { withFileTypes: true });
+        // Directory entries are untrusted after enumeration: a child directory
+        // can be exchanged for a symlink/junction between queueing and use.
+        // Re-establish the path-lease for each descended directory, not only
+        // for the original search root.
+        const entries = await this.#scope.withExisting(current.dir, async (scopedDir) => {
+          assertFilesystemNotCancelled(signal);
+          const stat = await fs.lstat(scopedDir);
+          if (!stat.isDirectory() || stat.isSymbolicLink()) {
+            throw new OperatorError('FILE_SEARCH_DIRECTORY_CHANGED',
+              'Recursive directory changed identity during scoped search.');
+          }
+          return await fs.readdir(scopedDir, { withFileTypes: true });
+        });
         assertFilesystemNotCancelled(signal);
         for (const entry of entries) {
           assertFilesystemNotCancelled(signal);
@@ -376,7 +388,16 @@ export class FilesystemProvider implements CapabilityProvider {
           const full = path.join(current.dir, entry.name);
           if (entry.name.toLowerCase().includes(query) && (kind === 'all' || kind === type)) {
             const item: { path: string; name: string; type: 'file' | 'directory'; size?: number } = { path: full, name: entry.name, type };
-            if (type === 'file') item.size = (await fs.stat(full)).size;
+            if (type === 'file') {
+              // lstat does not dereference a symlink swapped into the name
+              // after readdir. Never read metadata from the new target.
+              const fileStat = await fs.lstat(full);
+              if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
+                throw new OperatorError('FILE_SEARCH_ENTRY_CHANGED',
+                  'File identity changed between search enumeration and inspection.');
+              }
+              item.size = fileStat.size;
+            }
             assertFilesystemNotCancelled(signal);
             results.push(item);
             if (results.length >= maxResults) { truncated = true; break; }
