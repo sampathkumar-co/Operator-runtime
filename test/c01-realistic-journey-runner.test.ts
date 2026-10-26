@@ -140,3 +140,29 @@ test('timeout stops the campaign without retrying or opening later fixtures',asy
   assert.match(report.reasons.join(' '),/without retry: TIMEOUT/);
 });
 
+
+test('fixture callback exception details are not copied into evaluation reports',async()=>{
+  const secret='Bearer PRIVATE_FIXTURE_TOKEN_12345';
+  const fixture=input({
+    openScenario:async()=>{throw new Error('request failed: '+secret);}
+  });
+  const report=await runRealisticJourneyCampaign(fixture.base);
+  assert.equal(report.status,'FAIL');
+  assert.equal(report.attempted,1);
+  assert.equal(report.completed,0);
+  assert.match(report.reasons.join(' '),/UNTRUSTED_CALLBACK_ERROR/);
+  assert.ok(!JSON.stringify(report).includes(secret));
+});
+
+test('signed evidence callback exception details are not copied into reports',async()=>{
+  const secret='password=PRIVATE_AUTHENTICATOR_SECRET';
+  const fixture=input({
+    authenticateEvidence:async()=>{throw new Error(secret);}
+  });
+  const report=await runRealisticJourneyCampaign(fixture.base);
+  assert.equal(report.status,'FAIL');
+  assert.equal(report.completed,50);
+  assert.equal(report.authenticatedEvidence,false);
+  assert.match(report.reasons.join(' '),/Independent evidence authentication failed: UNTRUSTED_CALLBACK_ERROR/);
+  assert.ok(!JSON.stringify(report).includes(secret));
+});
