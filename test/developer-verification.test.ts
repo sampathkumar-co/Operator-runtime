@@ -407,3 +407,30 @@ test('run file identity must match the requested run id path', async (t) => {
     }
   );
 });
+
+test('C07 verified run cannot conceal a newer owner-session regression or missing committed pack', async (t) => {
+  const fx = await fixture(t);
+  const started = await fx.coordinator.start({
+    developerSessionId: fx.session.id,
+    requirements: [{ commandId: 'test', criterionIndexes: [0, 1] }],
+    now: '2026-10-06T00:00:02.000Z'
+  });
+  await fx.coordinator.recordAuthorizedCommandResult({
+    runId: started.run.id, action: commandAction('test'),
+    result: commandResult('test', true),
+    executionContext: context(fx.session.id), now: '2026-10-06T00:00:03.000Z'
+  });
+  const done = await fx.coordinator.finalize(started.run.id, '2026-10-06T00:00:04.000Z');
+  assert.equal(done.verified, true);
+  const current = await fx.store.get(fx.session.id);
+  const newer = updateDeveloperSession(current, {
+    status: 'BLOCKED', artifactIds: current.artifactIds.filter(x => x !== done.evidencePackArtifactId),
+    resumeSummary: 'Out-of-band review detected an unresolved verification conflict.'
+  }, '2026-10-06T00:00:06.000Z');
+  await fx.store.put(newer, current);
+  await assert.rejects(
+    fx.coordinator.finalize(started.run.id, '2026-10-06T00:00:07.000Z'),
+    (error: any) => error?.code === 'DEVELOPER_VERIFICATION_COMMIT_UNCERTAIN'
+  );
+  assert.deepEqual(await fx.store.get(fx.session.id), newer);
+});
