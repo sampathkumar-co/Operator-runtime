@@ -257,3 +257,45 @@ test('no-progress becomes a durable planner event and triggers bounded replannin
   const persisted = await store.get(task.id);
   assert.equal(persisted.execution?.plannerEvents?.[0]?.code, 'BROWSER_NO_PROGRESS');
 });
+
+class UncertainNoProgressBrowserProvider implements CapabilityProvider {
+  readonly name = 'test.uncertain-no-progress';
+  calls = 0;
+  supports(action: ActionRequest): boolean { return action.capability === 'browser.interact'; }
+  score(): CapabilityScore { return SCORE; }
+  async execute(action: ActionRequest): Promise<ActionResult> {
+    this.calls++;
+    return {
+      ok: false, capability: action.capability, provider: this.name, evidence: [], durationMs: 1,
+      error: { code: 'BROWSER_NO_PROGRESS', message: 'Cannot establish whether prior click applied.',
+        retryable: true, sideEffectState: 'uncertain', executionPhase: 'dispatched' }
+    };
+  }
+}
+
+test('C05/C08 uncertain no-progress writes block and never replan into another mutation', async t => {
+  const root = await tempDir(t, 'operator-uncertain-no-progress-root-');
+  const state = await tempDir(t, 'operator-uncertain-no-progress-state-');
+  const provider = new UncertainNoProgressBrowserProvider();
+  const store = new TaskStore(state);
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store,
+    permissions: { allowedCapabilities: ['browser.interact'], allowedRoots: [root], allowExternalWrites: true },
+    planners: [new EventAwarePlanner()]
+  });
+  const task = await orchestrator.submit({
+    objective: 'Avoid repeating uncertain browser action.', authorizedScope: [root],
+    successConditions: ['No duplicate mutation without reconciliation'],
+    goal: { kind: 'controlled-file-change', root, path: 'unused.txt', content: 'unused' },
+    maxSteps: 2, maxAttemptsPerStep: 1
+  });
+  const result = await orchestrator.run(task.id);
+  assert.equal(result.state, 'BLOCKED');
+  assert.equal(provider.calls, 1);
+  assert.ok(result.evidence.some(item => item.kind === 'strategy_reconcile'));
+  assert.ok(!result.evidence.some(item => item.kind === 'strategy_replan'));
+  const persisted = await store.get(task.id);
+  assert.equal(persisted.state, 'BLOCKED');
+  assert.equal(persisted.execution?.records.length, 1);
+});
+
