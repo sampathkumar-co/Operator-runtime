@@ -19,7 +19,7 @@ function normalize(score: number): number {
 
 const KNOWN_RISKS = new Set<ActionRisk>(['read', 'write', 'external', 'system', 'destructive']);
 
-async function providerSupports(provider: CapabilityProvider, action: ActionRequest): Promise<boolean> {
+export async function providerSupports(provider: CapabilityProvider, action: ActionRequest): Promise<boolean> {
   const supported = await provider.supports(action);
   if (typeof supported !== 'boolean') {
     throw new OperatorError('PROVIDER_SUPPORT_CONTRACT_INVALID',
