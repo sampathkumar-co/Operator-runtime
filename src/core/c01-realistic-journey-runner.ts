@@ -110,6 +110,18 @@ function invalid(message: string): never {
   throw new Error(`C01_REALISTIC_JOURNEY_INVALID: ${message}`);
 }
 
+// Caller-owned fixture/scorer callbacks can throw HTTP bodies, local paths,
+// account identifiers or credentials. Never copy those messages to a report.
+// Only fixed evaluator-generated status codes/diagnostics may be surfaced.
+function sanitizedFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : '';
+  if (message === 'TIMEOUT' || message === 'CANCELLED' ||
+      message === 'campaign evidence supplier attempted to self-select the verifier trust anchor') {
+    return message;
+  }
+  return 'UNTRUSTED_CALLBACK_ERROR';
+}
+
 function plainObject(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
       (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
@@ -281,7 +293,7 @@ export async function runRealisticJourneyCampaign(
         resultEvidenceDigest, scoreEvidenceDigest });
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'unknown fixture failure';
+    const message = sanitizedFailureReason(error);
     return { schemaVersion: 1, status: 'FAIL', sourceCommit: input.sourceCommit,
       suiteDigest: holdout.suiteDigest, attempted, completed: results.length,
       verifiedSuccesses: results.filter((item) => item.verifiedSuccess === true).length,
@@ -307,7 +319,7 @@ export async function runRealisticJourneyCampaign(
       trust = { ...supplied, trustedVerifierPublicKeys: input.trustedVerifierPublicKeys };
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'authentication hook failed';
+    const message = sanitizedFailureReason(error);
     return { schemaVersion: 1, status: 'FAIL', sourceCommit: input.sourceCommit,
       suiteDigest: holdout.suiteDigest, attempted, completed: results.length,
       verifiedSuccesses: results.filter((item) => item.verifiedSuccess === true).length,
