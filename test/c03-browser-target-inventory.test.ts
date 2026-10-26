@@ -41,3 +41,15 @@ test('C03 truncated page inventory cannot pretend to establish unique implicit n
     error?.code === 'CDP_DISCOVERY_INCOMPLETE');
   assert.equal(normalizeCdpTargets(large.slice(0, 100)).length, 100);
 });
+
+test('C03 a service worker or extension target cannot be used as an interactive page', () => {
+  const targets = normalizeCdpTargets([
+    page('page-1'),
+    { ...page('worker-1'), type: 'service_worker' }
+  ]);
+  assert.throws(() => requireTarget(targets, 'worker-1'), (error: any) =>
+    error?.code === 'BROWSER_TARGET_NOT_PAGE' &&
+    error?.details?.executionPhase === 'pre_dispatch' &&
+    error?.details?.sideEffectState === 'none');
+  assert.equal(requirePageTarget(targets).id, 'page-1');
+});
