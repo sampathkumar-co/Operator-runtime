@@ -1071,7 +1071,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
           this.#noProgressPrevented += 1;
           throw new OperatorError('BROWSER_NO_PROGRESS', 'The same browser action produced no meaningful state delta twice; re-observe and change strategy instead of repeating it.', {
             retryable: false,
-            details: { sideEffectState: 'known', repeatedAction: actionPayload, actionFamily: noProgressFamily, target: targetSpec, before: beforeRelevant, after: afterRelevant, repeatedNoProgress, preventedCount: this.#noProgressPrevented }
+            details: { sideEffectState: 'uncertain', executionPhase: 'effect_observed', repeatedAction: actionPayload, actionFamily: noProgressFamily, target: targetSpec, before: beforeRelevant, after: afterRelevant, repeatedNoProgress, preventedCount: this.#noProgressPrevented }
           });
         }
       } else if (stateProgress) {
