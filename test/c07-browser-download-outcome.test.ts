@@ -9,10 +9,11 @@ import { verifyGoalOutcomeTruth } from '../src/core/task-verifier.ts';
 const digest = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 const time = (millis: number) => new Date(Date.UTC(2026, 9, 25) + millis).toISOString();
 const targetId = 'tab-download';
+const origin = 'https://allowed.example';
 const target = { role: 'link', name: 'Export report' };
 const artifactSha256 = digest('downloaded artifact bytes');
 const targetDigest = digest(canonicalJson({ targetId, target }));
-const actionInput = { targetId, operation: 'click', target, expectDownload: true, downloadTimeoutMs: 30_000 };
+const actionInput = { targetId, operation: 'click', target, expectDownload: true, expectedOrigin: origin, downloadTimeoutMs: 30_000 };
 
 function record(): TaskActionRecord {
   return {
@@ -37,12 +38,12 @@ function fixture() {
   return createTask({
     userObjective: 'Download the exact report artifact',
     interpretedObjective: 'Click the scoped export target and verify downloaded bytes',
-    authorizedScope: ['browser:tab-download'], prohibitedScope: [],
+    authorizedScope: ['browser:' + origin], prohibitedScope: [],
     successConditions: ['downloaded bytes match the expected digest'],
     execution: {
       schemaVersion: 1, plannerId: 'operator.semantic.v1', goalKind: 'browser-download',
       plannerState: { phase: 'complete', goal: {
-        kind: 'browser-download', targetId, target, expectedSha256: artifactSha256,
+        kind: 'browser-download', targetId, origin, target, expectedSha256: artifactSha256,
         expectedSuggestedFilename: 'report.csv', timeoutMs: 30_000
       } },
       maxSteps: 2, maxAttemptsPerStep: 2, timeoutMs: 60_000, stepCount: 1,
