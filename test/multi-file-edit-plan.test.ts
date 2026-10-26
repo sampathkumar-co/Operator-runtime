@@ -146,3 +146,45 @@ test('preview identifies bounded changed line range', () => {
   assert.ok((preview.lastChangedLineBefore ?? 0) >= 2);
   assert.ok((preview.lastChangedLineAfter ?? 0) >= 2);
 });
+
+test('C06 replacement bytes cannot come from arrays, numbers or attacker-owned coercion hooks', () => {
+  let coercions = 0;
+  const poison = { toString() { coercions++; return 'silently injected'; } };
+  for (const replacement of [null, undefined, 17, ['safe'], poison]) {
+    assert.throws(() => createMultiFileEditPlan({
+      files: [{
+        path: 'src/guarded.ts', expectedSha256: digest('original'),
+        edits: [{ start: 0, end: 1, replacement } as any]
+      }]
+    }), /replacement must be literal text/);
+  }
+  assert.equal(coercions, 0, 'editing malformed input may not execute toString hooks');
+  const empty = createMultiFileEditPlan({
+    files: [{ path: 'src/guarded.ts', expectedSha256: digest('original'),
+      edits: [{ start: 0, end: 1, replacement: '' }] }]
+  });
+  assert.equal(applyMultiFileEditPlan(empty, { 'src/guarded.ts': 'original' }).contentByPath['src/guarded.ts'], 'riginal');
+});
+
+test('C06 plan boundaries refuse coerced SHA, edit range and trusted command identity', () => {
+  let conversions = 0;
+  const spoof = { toString() { conversions++; return '1'; },
+    valueOf() { conversions++; return 1; } };
+  const make = (edit: any, expectedSha256: any = digest('abc'), verification: any = {}) =>
+    createMultiFileEditPlan({ files: [{
+      path: 'src/scope.ts', expectedSha256, edits: [edit]
+    }], verification });
+  const valid = { start: 0, end: 1, replacement: 'z' };
+  for (const malformed of [
+    { ...valid, start: '0' }, { ...valid, start: [0] },
+    { ...valid, start: spoof }, { ...valid, end: '1' },
+    { ...valid, end: [1] }, { ...valid, end: spoof }
+  ]) assert.throws(() => make(malformed), /is invalid/);
+  assert.throws(() => make(valid, [digest('abc')]), /must be SHA-256/);
+  assert.throws(() => make(valid, spoof), /must be SHA-256/);
+  assert.throws(() => make(valid, digest('abc'),
+    { trustedCommandIds: [['typecheck']] }), /invalid id/);
+  assert.throws(() => make(valid, digest('abc'),
+    { trustedCommandIds: [spoof] }), /invalid id/);
+  assert.equal(conversions, 0, 'untrusted values may not invoke conversion callbacks');
+});
