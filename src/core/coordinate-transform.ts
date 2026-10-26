@@ -92,6 +92,15 @@ export function composeCoordinateTransforms(firstInput: CoordinateTransform, sec
   const second = normalizeCoordinateTransform(secondInput);
   if (first.to !== second.from) throw new OperatorError('COORDINATE_TRANSFORM_MISMATCH', 'Coordinate transforms do not share an intermediate space.');
   if (first.generation !== second.generation) throw new OperatorError('COORDINATE_GENERATION_STALE', 'Coordinate transforms belong to different scene generations.');
+  // A matching coordinate-space name is insufficient when the two stages
+  // disagree about the size of that intermediate capture/viewport. Applying
+  // the wrong resize chain can steer physical input to a different control.
+  if ((first.targetWidth !== undefined && second.sourceWidth !== undefined &&
+       first.targetWidth !== second.sourceWidth) ||
+      (first.targetHeight !== undefined && second.sourceHeight !== undefined &&
+       first.targetHeight !== second.sourceHeight)) {
+    throw new OperatorError('COORDINATE_TRANSFORM_MISMATCH', 'Coordinate transforms disagree about intermediate dimensions.');
+  }
   return normalizeCoordinateTransform({
     from: first.from,
     to: second.to,
