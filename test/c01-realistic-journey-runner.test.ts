@@ -140,3 +140,42 @@ test('timeout stops the campaign without retrying or opening later fixtures',asy
   assert.match(report.reasons.join(' '),/without retry: TIMEOUT/);
 });
 
+
+test('hung evidence-authentication callback fails the 50-journey report within the deadline',async()=>{
+  const fixture=input({authenticateEvidence:async()=>new Promise(()=>{})});
+  fixture.base.deadlineMs=100;
+  const result=await runRealisticJourneyCampaign(fixture.base);
+  assert.equal(result.status,'FAIL');
+  assert.equal(result.completed,50);
+  assert.equal(result.authenticatedEvidence,false);
+  assert.equal(result.releaseAcceptance,'NOT_ACCEPTED');
+  assert.match(result.reasons.join(' '),/Independent evidence authentication failed: TIMEOUT/);
+});
+
+test('external AbortSignal immediately rejects a stalled fixture callback',async()=>{
+  const controller=new AbortController();
+  const fixture=input({signal:controller.signal,deadlineMs:5000});
+  fixture.base.openScenario=async()=>{
+    controller.abort();
+    return new Promise(()=>{});
+  };
+  const result=await runRealisticJourneyCampaign(fixture.base);
+  assert.equal(result.status,'FAIL');
+  assert.equal(result.attempted,1);
+  assert.equal(result.completed,0);
+  assert.match(result.reasons.join(' '),/without retry: CANCELLED/);
+});
+
+test('external AbortSignal cancels an unresponsive signed-evidence supplier',async()=>{
+  const controller=new AbortController();
+  const fixture=input({signal:controller.signal,deadlineMs:5000,
+    authenticateEvidence:async()=>{
+      controller.abort();
+      return new Promise(()=>{});
+    }});
+  const result=await runRealisticJourneyCampaign(fixture.base);
+  assert.equal(result.status,'FAIL');
+  assert.equal(result.completed,50);
+  assert.equal(result.authenticatedEvidence,false);
+  assert.match(result.reasons.join(' '),/authentication failed: CANCELLED/);
+});
