@@ -27,6 +27,7 @@ export function assertProviderResultContract(
       typeof result.ok !== 'boolean' ||
       typeof result.durationMs !== 'number' ||
       !Number.isFinite(result.durationMs) || result.durationMs < 0 ||
+      result.durationMs > 24 * 60 * 60_000 ||
       !Array.isArray(result.evidence) || result.evidence.length > 256) reject();
 
   for (const entry of result.evidence as unknown[]) {
@@ -38,7 +39,8 @@ export function assertProviderResultContract(
         typeof evidence.message !== 'string' ||
         evidence.message.length > 8192 ||
         typeof evidence.timestamp !== 'string' ||
-        !Number.isFinite(Date.parse(evidence.timestamp))) reject();
+        !Number.isFinite(Date.parse(evidence.timestamp)) ||
+        new Date(evidence.timestamp).toISOString() !== evidence.timestamp) reject();
   }
 
   if (result.ok === true && result.error !== undefined) reject();
