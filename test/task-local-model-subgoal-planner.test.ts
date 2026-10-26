@@ -411,3 +411,38 @@ test('C05 local model composer remains disabled unless separately opted in', asy
   assert.equal(calls, 1, 'default opt-in may rank READY goals but must not compose checkpoints');
   assert.equal(state.durablePlan.revision, 1);
 });
+
+
+test('C05 local model rejects unfinished, truncated or tool-calling decision envelopes', async () => {
+  for (const fields of [
+    { done: false },
+    { done: true, done_reason: 'length' },
+    { done: true, done_reason: 'stop', tool_calls: [{ function: { name: 'shell' } }] },
+    { done: true, function_call: { name: 'file.write' } }
+  ]) {
+    let invoked = 0;
+    const planner = new LocalModelAutonomousWorkflowPlanner({
+      model: 'local-planner:latest', now: () => TIME,
+      fetchFn: (async () => {
+        invoked++;
+        return new Response(JSON.stringify({ response: '{"index":0}', ...fields }), { status: 200 });
+      }) as typeof fetch
+    });
+    const ctx = context();
+    await assert.rejects(() => planner.next(ctx),
+      (error: any) => error?.code === 'TASK_MODEL_SUBGOAL_INVALID');
+    assert.equal(invoked, 1);
+    assert.equal(ctx.task.execution!.plannerState.activeSubgoalId, undefined);
+  }
+});
+
+test('C05 settled local model response remains a bounded read-only subgoal index', async () => {
+  const planner = new LocalModelAutonomousWorkflowPlanner({
+    model: 'local-planner:latest', now: () => TIME,
+    fetchFn: (async () => new Response(JSON.stringify({ response: '{"index":0}', done: true,
+      done_reason: 'stop' }), { status: 200 })) as typeof fetch
+  });
+  const decision = await planner.next(context());
+  assert.equal(decision.type, 'step');
+  if (decision.type === 'step') assert.equal(decision.key, 'autonomous:1:observe');
+});
