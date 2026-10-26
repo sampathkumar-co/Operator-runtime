@@ -8,6 +8,7 @@ This folder contains **only** the side-effect-free, model-agnostic controller ex
 - Accept only an allowlisted bounded action contract; reject model-provided objects, nonliteral values, unknown actions, unobserved targets and ambiguous accessible names.
 - Stop retrying after uncertain/reconciliation-required results, rather than automatically dispatching model suggestions after uncertain effects.
 - Generate a bounded synthetic prompt and interpret actions only. **No network calls, credentials, filesystem mutation, Chromium launch, API registration, remote relay, npm changes or autonomous approval** exist in the controller.
+- Audit synthetic result records with `audit_results.audit_results` against an explicit pinned roster, seed, model and source SHA. Missing/duplicate task outcomes, forged reward types and mismatched source are rejected. Every result remains `UNVERIFIED_SOURCE_ONLY` until separately authenticated against the official scorer.
 - Run `python3 -m unittest discover -s benchmarks/miniwob -p 'test_*.py' -v`. The dedicated CI workflow checks that the controller imports only standard-library pure modules and contains no direct execution/file API calls.
 
 ## Truth and limitations
