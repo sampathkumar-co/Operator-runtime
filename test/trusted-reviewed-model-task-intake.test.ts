@@ -324,3 +324,95 @@ test('C05 Stop while refreshing post-model approved scope cannot mint a review r
   await assert.rejects(pending, (error: any) => error?.code === 'TASK_MODEL_INFERENCE_ABORTED');
   assert.equal(submitted, 0);
 });
+
+test('C05 caller mutation during model inference cannot rebind trusted review scope', async () => {
+  const caller = {
+    objective: scope.objective,
+    approvedBrowserOrigins: [...scope.approvedBrowserOrigins],
+    approvedRoots: [...scope.approvedRoots]
+  };
+  let beginModel!: () => void, finishModel!: () => void;
+  const started = new Promise<void>(resolve => { beginModel = resolve; });
+  const release = new Promise<void>(resolve => { finishModel = resolve; });
+  let transmitted = '';
+  const model = new BoundedModelGoalInference({
+    modelId: 'injected-model', maxOutputTokens: 256, maxCostMicros: 0, timeoutMs: 1500,
+    ledger: {
+      async reserve() { return { reservationId: 'synthetic-budget-reservation' }; },
+      async finalize() {}
+    },
+    generator: { async generate(input) {
+      transmitted = input.prompt;
+      beginModel();
+      await release;
+      return { text: JSON.stringify(modelResponse) };
+    } }
+  });
+  const intake = new TrustedReviewedModelTaskIntake({
+    model, authority: {
+      async currentApprovedScope() { return scope; },
+      async verifyTrustedReview() { return true; },
+      async submitReviewedTask(options) {
+        assert.equal(options.objective, scope.objective);
+        assert.deepEqual(options.authorizedScope, ['browser:https://allowed.example']);
+        return { id: 'durable-queued-task', executionStarted: false as const };
+      }
+    }
+  });
+  const request = intake.propose({
+    principal: 'authenticated-owner', request: caller, allowModelTransmission: true
+  });
+  await started;
+  caller.approvedBrowserOrigins.push('https://unapproved.example');
+  caller.objective = 'A new objective not approved for model transfer';
+  finishModel();
+  const draft = await request;
+  assert.equal(transmitted.includes('unapproved.example'), false);
+  assert.equal(transmitted.includes('A new objective'), false);
+  const submitted = await intake.confirm({
+    principal: 'authenticated-owner', proposalId: draft.proposalId,
+    proposalDigest: draft.proposalDigest, reviewProof: 'independent-owner-review'
+  });
+  assert.equal(submitted.taskId, 'durable-queued-task');
+});
+
+test('C05 malformed task intake scope cannot invoke a getter or reserve model spend', async () => {
+  let getters = 0, reservations = 0, calls = 0;
+  const model = new BoundedModelGoalInference({
+    modelId: 'injected-model', maxOutputTokens: 256, maxCostMicros: 0, timeoutMs: 1500,
+    ledger: {
+      async reserve() { reservations++; return { reservationId: 'unexpected' }; },
+      async finalize() {}
+    },
+    generator: { async generate() { calls++; return { text: JSON.stringify(modelResponse) }; } }
+  });
+  const intake = new TrustedReviewedModelTaskIntake({
+    model, authority: {
+      async currentApprovedScope() { return scope; },
+      async verifyTrustedReview() { return true; },
+      async submitReviewedTask() { throw Error('no submit on malformed scope'); }
+    }
+  });
+  const getter = Object.defineProperty({
+    objective: scope.objective, approvedRoots: []
+  }, 'approvedBrowserOrigins', {
+    enumerable: true, get() { getters++; throw Error('not allowed'); }
+  });
+  const sparse: string[] = new Array(2);
+  sparse[1] = scope.approvedBrowserOrigins[0]!;
+  const symbolArray = [...scope.approvedBrowserOrigins] as string[] & Record<symbol, unknown>;
+  symbolArray[Symbol('hidden')] = 'write';
+  for (const request of [
+    getter,
+    { ...scope, approvedBrowserOrigins: sparse },
+    { ...scope, approvedBrowserOrigins: symbolArray },
+    { ...scope, ignoredPermission: true }
+  ]) {
+    await assert.rejects(intake.propose({
+      principal: 'authenticated-owner', request: request as typeof scope, allowModelTransmission: true
+    }), (error: any) => error?.code === 'TASK_MODEL_INTAKE_SCOPE_DENIED');
+  }
+  assert.equal(getters, 0);
+  assert.equal(reservations, 0);
+  assert.equal(calls, 0);
+});
