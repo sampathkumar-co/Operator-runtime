@@ -411,3 +411,45 @@ test('C05 local model composer remains disabled unless separately opted in', asy
   assert.equal(calls, 1, 'default opt-in may rank READY goals but must not compose checkpoints');
   assert.equal(state.durablePlan.revision, 1);
 });
+
+test('C05 local model never selects subgoals from partial, filtered or tool-calling envelopes', async () => {
+  const content = '{"index":0}';
+  const envelopes: Record<string, unknown>[] = [
+    { response: content, done: false },
+    { response: content, done: true, done_reason: 'length' },
+    { response: content, done: true, done_reason: 'content_filter' },
+    { response: content, done: true, done_reason: 'unload' },
+    { response: content, done: true, done_reason: null },
+    { response: content, done: true, error: 'service failed' },
+    { response: content, done: true, tool_calls: [{name: 'file.write'}] },
+    { response: content, done: true, function_call: {name: 'shell'} }
+  ];
+  for (const envelope of envelopes) {
+    const ctx = context();
+    let requests = 0;
+    const planner = new LocalModelAutonomousWorkflowPlanner({
+      model: 'local-finality-model', now: () => TIME,
+      fetchFn: (async () => {
+        requests++;
+        return new Response(JSON.stringify(envelope), { status: 200 });
+      }) as typeof fetch
+    });
+    await assert.rejects(() => planner.next(ctx), (error: any) =>
+      error?.code === 'TASK_MODEL_SUBGOAL_INVALID');
+    assert.equal(requests, 1, 'failed response cannot trigger a silent model retry');
+    assert.equal(ctx.task.execution!.plannerState.activeSubgoalId, undefined);
+  }
+});
+
+test('C05 complete model envelope still selects preauthorized ready subgoal', async () => {
+  const ctx = context();
+  const planner = new LocalModelAutonomousWorkflowPlanner({
+    model: 'local-finality-model', now: () => TIME,
+    fetchFn: (async () => new Response(JSON.stringify({
+      response: '{"index":1}', done: true, done_reason: 'stop'
+    }), { status: 200 })) as typeof fetch
+  });
+  const result = await planner.next(ctx);
+  assert.equal(result.type, 'step');
+  if (result.type === 'step') assert.equal(result.key, 'autonomous:2:observe');
+});
