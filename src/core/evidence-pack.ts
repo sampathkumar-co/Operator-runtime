@@ -68,7 +68,22 @@ export async function publishEvidencePack(
   privacy: ArtifactPrivacy = 'internal'
 ): Promise<{ pack: EvidencePack; artifact: ArtifactRecord }> {
   const pack = createEvidencePack(input);
-  for (const artifactId of pack.artifactIds) await store.get(artifactId);
+  // A content address only establishes the record's identity. It cannot
+  // authorize reusing evidence from another task, plan, principal, or device.
+  // Metadata-only get() checks immutable content-addressed record identity
+  // without materializing up to 64 MiB of unrelated artifact bytes.
+  const privacyRank: Record<ArtifactPrivacy, number> = { public: 0, internal: 1, sensitive: 2 };
+  for (const artifactId of pack.artifactIds) {
+    const record = await store.get(artifactId);
+    if (record.executionContextDigest !== pack.executionContextDigest) {
+      throw new OperatorError('EVIDENCE_PACK_CONTEXT_MISMATCH',
+        'Evidence Pack cannot attach an unbound artifact or evidence from a different execution context.');
+    }
+    if (privacyRank[record.privacy] > privacyRank[privacy]) {
+      throw new OperatorError('EVIDENCE_PACK_PRIVACY_DOWNGRADE',
+        'Evidence Pack privacy cannot be less restrictive than its referenced evidence.');
+    }
+  }
   const artifact = await store.put({
     bytes: JSON.stringify(pack, null, 2),
     kind: 'evidence-pack',
@@ -127,9 +142,18 @@ function normalizeRollbackStatus(value: unknown): EvidencePack['rollbackStatus']
 }
 
 function uniqueDigests(input: unknown, label: string): string[] {
-  if (!Array.isArray(input) || input.length > 5000) throw new OperatorError('EVIDENCE_PACK_INVALID', `${label} must be a bounded array.`);
-  const values = input.map((value) => String(value ?? '').toLowerCase());
-  if (values.some((value) => !/^[0-9a-f]{64}$/.test(value))) throw new OperatorError('EVIDENCE_PACK_INVALID', `${label} contains an invalid digest.`);
+  if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype ||
+      input.length > 5000 || Object.keys(input).length !== input.length) {
+    throw new OperatorError('EVIDENCE_PACK_INVALID', `${label} must be a dense bounded array.`);
+  }
+  const values: string[] = [];
+  for (let index = 0; index < input.length; index += 1) {
+    if (!Object.hasOwn(input, index) || typeof input[index] !== 'string' ||
+        !/^[0-9a-f]{64}$/i.test(input[index])) {
+      throw new OperatorError('EVIDENCE_PACK_INVALID', `${label} contains an invalid literal digest.`);
+    }
+    values.push(input[index].toLowerCase());
+  }
   return [...new Set(values)].sort();
 }
 
