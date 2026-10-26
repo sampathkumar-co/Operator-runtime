@@ -72,3 +72,26 @@ test('C04 rejects coerced, missing and overflowing screen geometry before input 
   assert.deepEqual(mapCoordinatePoint({ x: 10.25, y: 20.5 }, transform, 'fresh-frame'),
     { x: -479.5, y: 241 });
 });
+
+test('C04 transformed rectangle must keep its far corners within safe physical coordinates', () => {
+  const transform = {
+    from: 'capture-image' as const, to: 'native-screen' as const,
+    originX: 900_000_000, originY: 900_000_000,
+    scaleX: 2, scaleY: 2, generation: 'frame-a', provenance: 'trusted-capture'
+  };
+  // Every individual coordinate and dimension is finite and within 1e9,
+  // but the right or bottom extent can still exceed the permitted bound.
+  for (const bounds of [
+    { x: 1, y: 1, width: 100_000_000, height: 1 },
+    { x: 1, y: 1, width: 1, height: 100_000_000 }
+  ]) {
+    assert.throws(() => mapCoordinateBounds(bounds, transform, 'frame-a'),
+      (error: any) => error?.code === 'COORDINATE_TRANSFORM_INVALID');
+  }
+  assert.deepEqual(
+    mapCoordinateBounds({ x: 2, y: 3, width: 5, height: 7 }, {
+      ...transform, originX: -1920, originY: 50
+    }, 'frame-a'),
+    { x: -1916, y: 56, width: 10, height: 14 }
+  );
+});
