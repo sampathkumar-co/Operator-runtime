@@ -100,16 +100,56 @@ export async function publishEvidencePack(
   return { pack, artifact };
 }
 
-function normalizeClaims(input: unknown, artifactSet: Set<string>): EvidencePackClaim[] {
-  if (!Array.isArray(input) || input.length < 1 || input.length > 500) {
-    throw new OperatorError('EVIDENCE_PACK_INVALID', 'Evidence Pack requires 1-500 claims.');
+/**
+ * Proof-bearing lists must be exact JSON arrays. Array.map() skips holes;
+ * indexing inherited getters also executes untrusted code before validation.
+ * Snapshot only enumerable own data values, and reject extra/hidden fields.
+ */
+function inertList(input: unknown, min: number, max: number, label: string): unknown[] {
+  if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype ||
+      input.length < min || input.length > max ||
+      Reflect.ownKeys(input).length !== input.length + 1) {
+    throw new OperatorError('EVIDENCE_PACK_INVALID', label + ' must be an exact bounded array.');
   }
+  const values: unknown[] = [];
+  for (let i = 0; i < input.length; i += 1) {
+    const slot = Object.getOwnPropertyDescriptor(input, String(i));
+    if (!slot || !slot.enumerable || !('value' in slot)) {
+      throw new OperatorError('EVIDENCE_PACK_INVALID', label + ' must contain inert own data entries.');
+    }
+    values.push(slot.value);
+  }
+  return values;
+}
+
+function inertClaim(raw: unknown): Record<'id' | 'statement' | 'level' | 'artifactIds' | 'verifier', unknown> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) ||
+      (Object.getPrototypeOf(raw) !== Object.prototype && Object.getPrototypeOf(raw) !== null)) {
+    throw new OperatorError('EVIDENCE_PACK_INVALID', 'Evidence Pack claim must be an inert plain object.');
+  }
+  const allowed = ['id', 'statement', 'level', 'artifactIds', 'verifier'];
+  const mandatory = ['id', 'statement', 'level', 'artifactIds'];
+  const descriptors = Object.getOwnPropertyDescriptors(raw);
+  if (Reflect.ownKeys(raw).some(key => typeof key !== 'string' || !allowed.includes(key)) ||
+      mandatory.some(key => !Object.hasOwn(descriptors, key))) {
+    throw new OperatorError('EVIDENCE_PACK_INVALID', 'Evidence Pack claim has missing or unsupported fields.');
+  }
+  for (const descriptor of Object.values(descriptors)) {
+    if (!descriptor.enumerable || !('value' in descriptor)) {
+      throw new OperatorError('EVIDENCE_PACK_INVALID', 'Evidence Pack claim contains an executable or hidden property.');
+    }
+  }
+  return Object.fromEntries(Object.entries(descriptors).map(([key, desc]) => [key, desc.value])) as
+    Record<'id' | 'statement' | 'level' | 'artifactIds' | 'verifier', unknown>;
+}
+
+function normalizeClaims(input: unknown, artifactSet: Set<string>): EvidencePackClaim[] {
+  const items = inertList(input, 1, 500, 'Evidence Pack claims');
   const ids = new Set<string>();
-  return input.map((raw) => {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new OperatorError('EVIDENCE_PACK_INVALID', 'Evidence Pack claim must be an object.');
-    const value = raw as Record<string, unknown>;
+  return items.map((raw) => {
+    const value = inertClaim(raw);
     const id = boundedId(value.id, 'claim id');
-    if (ids.has(id)) throw new OperatorError('EVIDENCE_PACK_INVALID', `Duplicate claim id: ${id}`);
+    if (ids.has(id)) throw new OperatorError('EVIDENCE_PACK_INVALID', `Duplicate claim id: ${id}.`);
     ids.add(id);
     const statement = boundedText(value.statement, 8192, 'claim statement');
     const level = normalizeProofLevel(value.level);
@@ -142,25 +182,20 @@ function normalizeRollbackStatus(value: unknown): EvidencePack['rollbackStatus']
 }
 
 function uniqueDigests(input: unknown, label: string): string[] {
-  if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype ||
-      input.length > 5000 || Reflect.ownKeys(input).length !== input.length + 1) {
-    throw new OperatorError('EVIDENCE_PACK_INVALID', `${label} must be a dense bounded array.`);
-  }
+  const entries = inertList(input, 0, 5000, label);
   const values: string[] = [];
-  for (let index = 0; index < input.length; index += 1) {
-    if (!Object.hasOwn(input, index) || typeof input[index] !== 'string' ||
-        !/^[0-9a-f]{64}$/i.test(input[index])) {
+  for (const entry of entries) {
+    if (typeof entry !== 'string' || !/^[0-9a-f]{64}$/i.test(entry)) {
       throw new OperatorError('EVIDENCE_PACK_INVALID', `${label} contains an invalid literal digest.`);
     }
-    values.push(input[index].toLowerCase());
+    values.push(entry.toLowerCase());
   }
   return [...new Set(values)].sort();
 }
 
 function uniqueBoundedText(input: unknown, maxItems: number, maxBytes: number, label: string): string[] {
-  if (!Array.isArray(input) || input.length > maxItems) throw new OperatorError('EVIDENCE_PACK_INVALID', `${label} is invalid.`);
-  const values = input.map((value) => boundedText(value, maxBytes, label));
-  return [...new Set(values)];
+  const entries = inertList(input, 0, maxItems, label);
+  return [...new Set(entries.map(value => boundedText(value, maxBytes, label)))];
 }
 
 function boundedId(value: unknown, label: string): string {
