@@ -82,3 +82,47 @@ test('C04 native physical input results must confirm exact operation, dispatch a
       (error: any) => error?.code === 'INPUT_NATIVE_RESULT_INVALID');
   }
 });
+
+test('C04 response loss consumes capture lease before dispatch and refuses physical input replay', async () => {
+  const image = Buffer.alloc(128, 7).toString('base64');
+  let inputCalls = 0;
+  const provider = new WindowsUiaProvider({
+    platform: 'win32',
+    client: {
+      async call(method) {
+        if (method === 'input') {
+          inputCalls++;
+          throw new Error('simulated native response lost after input may have occurred');
+        }
+        return {
+          source: 'region', png_base64: image,
+          origin_x: 0, origin_y: 0, source_width: 100, source_height: 100,
+          returned_width: 100, returned_height: 100, scale_x: 1, scale_y: 1,
+          window_id: 'window-fixture'
+        };
+      },
+      close() {}
+    }
+  });
+  try {
+    const before = await provider.execute({
+      id: 'capture-for-response-loss', capability: 'visual.capture', risk: 'read',
+      input: { source: 'region', region: { x: 0, y: 0, width: 100, height: 100 } },
+      provenance: { kind: 'runtime' }
+    });
+    assert.equal(before.ok, true);
+    const output = before.output as { captureId: string; sha256: string };
+    const action = {
+      capability: 'input.operate', risk: 'external' as const,
+      provenance: { kind: 'runtime' as const },
+      input: { operation: 'click', captureId: output.captureId, expectedSha256: output.sha256, x: 5, y: 5 }
+    };
+    const first = await provider.execute({ ...action, id: 'first-attempt' });
+    assert.equal(first.ok, false);
+    assert.equal(first.error?.sideEffectState, 'uncertain');
+    const repeated = await provider.execute({ ...action, id: 'replay-attempt' });
+    assert.equal(repeated.ok, false);
+    assert.equal(repeated.error?.code, 'INPUT_CAPTURE_STALE');
+    assert.equal(inputCalls, 1, 'native input cannot be replayed with consumed capture lease');
+  } finally { await provider.close(); }
+});
