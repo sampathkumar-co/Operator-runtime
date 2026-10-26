@@ -52,6 +52,35 @@ function validInput(x) {
  * evaluator callbacks. Their self-attestation is not independent signed proof:
  * even 50+ entries never qualify physical or release acceptance.
  */
+// Fixture reset and independent oracle are caller-defined asynchronous
+// operations too. Their execution time must be bounded separately from
+// model/tool dispatch. A timeout or rejection quarantines the whole pair.
+// Abort is advisory: the caller must independently prove quiescence before any
+// retry, even if a misbehaving callback ignores its signal.
+async function boundedExternalPhase(name, deadlineMs, invoke) {
+  const controller = new AbortController();
+  let expired = false, timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      expired = true;
+      controller.abort();
+      reject(new Error('C01_LANE_C_EXTERNAL_PHASE_TIMEOUT'));
+    }, deadlineMs);
+  });
+  try {
+    const value = await Promise.race([
+      Promise.resolve().then(() => invoke(controller.signal)), timeout
+    ]);
+    if (expired || controller.signal.aborted) deny(name + '_TIMEOUT_UNKNOWN_EFFECT: phase did not quiesce.');
+    return value;
+  } catch {
+    deny(name + (expired ? '_TIMEOUT_UNKNOWN_EFFECT' : '_FAILED_UNKNOWN_EFFECT') +
+      ': independent reconciliation required before any second arm.');
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function runPairedLaneC(input) {
   if (!validInput(input)) deny('A source-pinned model, fixed cases and three trusted evaluator callbacks are required.');
   const unique = new Set();
@@ -78,9 +107,10 @@ export async function runPairedLaneC(input) {
       objective:c.objective, prompt:c.prompt
     });
     for (const arm of ordering) {
-      const initial = await input.resetFixture({
-        arm, scenarioId:c.id, scenarioVersion:c.version, seed:c.seed
-      });
+      const initial = await boundedExternalPhase('RESET', input.deadlineMs,
+        signal => input.resetFixture({
+          arm, scenarioId:c.id, scenarioVersion:c.version, seed:c.seed, signal
+        }));
       if (!initial || initial.initialStateDigest !== c.initialStateDigest ||
           !DIGEST.test(initial.initialStateDigest)) {
         deny('Fixture reset did not independently reestablish the identical pre-action state.');
@@ -129,11 +159,12 @@ export async function runPairedLaneC(input) {
       }
       // Runner claims never count as verification. The independent observer
       // may inspect external server or authorized machine post-state.
-      const oracle = await input.verifyIndependentOutcome({
-        arm, scenarioId:c.id, scenarioVersion:c.version,
-        seed:c.seed, expectedOracleDigest:c.independentOracleDigest,
-        executionEvidence:execution.evidence ?? null
-      });
+      const oracle = await boundedExternalPhase('ORACLE', input.deadlineMs,
+        signal => input.verifyIndependentOutcome({
+          arm, scenarioId:c.id, scenarioVersion:c.version,
+          seed:c.seed, expectedOracleDigest:c.independentOracleDigest,
+          executionEvidence:execution.evidence ?? null, signal
+        }));
       if (!oracle || typeof oracle !== 'object' ||
           typeof oracle.verifiedSuccess !== 'boolean' ||
           oracle.independentOracleDigest !== c.independentOracleDigest ||
