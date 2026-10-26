@@ -48,11 +48,31 @@ function optionalPositiveInteger(value: unknown, label: string): number | undefi
   return value;
 }
 
-export function normalizeExecutionContextIdentity(input: unknown): ExecutionContextIdentity {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    throw invalid('Execution context identity must be an object.');
+function snapshotInertIdentityFields(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      (Object.getPrototypeOf(input) !== Object.prototype &&
+       Object.getPrototypeOf(input) !== null)) {
+    throw invalid('Execution identity source must be an inert plain object.');
   }
-  const raw = input as Record<string, unknown>;
+  const descriptors = Object.getOwnPropertyDescriptors(input);
+  const raw: Record<string, unknown> = Object.create(null);
+  for (const key of Reflect.ownKeys(input)) {
+    if (typeof key !== 'string') {
+      throw invalid('Execution identity source may not contain symbol fields.');
+    }
+    const descriptor = descriptors[key];
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+      throw invalid('Execution identity source may contain only enumerable own data fields.');
+    }
+    raw[key] = descriptor.value;
+  }
+  return raw;
+}
+
+export function normalizeExecutionContextIdentity(input: unknown): ExecutionContextIdentity {
+  // Never inspect attacker-controlled principal, account, device or authority
+  // fields through getters; reuse exactly one inert snapshot for every read.
+  const raw = snapshotInertIdentityFields(input);
   if (raw.schemaVersion !== 1) throw invalid('Execution context identity schemaVersion must be 1.');
 
   const conversationId = optionalId(raw.conversationId, 'conversationId');
@@ -121,13 +141,16 @@ export function executionContextIdentityFrom(input: {
   fenceToken?: string;
   evaluationRunId?: string;
 }): ExecutionContextIdentity {
+  const supplied = snapshotInertIdentityFields(input);
+  const { intent, ...identity } = supplied;
+  const requestedIntent = intent === undefined ? undefined : snapshotInertIdentityFields(intent);
   return normalizeExecutionContextIdentity({
     schemaVersion: 1,
-    ...input,
-    ...(input.intent ? {
-      conversationId: input.intent.conversationId,
-      intentVersion: input.intent.intentVersion,
-      intentDigest: input.intent.digest
+    ...identity,
+    ...(requestedIntent ? {
+      conversationId: requestedIntent.conversationId,
+      intentVersion: requestedIntent.intentVersion,
+      intentDigest: requestedIntent.digest
     } : {})
   });
 }
