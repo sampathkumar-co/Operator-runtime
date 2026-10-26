@@ -65,8 +65,9 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
   readonly #now: () => number;
   readonly #ranker?: ReadySubgoalRanker;
   readonly #composer?: DynamicSubgoalComposer;
+  readonly #enableLoopbackComposition: boolean;
 
-  constructor(options: { model: string; fetchFn?: typeof fetch; now?: () => number; ranker?: ReadySubgoalRanker; composer?: DynamicSubgoalComposer }) {
+  constructor(options: { model: string; fetchFn?: typeof fetch; now?: () => number; ranker?: ReadySubgoalRanker; composer?: DynamicSubgoalComposer; enableLoopbackComposition?: boolean }) {
     if (typeof options.model !== 'string' ||
       !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(options.model)) {
       invalid('Local planner model identifier is invalid.');
@@ -77,6 +78,13 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
     if (options.composer !== undefined && typeof options.composer?.compose !== 'function') {
       invalid('Provider-neutral subgoal composer must implement the bounded composition contract.');
     }
+    if (options.enableLoopbackComposition !== undefined && typeof options.enableLoopbackComposition !== 'boolean') {
+      invalid('Local dynamic composition opt-in must be a boolean.');
+    }
+    if (options.enableLoopbackComposition && options.composer) {
+      invalid('Use either the explicit local composition opt-in or an injected provider, never both.');
+    }
+    this.#enableLoopbackComposition = options.enableLoopbackComposition === true;
     this.#ranker = options.ranker;
     this.#composer = options.composer;
     this.#model = options.model;
@@ -183,7 +191,7 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
   ): Promise<DurableTaskPlan> {
     // Opt-in dynamic composition must not affect the existing deterministic
     // or injected-ranker planner when no composer was configured.
-    if (!this.#composer) return plan;
+    if (!this.#composer && !this.#enableLoopbackComposition) return plan;
     if (typeof stateVersion !== 'string' || !/^[0-9a-f]{64}$/i.test(stateVersion)) {
       return plan;
     }

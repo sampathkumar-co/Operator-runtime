@@ -37,3 +37,14 @@ test('C05 explicit local opt-in keeps all existing planner families and replaces
     kind: knownKinds[0], root: '/owner-root', path: 'a.txt', content: 'safe'
   } as any)));
 });
+
+
+test('C05 dynamic checkpoint opt-in never activates the model by itself', () => {
+  invalid({ composeEnabled: '1' });
+  invalid({ enabled: '0', composeEnabled: '1' });
+  invalid({ enabled: '1', modelId: 'model:latest', composeEnabled: 'true' });
+  invalid({ enabled: '1', modelId: 'model:latest', composeEnabled: 'yes' });
+  assert.ok(optionalLocalModelPlanners({ enabled: '1', modelId: 'model:latest', composeEnabled: '1' }));
+  assert.deepEqual(optionalLocalModelPlanners({ enabled: '1', modelId: 'model:latest', composeEnabled: '1' })?.map(p => p.id),
+    optionalLocalModelPlanners({ enabled: '1', modelId: 'model:latest' })?.map(p => p.id));
+});
