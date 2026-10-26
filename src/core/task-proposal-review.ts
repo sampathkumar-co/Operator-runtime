@@ -29,8 +29,16 @@ function boundedText(value: unknown, max: number, label: string): string {
 }
 
 function canonicalScope(scope: unknown): string[] {
-  if (!Array.isArray(scope) || scope.length < 1 || scope.length > 32) {
-    reject('TASK_PROPOSAL_SCOPE_DENIED', 'A review requires a bounded explicitly authorized scope.');
+  if (!Array.isArray(scope) || Object.getPrototypeOf(scope) !== Array.prototype ||
+      scope.length < 1 || scope.length > 32 ||
+      Reflect.ownKeys(scope).length !== scope.length + 1) {
+    reject('TASK_PROPOSAL_SCOPE_DENIED', 'A review requires a dense inert authorized scope.');
+  }
+  for (let i = 0; i < scope.length; i += 1) {
+    const slot = Object.getOwnPropertyDescriptor(scope, String(i));
+    if (!slot || !slot.enumerable || !('value' in slot) || typeof slot.value !== 'string') {
+      reject('TASK_PROPOSAL_SCOPE_DENIED', 'Review scope contains a missing or executable entry.');
+    }
   }
   const result: string[] = [];
   for (const value of scope) {
@@ -43,7 +51,55 @@ function canonicalScope(scope: unknown): string[] {
   return [...new Set(result)].sort();
 }
 
+/**
+ * structuredClone reads accessor values, while JSON.stringify silently drops
+ * undefined object fields and fills array holes with null. Neither behavior
+ * belongs in a one-use approval digest. Inspect inert own descriptors first.
+ */
+function validateInertReviewJson(value: unknown): void {
+  const ancestors = new Set<object>();
+  let nodes = 0;
+  function walk(node: unknown, depth: number): void {
+    if (++nodes > 4096 || depth > 16) {
+      reject('TASK_PROPOSAL_REVIEW_INVALID', 'Review JSON exceeds bounded depth or nodes.');
+    }
+    if (node === null || typeof node === 'string' || typeof node === 'boolean') return;
+    if (typeof node === 'number' && Number.isFinite(node)) return;
+    if (typeof node !== 'object' || node === null || ancestors.has(node)) {
+      reject('TASK_PROPOSAL_REVIEW_INVALID', 'Review requires finite inert JSON data.');
+    }
+    const isArray = Array.isArray(node);
+    const proto = Object.getPrototypeOf(node);
+    if (isArray ? proto !== Array.prototype : proto !== Object.prototype && proto !== null) {
+      reject('TASK_PROPOSAL_REVIEW_INVALID', 'Review data must be plain objects and arrays.');
+    }
+    const own = Reflect.ownKeys(node);
+    if (own.some(key => typeof key !== 'string') ||
+        (isArray && (node.length > 4096 || own.length !== node.length + 1))) {
+      reject('TASK_PROPOSAL_REVIEW_INVALID', 'Review data contains unsupported fields or sparse arrays.');
+    }
+    ancestors.add(node);
+    for (const key of own) {
+      if (typeof key !== 'string') {
+        reject('TASK_PROPOSAL_REVIEW_INVALID', 'Review data cannot contain symbol fields.');
+      }
+      if (isArray && key === 'length') continue;
+      if (isArray && (!/^(?:0|[1-9][0-9]*)$/.test(key) || Number(key) >= node.length)) {
+        reject('TASK_PROPOSAL_REVIEW_INVALID', 'Review array contains an unknown property.');
+      }
+      const desc = Object.getOwnPropertyDescriptor(node, key);
+      if (!desc || !desc.enumerable || !('value' in desc)) {
+        reject('TASK_PROPOSAL_REVIEW_INVALID', 'Review data cannot contain executable or hidden fields.');
+      }
+      walk(desc.value, depth + 1);
+    }
+    ancestors.delete(node);
+  }
+  walk(value, 0);
+}
+
 function snapshotProposal(value: unknown): ReviewedTaskProposal {
+  validateInertReviewJson(value);
   let proposal: ReviewedTaskProposal;
   try { proposal = structuredClone(value) as ReviewedTaskProposal; }
   catch { return reject('TASK_PROPOSAL_REVIEW_INVALID', 'Review proposal cannot be safely copied.'); }

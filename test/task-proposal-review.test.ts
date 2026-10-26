@@ -98,3 +98,59 @@ test('C05 rejects malformed and oversized proposal data before storing a confirm
     (error: any) => error?.code === 'TASK_PROPOSAL_REVIEW_INVALID');
   }
 });
+
+test('C05 review refuses lossy or executable proof data before creating approval', () => {
+  const registry = new TaskProposalReviewRegistry();
+  let getters = 0;
+  const sparse: string[] = new Array(2);
+  sparse[1] = 'A falsely complete goal';
+  const getterCondition = ['A visible result'];
+  Object.defineProperty(getterCondition, '0', {
+    enumerable: true, get() { getters++; throw Error('never evaluate review getter'); }
+  });
+  const hiddenGoal = Object.defineProperty({ ...original.goal }, 'authorization', {
+    enumerable: false, value: 'full'
+  });
+  const nestedCycle: Record<string, unknown> = {};
+  nestedCycle.self = nestedCycle;
+  const wrongArrays = [
+    { ...original, successConditions: sparse },
+    { ...original, successConditions: getterCondition },
+    { ...original, successConditions: Object.assign(['Success'], { hidden: true }) }
+  ];
+  const unusualGoals = [
+    { ...original, goal: hiddenGoal },
+    { ...original, goal: { ...original.goal, [Symbol('permit')]: true } },
+    { ...original, goal: { ...original.goal, metadata: nestedCycle } },
+    { ...original, goal: { ...original.goal, bytes: Number.NaN } },
+    { ...original, goal: { ...original.goal, missing: undefined } },
+    { ...original, goal: { ...original.goal, timestamp: new Date() } }
+  ];
+  for (const proposal of [...wrongArrays, ...unusualGoals]) {
+    assert.throws(() => registry.issue({
+      principal: 'p1', objective: 'Inspect', proposal: proposal as ReviewedTaskProposal, scope
+    }), (error: any) => error?.code === 'TASK_PROPOSAL_REVIEW_INVALID');
+  }
+  assert.equal(getters, 0);
+  const valid = registry.issue({ principal: 'p1', objective: 'Inspect', proposal: original, scope });
+  assert.ok(valid.proposalId);
+});
+
+test('C05 review scope rejects getters, array holes and symbol fields without evaluating them', () => {
+  const registry = new TaskProposalReviewRegistry();
+  const sparse: string[] = new Array(2);
+  sparse[1] = scope[0]!;
+  let getters = 0;
+  const getterScope = [scope[0]!];
+  Object.defineProperty(getterScope, '0', {
+    enumerable: true, get() { getters++; throw Error('never call'); }
+  });
+  const symbolScope = [scope[0]!] as string[] & Record<symbol, unknown>;
+  symbolScope[Symbol('authority')] = 'all';
+  for (const attempted of [sparse, getterScope, symbolScope]) {
+    assert.throws(() => registry.issue({
+      principal: 'p1', objective: 'Inspect', proposal: original, scope: attempted
+    }), (error: any) => error?.code === 'TASK_PROPOSAL_SCOPE_DENIED');
+  }
+  assert.equal(getters, 0);
+});
