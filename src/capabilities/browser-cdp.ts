@@ -144,9 +144,13 @@ const MAX_CDP_DISCOVERY_BYTES = 1024 * 1024;
  * multiple pages are present, so incomplete discovery must fail closed.
  */
 export function normalizeCdpTargets(input: unknown): CdpTarget[] {
-  if (!Array.isArray(input) || input.length > MAX_TABS) {
+  if (!Array.isArray(input)) {
+    throw new OperatorError('CDP_DISCOVERY_INVALID',
+      'Browser target discovery must return an array of target objects.');
+  }
+  if (input.length > MAX_TABS) {
     throw new OperatorError('CDP_DISCOVERY_INCOMPLETE',
-      'Browser target inventory exceeds the supported bound or is malformed; choose a smaller dedicated browser session.');
+      'Browser target inventory exceeds the supported bound; choose a smaller dedicated browser session.');
   }
   const seen = new Set<string>();
   return input.map((value, index) => {
