@@ -153,7 +153,7 @@ export class DeveloperVerificationCoordinator {
         },
         now
       );
-      await this.#sessions.put(verifying);
+      await this.#sessions.put(verifying, current);
       return { run: await this.get(id), session: verifying };
     } finally {
       await lease.release();
@@ -279,7 +279,7 @@ export class DeveloperVerificationCoordinator {
         },
         now
       );
-      await this.#sessions.put(verifying);
+      await this.#sessions.put(verifying, session);
       return { run: await this.get(run.id), receipt, artifactId: artifact.id };
     } finally {
       await lease.release();
@@ -308,6 +308,13 @@ export class DeveloperVerificationCoordinator {
       }
 
       if (run.status === 'VERIFIED' && run.evidencePackArtifactId) {
+        // A run receipt may have committed before the separate session write
+        // failed or lost its ownership race. Never self-certify the overall
+        // outcome from only the verification-run store.
+        if (session.status !== 'COMPLETED' || !session.artifactIds.includes(run.evidencePackArtifactId)) {
+          throw new OperatorError('DEVELOPER_VERIFICATION_COMMIT_UNCERTAIN',
+            'Evidence run is verified but the owning session has no matching completed proof. Reconcile state before reporting success.');
+        }
         const packArtifact = await this.#artifacts.read(run.evidencePackArtifactId);
         const pack = JSON.parse(packArtifact.bytes.toString('utf8')) as EvidencePack;
         return {
@@ -342,7 +349,7 @@ export class DeveloperVerificationCoordinator {
           },
           now
         );
-        await this.#sessions.put(blocked);
+        await this.#sessions.put(blocked, session);
         return {
           verified: false,
           run,
@@ -398,7 +405,7 @@ export class DeveloperVerificationCoordinator {
         },
         now
       );
-      await this.#sessions.put(completed);
+      await this.#sessions.put(completed, session);
 
       return {
         verified: true,
