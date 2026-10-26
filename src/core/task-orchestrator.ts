@@ -1147,10 +1147,12 @@ export class TaskOrchestrator {
         return task;
       }
       await this.#recordLearning(task, result, 'failed', learningContext);
-      // A planner fallback must never outrank authoritative side-effect truth.
-      // Even a trusted plugin can request a new strategy, but it cannot
-      // reinterpret an uncertain dispatched write as safe to repeat.
-      if (risk !== 'read' && (latestRecord.sideEffectState ?? 'uncertain') === 'uncertain') {
+      // A no-progress fallback must never outrank authoritative side-effect
+      // truth. Other failure classes retain their existing observed-state
+      // recovery (TARGET_EXISTS, stale browser target, executor error) so this
+      // guard does not silently break safe independent reconciliation.
+      if (risk !== 'read' && (latestRecord.sideEffectState ?? 'uncertain') === 'uncertain' &&
+          /NO_PROGRESS/i.test(failureDecision.code)) {
         latestRecord.state = 'BLOCKED';
         setNodeState(task, latestNode.id, 'BLOCKED');
         task.state = 'BLOCKED';
