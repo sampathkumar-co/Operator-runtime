@@ -481,7 +481,8 @@ async function resetLocalDevice() {
 
 const optionalModelPlanners = optionalLocalModelPlanners({
   enabled: process.env.OPERATOR_LOCAL_SUBGOAL_MODEL_OPT_IN,
-  modelId: process.env.OPERATOR_LOCAL_SUBGOAL_MODEL_ID
+  modelId: process.env.OPERATOR_LOCAL_SUBGOAL_MODEL_ID,
+  composeEnabled: process.env.OPERATOR_LOCAL_SUBGOAL_DYNAMIC_COMPOSITION_OPT_IN
 });
 
 const taskOrchestrator = new TaskOrchestrator({
