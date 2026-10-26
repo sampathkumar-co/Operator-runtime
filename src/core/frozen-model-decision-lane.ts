@@ -43,6 +43,8 @@ export interface FrozenModelChoiceReport {
 const SHA = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
 const ID = /^[A-Za-z0-9._:-]{1,128}$/;
+// Distinguish a runner-fired timer from an error string authored by the model.
+const MODEL_DECISION_TIMEOUT = Symbol('MODEL_DECISION_TIMEOUT');
 function invalid(message: string): OperatorError {
   return new OperatorError('C01_FROZEN_MODEL_LANE_INVALID', message);
 }
@@ -142,12 +144,12 @@ export async function runFrozenModelDecisionLane(input: {
       proposed = await Promise.race([
         Promise.resolve().then(() => input.decide(observation, allowed, controller.signal)),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => { controller.abort(); reject(new Error('MODEL_TIMEOUT')); }, timeoutMs);
+          timer = setTimeout(() => { controller.abort(); reject(MODEL_DECISION_TIMEOUT); }, timeoutMs);
         })
       ]);
       if (typeof proposed !== 'string' || !choice.allowedActionIds.includes(proposed)) failed = 'schema';
     } catch (error) {
-      failed = error instanceof Error && error.message === 'MODEL_TIMEOUT' ? 'timing' : 'model';
+      failed = error === MODEL_DECISION_TIMEOUT ? 'timing' : 'model';
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       controller.abort();
