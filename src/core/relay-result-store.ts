@@ -16,6 +16,13 @@ const WAIT_FALLBACK_POLL_MS = 50;
 
 type JsonObject = Record<string, unknown>;
 
+// Bounded waiters share a single storage poll. 1000 waiting RPC calls must
+// not start 1000 full-ledger JSON parses or PostgreSQL namespace scans.
+type ResultWaiter = {
+  notify: (result: StoredRelayResult) => void;
+  fail: (error: unknown) => void;
+};
+
 export type StoredRelayResult = {
   seq: number;
   deliveryId: string;
@@ -37,8 +44,10 @@ export class RelayResultStore {
   #retentionMs: number;
   #shared?: ControlPlaneStore;
   #sharedNamespace: string;
-  #waiters = new Map<string, Set<(result: StoredRelayResult) => void>>();
+  #waiters = new Map<string, Set<ResultWaiter>>();
   #waiterCount = 0;
+  #pollTimer?: ReturnType<typeof setInterval>;
+  #pollInFlight = false;
 
   constructor(stateDir: string, options: { clock?: () => Date; retentionMs?: number; sharedStore?: ControlPlaneStore; sharedNamespace?: string } = {}) {
     this.#file = path.join(path.resolve(stateDir), 'relay-results.json');
@@ -117,39 +126,36 @@ export class RelayResultStore {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        clearInterval(poller);
         signal?.removeEventListener('abort', aborted);
         const listeners = this.#waiters.get(key);
-        if (listeners?.delete(notified)) this.#waiterCount--;
+        if (listeners?.delete(waiter)) this.#waiterCount--;
         if (listeners?.size === 0) this.#waiters.delete(key);
+        this.#stopPollingIfIdle();
         resolve(result?.deliveryId === deliveryId ? clone(result) : null);
       };
       const failed = (error: unknown) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        clearInterval(poller);
         signal?.removeEventListener('abort', aborted);
         const listeners = this.#waiters.get(key);
-        if (listeners?.delete(notified)) this.#waiterCount--;
+        if (listeners?.delete(waiter)) this.#waiterCount--;
         if (listeners?.size === 0) this.#waiters.delete(key);
+        this.#stopPollingIfIdle();
         reject(error);
       };
-      const notified = (result: StoredRelayResult) => finish(result);
+      const waiter: ResultWaiter = { notify: finish, fail: failed };
       const aborted = () => finish(null);
-      const listeners = this.#waiters.get(key) ?? new Set();
-      listeners.add(notified);
+      const listeners = this.#waiters.get(key) ?? new Set<ResultWaiter>();
+      listeners.add(waiter);
       this.#waiters.set(key, listeners);
       this.#waiterCount++;
       const timer = setTimeout(() => finish(null), timeoutMs);
-      const poller = setInterval(() => { void this.get(deviceId, seq).then((result) => { if (result) finish(result); }, failed); }, WAIT_FALLBACK_POLL_MS);
       timer.unref();
-      poller.unref();
       signal?.addEventListener('abort', aborted, { once: true });
-      // Close the pre-check/listener-registration race without waiting for the
-      // timeout when cancellation arrives between those two operations.
+      // Register before starting the shared poll to avoid missed writes.
       if (signal?.aborted) return aborted();
-      void this.get(deviceId, seq).then((result) => { if (result) finish(result); }, failed);
+      this.#startPolling();
     });
   }
 
@@ -269,7 +275,51 @@ export class RelayResultStore {
   }
 
   #notify(deviceId: string, seq: number, result: StoredRelayResult): void {
-    for (const listener of [...(this.#waiters.get(`${deviceId}:${seq}`) ?? [])]) listener(result);
+    for (const waiter of [...(this.#waiters.get(`${deviceId}:${seq}`) ?? [])]) waiter.notify(result);
+  }
+
+  #startPolling(): void {
+    if (!this.#pollTimer) {
+      this.#pollTimer = setInterval(() => { void this.#pollWaiters(); }, WAIT_FALLBACK_POLL_MS);
+      this.#pollTimer.unref();
+    }
+    // One immediate read closes the registration/read race. If a read is
+    // already in flight, the newly registered waiter joins the next tick.
+    void this.#pollWaiters();
+  }
+
+  #stopPollingIfIdle(): void {
+    if (this.#waiterCount !== 0 || !this.#pollTimer) return;
+    clearInterval(this.#pollTimer);
+    this.#pollTimer = undefined;
+  }
+
+  async #pollWaiters(): Promise<void> {
+    if (this.#pollInFlight || this.#waiterCount === 0) return;
+    this.#pollInFlight = true;
+    try {
+      // One validated durable snapshot serves every waiter, including writes
+      // from another process or shared-store host. Never cache this snapshot
+      // across polling cycles, and never notify from an uncommitted mutation.
+      const state = await this.#read();
+      const now = this.#clock().getTime();
+      for (const stream of state.streams) {
+        for (const result of stream.results) {
+          if (result.consumedAt || isExpired(result, now, this.#retentionMs)) continue;
+          if (this.#waiters.has(`${stream.deviceId}:${result.seq}`)) {
+            this.#notify(stream.deviceId, result.seq, result);
+          }
+        }
+      }
+    } catch (error) {
+      // Persisted corruption or a broken shared backend cannot silently turn
+      // into a timeout. Each waiter receives the read failure and cleans up.
+      for (const listeners of [...this.#waiters.values()]) {
+        for (const waiter of [...listeners]) waiter.fail(error);
+      }
+    } finally {
+      this.#pollInFlight = false;
+    }
   }
 
   async #readShared(): Promise<{
