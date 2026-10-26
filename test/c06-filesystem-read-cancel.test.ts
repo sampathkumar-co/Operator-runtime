@@ -61,8 +61,8 @@ test('C06 Stop during scoped filesystem read refuses a stale successful observat
 
 test('C06 recursive search refuses child directory replaced with a symlink after enumeration', async (t) => {
   if (process.platform === 'win32') return t.skip('native junction and path-lease race is separately Windows-certified');
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-c06-search-root-'));
-  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-c06-search-external-'));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'operator-c06-search-root-')));
+  const outside = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'operator-c06-search-external-')));
   t.after(async () => { await fs.rm(root, { recursive: true, force: true }); await fs.rm(outside, { recursive: true, force: true }); });
   const descend = path.join(root, 'descend');
   await fs.mkdir(descend);
@@ -92,8 +92,8 @@ test('C06 recursive search refuses child directory replaced with a symlink after
 
 test('C06 recursive search rejects file replaced with a symlink before stat', async (t) => {
   if (process.platform === 'win32') return t.skip('native Windows symlink privilege and path-lease race certified separately');
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-c06-search-file-root-'));
-  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-c06-search-file-external-'));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'operator-c06-search-file-root-')));
+  const outside = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'operator-c06-search-file-external-')));
   t.after(async () => { await fs.rm(root, { recursive: true, force: true }); await fs.rm(outside, { recursive: true, force: true }); });
   const target = path.join(root, 'find-item.txt');
   await fs.writeFile(target, 'normal');
@@ -121,7 +121,7 @@ test('C06 recursive search rejects file replaced with a symlink before stat', as
 
 test('C06 recursive search refuses a directory redirected to a different in-scope directory', async (t) => {
   if (process.platform === 'win32') return t.skip('Windows path-lease symlink/junction race tested by native matrix');
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-c06-search-inscope-'));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'operator-c06-search-inscope-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const descend = path.join(root, 'descend');
   const other = path.join(root, 'different');
