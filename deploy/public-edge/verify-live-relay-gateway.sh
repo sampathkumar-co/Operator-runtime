@@ -78,4 +78,17 @@ if [ "$authority_status" != 401 ]; then
   exit 1
 fi
 
+# The recovery-inspection endpoint must reach the authenticated relay
+# result service and reject anonymous requests. This unauthenticated 401
+# probe supplies no account/device identity and cannot inspect deliveries,
+# renew an owner session, replay or ACK any outstanding action.
+recovery_inspect_status=$(curl --silent --show-error --max-time 20 \
+  --output /dev/null --write-out '%{http_code}' \
+  -X POST -H 'Content-Type: application/json' -d '{}' \
+  'https://operator.splcart.in/v1/device-recovery/inspect')
+if [ "$recovery_inspect_status" != 401 ]; then
+  echo "Recovery inspection ingress mismatch: expected unauthenticated HTTP 401, got $recovery_inspect_status" >&2
+  exit 1
+fi
+
 echo "Public relay gateway verification passed; authenticated acceptance remains required."

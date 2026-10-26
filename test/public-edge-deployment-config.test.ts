@@ -179,3 +179,15 @@ test('shared-VPS profile preserves trusted ingress with a capability-free non-ro
   assert.match(caddy, /@pair_claim[\s\S]*max_size 16KB[\s\S]*reverse_proxy 127\.0\.0\.1:47200/);
   assert.doesNotMatch(caddy, /8790/);
 });
+
+test('C11 public gateway release verifier requires read-only anonymous recovery ingress denial', () => {
+  const script = text('deploy/public-edge/verify-live-relay-gateway.sh');
+  assert.match(script, /recovery_inspect_status=\$\(curl --silent --show-error --max-time 20/);
+  assert.match(script, /-X POST -H 'Content-Type: application\/json' -d '\{\}'/);
+  assert.match(script, /https:\/\/operator\.splcart\.in\/v1\/device-recovery\/inspect/);
+  assert.match(script, /if \[ "\$recovery_inspect_status" != 401 \]; then/);
+  assert.match(script, /exit 1\s+fi\s+echo "Public relay gateway verification passed;/);
+  assert.doesNotMatch(script, /Authorization:|Bearer |session\.token|recoveryToken|replayAuthorized=true|acknowledge=true/);
+  // The verifier must not use any actual account/device/session proof.
+  assert.doesNotMatch(script, /--header ['"]Authorization|--user |--cookie |token=/);
+});
