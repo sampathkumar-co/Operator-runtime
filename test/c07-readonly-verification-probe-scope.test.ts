@@ -135,3 +135,22 @@ test('C07 verification probe list cannot hide slots, getters, symbols or extra f
   assert.equal(getterCalls, 0);
   assert.equal(normalizeCanonicalVerificationRequest({ probes: [ordinary] }).probes.length, 1);
 });
+
+test('C07 nested probe data refuses custom array methods or prototype-dependent canonicalization', () => {
+  const valid = request('file.read').probes[0];
+  const altered = ['normal'];
+  Object.setPrototypeOf(altered, Object.assign(Object.create(Array.prototype), {
+    map() { throw Error('untrusted map must not be executed'); }
+  }));
+  const subclass = new (class ForeignArray extends Array<string> {
+    override map<U>(callbackfn: (value: string, index: number, array: string[]) => U): U[] {
+      throw Error('untrusted map must not be executed');
+    }
+  })();
+  subclass.push('normal');
+  for (const values of [altered, subclass]) {
+    assert.throws(() => normalizeCanonicalVerificationRequest({
+      probes: [{ ...valid, input: { values } }]
+    }), (error: any) => error?.code === 'CANONICAL_VERIFICATION_INVALID');
+  }
+});
