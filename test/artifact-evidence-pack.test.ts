@@ -222,6 +222,14 @@ test('C07 proof identifiers must be dense literal digests and never execute coer
     assert.throws(() => createEvidencePack({ ...base, artifactIds: artifacts as any }),
       (err: any) => err?.code === 'EVIDENCE_PACK_INVALID');
   }
+  for (const malicious of [
+    { ...base, claims: [{ ...base.claims[0], id: forged }] },
+    { ...base, now: forged },
+    { ...base, artifactIds: Object.defineProperty([digest], 'secret', { value: 'hidden' }) }
+  ]) {
+    assert.throws(() => createEvidencePack(malicious as any),
+      (err: any) => err?.code === 'EVIDENCE_PACK_INVALID');
+  }
   assert.equal(conversions, 0);
   const ordinary = createEvidencePack(base);
   assert.deepEqual(ordinary.artifactIds, ['a'.repeat(64)]);
