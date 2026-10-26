@@ -179,7 +179,10 @@ def observed_candidates(observation: dict[str,Any], *, limit:int=125) -> list[di
         value = strings[i]
         return value if type(value) is str and len(value) <= 1024 else ""
     documents = snapshot.get("documents") or []
-    if type(documents) is not list or len(documents) > 20:
+    # CSS ancestry here is document-local. A frame-qualified target cannot be
+    # inferred from an anonymous multi-document snapshot; fail closed until
+    # the real provider attaches an observed frame identity to each selector.
+    if type(documents) is not list or len(documents) != 1:
         return result
     for doc in documents:
         if type(doc) is not dict: continue
