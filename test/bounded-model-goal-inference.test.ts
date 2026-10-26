@@ -179,8 +179,8 @@ test('C05 in-flight caller scope mutation cannot enlarge post-response model aut
     approvedBrowserOrigins: [...scope.approvedBrowserOrigins]
   };
   const h = harness(async ({ prompt }) => {
-    assert.match(prompt, /allowed\\.example/);
-    assert.doesNotMatch(prompt, /unapproved\\.example/);
+    assert.equal(prompt.includes('https://allowed.example'), true);
+    assert.equal(prompt.includes('unapproved.example'), false);
     // The original caller object changes after durable reservation and prompt
     // construction, but this cannot authorize a different returned goal.
     original.approvedBrowserOrigins.push('https://unapproved.example');
