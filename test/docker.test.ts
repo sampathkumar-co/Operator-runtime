@@ -308,3 +308,35 @@ test('C06 duplicate or malformed Docker Compose IDs cannot make a partial projec
   assert.equal(malformed.ok, false);
   assert.equal(malformed.error?.code, 'DOCKER_PROJECT_INVENTORY_INVALID');
 });
+
+test('C06 distinct Compose project names sharing an authorized directory cannot be managed together', async (t) => {
+  const projectRoot = await tempDir(t, 'operator-docker-ambiguous-compose-root-');
+  const first = container(projectRoot);
+  const second: FakeContainer = {
+    ...first, id: 'b'.repeat(64), project: 'different-project',
+    service: 'web', name: 'other-web-1'
+  };
+  const fake = await makeFakeDocker(t, {
+    host: 'unix:///var/run/docker.sock', version: '27.5.1',
+    containers: [first, second]
+  });
+  const provider = new DockerProvider({
+    allowedRoots: [projectRoot], dockerExecutable: fake.executable, dockerArgsPrefix: fake.prefix
+  });
+  const inspect = await provider.execute({
+    id: 'ambiguous-root-inspect', capability: 'docker.inspect', risk: 'read',
+    input: { path: projectRoot }, provenance: { kind: 'runtime' }
+  });
+  assert.equal(inspect.ok, false);
+  assert.equal(inspect.error?.code, 'DOCKER_PROJECT_AMBIGUOUS');
+  const manage = await provider.execute({
+    id: 'ambiguous-root-manage', capability: 'docker.manage', risk: 'system',
+    input: { path: projectRoot, services: ['web'], operation: 'stop',
+      expectedCurrentFingerprint: '0'.repeat(64) }, provenance: { kind: 'runtime' }
+  });
+  assert.equal(manage.ok, false);
+  assert.equal(manage.error?.code, 'DOCKER_PROJECT_AMBIGUOUS');
+  const calls = await readCalls(fake.logPath);
+  assert.equal(calls.some((call) => call.argv.includes('stop')), false,
+    'no container in either Compose project may be touched');
+});
