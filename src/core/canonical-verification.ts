@@ -59,8 +59,9 @@ function normalizedProbeJson(value: unknown): Record<string, unknown> {
       throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input contains a cycle.');
     }
     const proto = Object.getPrototypeOf(node);
-    if (!Array.isArray(node) && proto !== Object.prototype && proto !== null) {
-      throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input must contain plain objects.');
+    if (Array.isArray(node) ? proto !== Array.prototype :
+        proto !== Object.prototype && proto !== null) {
+      throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input must contain plain JSON objects and arrays.');
     }
     if (Object.getOwnPropertySymbols(node).length) {
       throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input cannot contain symbol fields.');
