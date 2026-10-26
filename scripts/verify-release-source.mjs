@@ -76,13 +76,43 @@ async function githubJson(apiPath, token) {
   return response.json();
 }
 
+/**
+ * A busy main commit can have more than GitHub's first 100 workflow runs.
+ * Query only source-matched pages, refuse malformed/duplicated pagination,
+ * and bound traversal to ten pages. This is evidence discovery, not release
+ * authorization; each required workflow is still validated separately.
+ */
+export async function fetchReleaseWorkflowRuns({ repository, sha, token, getJson = githubJson }) {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) fail('Invalid GITHUB_REPOSITORY.');
+  if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/i.test(sha)) fail('Release source SHA must be a full 40-character commit SHA.');
+  const rows = [];
+  const ids = new Set();
+  for (let page = 1; page <= 10; page++) {
+    const payload = await getJson(
+      `/repos/${repository}/actions/runs?head_sha=${encodeURIComponent(sha)}&branch=main&per_page=100&page=${page}`,
+      token
+    );
+    const slice = payload?.workflow_runs;
+    if (!Array.isArray(slice) || slice.length > 100) fail('Release source workflow page is malformed.');
+    for (const run of slice) {
+      if (!run || !Number.isSafeInteger(run.id) || run.id <= 0 || ids.has(run.id)) {
+        fail('Release source workflow pages contain invalid or duplicated run identities.');
+      }
+      ids.add(run.id);
+      rows.push(run);
+    }
+    if (slice.length < 100) return rows;
+  }
+  fail('Release source workflow run evidence exceeded the bounded pagination window.');
+}
+
 export async function verifyReleaseSource({ repository, sha, token }) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(repository ?? ''))) fail('Invalid GITHUB_REPOSITORY.');
   if (!String(token ?? '').trim()) fail('GITHUB_TOKEN is required for the release-source gate.');
   const encodedSha = encodeURIComponent(String(sha));
   const pullRequests = await githubJson(`/repos/${repository}/commits/${encodedSha}/pulls`, token);
-  const runsPayload = await githubJson(`/repos/${repository}/actions/runs?head_sha=${encodedSha}&branch=main&per_page=100`, token);
-  const evidence = validateReleaseSourceEvidence({ sha, pullRequests, workflowRuns: runsPayload.workflow_runs });
+  const workflowRuns = await fetchReleaseWorkflowRuns({ repository, sha, token });
+  const evidence = validateReleaseSourceEvidence({ sha, pullRequests, workflowRuns });
   console.log(`operator-release-source:PASS sha=${evidence.sha} pr=${evidence.pullRequestNumbers.join(',')} runs=${JSON.stringify(evidence.workflowRunIds)}`);
   return evidence;
 }
