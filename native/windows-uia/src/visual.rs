@@ -391,8 +391,12 @@ pub fn operate(params: InputParams) -> Result<serde_json::Value, String> {
         "drag" => {
             move_pointer(params.x.expect("validated"), params.y.expect("validated"))?;
             send_mouse(MOUSEEVENTF_LEFTDOWN, 0, 0, 0)?;
-            move_pointer(params.to_x.expect("validated"), params.to_y.expect("validated"))?;
-            send_mouse(MOUSEEVENTF_LEFTUP, 0, 0, 0)?;
+            // Never leave a held button just because movement fails after
+            // button-down. A best-effort release is attempted even on error.
+            finish_pointer_gesture(
+                || move_pointer(params.to_x.expect("validated"), params.to_y.expect("validated")),
+                || send_mouse(MOUSEEVENTF_LEFTUP, 0, 0, 0),
+            )?;
         }
         "scroll" => {
             move_pointer(params.x.expect("validated"), params.y.expect("validated"))?;
@@ -739,9 +743,26 @@ fn move_pointer(x: i32, y: i32) -> Result<(), String> {
     send_mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, dx, dy, 0)
 }
 
+/// Once a button-down has been sent, always attempt release. Failure to
+/// confirm release must be reported as an uncertain native input outcome.
+fn finish_pointer_gesture<F, G>(action: F, release: G) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String>,
+    G: FnOnce() -> Result<(), String>,
+{
+    let action_result = action();
+    let release_result = release();
+    match (action_result, release_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(_), Err(_)) => Err("pointer gesture failed and mouse release could not be confirmed".into()),
+    }
+}
+
 fn click_once() -> Result<(), String> {
     send_mouse(MOUSEEVENTF_LEFTDOWN, 0, 0, 0)?;
-    send_mouse(MOUSEEVENTF_LEFTUP, 0, 0, 0)
+    finish_pointer_gesture(|| Ok(()), || send_mouse(MOUSEEVENTF_LEFTUP, 0, 0, 0))
 }
 
 fn send_mouse(flags: u32, dx: i32, dy: i32, data: u32) -> Result<(), String> {
@@ -845,7 +866,8 @@ fn virtual_key(name: &str) -> Result<u16, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64_encode, crc32, encode_png, fit_dimensions, virtual_key};
+    use super::{base64_encode, crc32, encode_png, fit_dimensions, finish_pointer_gesture, virtual_key};
+    use std::cell::RefCell;
 
     #[test]
     fn image_resize_preserves_aspect_ratio_and_bounds() {
@@ -867,6 +889,31 @@ mod tests {
     fn crc_and_base64_match_known_vectors() {
         assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
         assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+    }
+
+    #[test]
+    fn failed_drag_move_still_attempts_button_release() {
+        let events = RefCell::new(Vec::new());
+        let result = finish_pointer_gesture(
+            || { events.borrow_mut().push("move"); Err("move failed".into()) },
+            || { events.borrow_mut().push("mouse-up"); Ok(()) },
+        );
+        assert_eq!(result.unwrap_err(), "move failed");
+        assert_eq!(*events.borrow(), vec!["move", "mouse-up"]);
+    }
+
+    #[test]
+    fn failed_drag_and_release_never_report_success() {
+        let result = finish_pointer_gesture(
+            || Err("move failed".into()),
+            || Err("release failed".into()),
+        );
+        assert!(result.unwrap_err().contains("release could not be confirmed"));
+    }
+
+    #[test]
+    fn successful_pointer_gesture_confirms_release() {
+        assert!(finish_pointer_gesture(|| Ok(()), || Ok(())).is_ok());
     }
 
     #[test]
