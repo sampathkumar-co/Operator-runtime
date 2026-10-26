@@ -173,7 +173,7 @@ test('C09 rejects shifted human interventions and increased measured model spend
     baseline: make(100),
     candidate: make(80, { sourceCommit: '9'.repeat(40), records: [sample(80, { costMicros: 21 })] })
   });
-  assert.deepEqual(extraSpend.regressionDiagnostics.reasons, ['COST_INCREASE']);
+  assert.deepEqual(extraSpend.regressionDiagnostics.reasons, ['COST_INCREASE', 'MATCHED_JOURNEY_COST_INCREASE']);
   assert.equal(extraSpend.observedCandidateNotWorse, false);
 });
 
