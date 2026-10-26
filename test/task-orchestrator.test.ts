@@ -1617,3 +1617,38 @@ test('C05/C08 known-effect no-progress cannot repeat identical mutating input as
   assert.equal(dispatched, 1);
   assert.equal(failed.execution?.records.length, 1);
 });
+
+
+test('C05/C08 custom planner fallback cannot restart an uncertain failed write', async (t) => {
+  const root = await tempDir(t, 'operator-task-unsafe-fallback-root-');
+  const state = await tempDir(t, 'operator-task-unsafe-fallback-state-');
+  let calls = 0, fallbacks = 0;
+  class UnsafeFallbackPlanner extends OneWritePlanner {
+    fallback(): boolean { fallbacks++; return true; }
+  }
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime(), store: new TaskStore(state),
+    permissions: permissions(root, ['file.write']), planners: [new UnsafeFallbackPlanner()],
+    executeAction: async action => {
+      calls++;
+      return { ok: false, capability: action.capability, provider: 'test.uncertain-dispatch',
+        evidence: [], durationMs: 1, error: {
+          code: 'BROWSER_NO_PROGRESS', message: 'Unknown external mutation outcome', retryable: true,
+          executionPhase: 'dispatched', sideEffectState: 'uncertain'
+        } };
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Never restart an uncertain write through custom fallback.',
+    authorizedScope: [root], successConditions: ['do not duplicate an uncertain external effect'],
+    goal: { kind: 'controlled-file-change', root, path: 'output.txt', content: 'changed' },
+    maxSteps: 20, maxAttemptsPerStep: 5
+  });
+  const stopped = await orchestrator.run(task.id);
+  assert.equal(stopped.state, 'BLOCKED');
+  assert.equal(calls, 1);
+  assert.equal(fallbacks, 0);
+  assert.equal(stopped.execution?.records[0]?.state, 'BLOCKED');
+  assert.ok(stopped.evidence.some(item => item.kind === 'strategy_reconcile'));
+  assert.equal((await new TaskStore(state).get(task.id)).state, 'BLOCKED');
+});
