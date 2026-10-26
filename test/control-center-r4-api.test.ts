@@ -9,6 +9,7 @@ import { TaskStore } from '../src/core/task-store.ts';
 import { ApprovalStore } from '../apps/local-agent/src/approval-store.ts';
 import { createRuntime } from '../apps/local-agent/src/runtime-factory.ts';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
+import { PRODUCT_VERSION } from '../src/core/product-identity.ts';
 
 test('R4 Control Center APIs project authenticated runtime truth without leaking authority secrets', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-r4-root-'));
@@ -57,6 +58,9 @@ test('R4 Control Center APIs project authenticated runtime truth without leaking
     },
     getRuntimeStatus: () => ({
       relay: { state: 'CONNECTED', configured: true, required: true, continuity: 'automatic' }
+    }),
+    getDoctorObservation: () => ({
+      passed: true, observedAt: new Date().toISOString(), productVersion: PRODUCT_VERSION
     })
   });
   t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
@@ -95,6 +99,8 @@ test('R4 Control Center APIs project authenticated runtime truth without leaking
   assert.equal(onboardingBody.model.nextStep, 'READ_PROBE');
   assert.equal(onboardingBody.model.steps.find((step: any) => step.id === 'APPROVAL_PROBE').status, 'BLOCKED');
   assert.equal(onboardingBody.evidence.configuredRootCount, 1);
+  assert.equal(onboardingBody.evidence.doctorHealthy, 'PASS');
+  assert.equal(onboardingBody.evidence.doctorEvidenceSource, 'TRUSTED_DOCTOR_PROBE');
 
   const diagnosticsResponse = await fetch(base + '/v1/control-center/diagnostics', { headers });
   assert.equal(diagnosticsResponse.status, 200);
