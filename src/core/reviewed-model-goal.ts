@@ -95,9 +95,13 @@ export class ReviewedModelGoalBridge {
         const current = input.currentApprovedScopeFor(proposal);
         if (!current) return null;
         try {
-          const validated = validateModelGoalProposal(proposal, current);
+          // Confirmation must bind validation and the one-use receipt to the
+          // same exact permission snapshot. Do not read caller-owned getters
+          // or arrays again between checking and constructing authority.
+          const currentSnapshot = snapshotReviewScope(current);
+          const validated = validateModelGoalProposal(proposal, currentSnapshot);
           if (JSON.stringify(validated) !== JSON.stringify(proposal)) return null;
-          return scopeFor(current);
+          return scopeFor(currentSnapshot);
         } catch {
           // An approved root/origin revoked or a goal transformed by a different
           // configuration invalidates this one-use review without dispatch.
