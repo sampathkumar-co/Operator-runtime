@@ -309,8 +309,8 @@ test('C06 truncated extension inventory fails instead of parsing partial extensi
   const fake = await makeFakeCode(t);
   await fs.writeFile(fake.prefix[0]!, [
     "if (process.argv.includes('--list-extensions')) {",
-    " process.stdout.write('ms-vscode.ext@1.0.0\\n'.repeat(45000));",
-    " process.exit(0);",
+    " process.stdout.write('ms-vscode.ext@1.0.0\\n'.repeat(45000), () => process.exit(0));",
+    " return;",
     "}",
     "process.stdout.write('1.106.0\\n');"
   ].join('\n'));
