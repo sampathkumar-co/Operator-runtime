@@ -1181,8 +1181,10 @@ export class TaskOrchestrator {
       if (failureDecision.strategy === 'replan') {
         // A no-progress observation after a potentially dispatched mutation does
         // NOT prove the effect was absent. Replanning cannot be a backdoor for
-        // replaying the same side effect under a fresh action identity.
-        if (!retrySafe) {
+        // replaying an uncertain side effect under a fresh action identity.
+        // A *known* effect may still be followed by a different bounded
+        // recovery action under the existing independent policy checks.
+        if (!retrySafe && (latestRecord.sideEffectState ?? 'uncertain') === 'uncertain') {
           latestRecord.state = 'BLOCKED';
           setNodeState(task, latestNode.id, 'BLOCKED');
           task.state = 'BLOCKED';
