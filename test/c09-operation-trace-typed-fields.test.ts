@@ -36,3 +36,16 @@ test('C09 forged type-coerced terminal events cannot produce a verified SLO or l
   assert.throws(()=>summarizeOperationSlo([request,dispatch,verify,
     {...terminal,durationMs:'200' as any}]),(error:any)=>error?.code==='OPERATION_TRACE_INVALID');
 });
+
+test('C09 normalized audit attributes retain literal prototype-named evidence fields', () => {
+  const parsed = JSON.parse('{"__proto__":"must-persist","constructor":"source-tag","ordinary":2}');
+  const normalized = normalizeTraceEvent({ ...valid(), attributes: parsed });
+  assert.equal(Object.getPrototypeOf(normalized.attributes), Object.prototype);
+  assert.equal(Object.hasOwn(normalized.attributes, '__proto__'), true);
+  assert.equal(Object.hasOwn(normalized.attributes, 'constructor'), true);
+  assert.equal(normalized.attributes['__proto__'], 'must-persist');
+  assert.equal(normalized.attributes['constructor'], 'source-tag');
+  assert.equal(normalized.attributes.ordinary, 2);
+  assert.match(JSON.stringify(normalized), /"__proto__":"must-persist"/);
+  assert.deepEqual(normalizeTraceEvent(normalized), normalized);
+});
