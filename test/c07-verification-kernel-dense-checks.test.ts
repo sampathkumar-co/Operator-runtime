@@ -69,3 +69,24 @@ test('C07 evidence digests must be literal dense arrays without executable slots
   }
   assert.equal(getterCalls, 0);
 });
+
+test('C07 executable verification request envelopes cannot replace checks or contract', () => {
+  const kernel = new VerificationKernel();
+  let invoked = 0;
+  const normal = base();
+  for (const forged of [
+    Object.defineProperty({ ...normal }, 'checks', {
+      enumerable: true, get() { invoked++; return normal.checks; }
+    }),
+    Object.defineProperty({ ...normal }, 'contract', {
+      enumerable: true, get() { invoked++; return normal.contract; }
+    }),
+    Object.assign({ ...normal }, { unexpectedApproval: true }),
+    Object.assign(Object.create({ role: 'administrator' }), normal),
+    Object.defineProperty({ ...normal }, Symbol('skip'), { value: true })
+  ]) {
+    assert.throws(() => kernel.verify(forged as any),
+      (error: any) => error?.code === 'VERIFICATION_INPUT_INVALID');
+  }
+  assert.equal(invoked, 0);
+});
