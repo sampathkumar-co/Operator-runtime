@@ -59,20 +59,28 @@ export function normalizeCoordinateTransform(input: CoordinateTransform): Coordi
 export function mapCoordinatePoint(point: CoordinatePoint, transformInput: CoordinateTransform, expectedGeneration?: string): CoordinatePoint {
   const transform = normalizeCoordinateTransform(transformInput);
   assertCoordinateGeneration(transform, expectedGeneration);
+  if (!point || typeof point !== 'object' || Array.isArray(point)) {
+    throw new OperatorError('COORDINATE_TRANSFORM_INVALID', 'Point must be an exact coordinate object.');
+  }
+  const x = finite(point.x, 'point.x');
+  const y = finite(point.y, 'point.y');
   return {
-    x: transform.originX + finite(point.x, 'point.x') * transform.scaleX,
-    y: transform.originY + finite(point.y, 'point.y') * transform.scaleY
+    x: finite(transform.originX + x * transform.scaleX, 'mapped point.x'),
+    y: finite(transform.originY + y * transform.scaleY, 'mapped point.y')
   };
 }
 
 export function mapCoordinateBounds(bounds: CoordinateBounds, transformInput: CoordinateTransform, expectedGeneration?: string): CoordinateBounds {
   const transform = normalizeCoordinateTransform(transformInput);
   assertCoordinateGeneration(transform, expectedGeneration);
+  if (!bounds || typeof bounds !== 'object' || Array.isArray(bounds)) {
+    throw new OperatorError('COORDINATE_TRANSFORM_INVALID', 'Bounds must be an exact rectangle object.');
+  }
   const point = mapCoordinatePoint(bounds, transform);
   return {
     ...point,
-    width: positive(bounds.width, 'bounds.width') * transform.scaleX,
-    height: positive(bounds.height, 'bounds.height') * transform.scaleY
+    width: positive(positive(bounds.width, 'bounds.width') * transform.scaleX, 'mapped bounds.width'),
+    height: positive(positive(bounds.height, 'bounds.height') * transform.scaleY, 'mapped bounds.height')
   };
 }
 
@@ -104,9 +112,12 @@ export function assertCoordinateGeneration(transform: CoordinateTransform, expec
 }
 
 function finite(input: unknown, label: string): number {
-  const value = Number(input);
-  if (!Number.isFinite(value) || Math.abs(value) > 1_000_000_000) throw new OperatorError('COORDINATE_TRANSFORM_INVALID', `${label} is invalid.`);
-  return value;
+  // Explicit numeric geometry only. Number(null), Number([]) and Number(true)
+  // silently coerce to valid pixels; untrusted UI/vision values must not do so.
+  if (typeof input !== 'number' || !Number.isFinite(input) || Math.abs(input) > 1_000_000_000) {
+    throw new OperatorError('COORDINATE_TRANSFORM_INVALID', `${label} is invalid.`);
+  }
+  return input;
 }
 
 function positive(input: unknown, label: string): number {
