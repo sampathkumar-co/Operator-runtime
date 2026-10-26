@@ -125,3 +125,34 @@ test('postgres normalized state keeps query metadata but never persists row valu
   assert.deepEqual(observation.importantState.columns, ['id', 'note']);
   assert.doesNotMatch(JSON.stringify(observation), /DB_SECRET_ROW_VALUE_5519/);
 });
+
+
+test('C07 nonfinite and null provider scalars never hash as interchangeable verified state', () => {
+  const target = action('computer.inspect', {});
+  const invalid = normalizeMachineObservation(target, result('computer.inspect', 'probe', {
+    count: Number.NaN, size: Infinity, postcondition: { verified: true, count: -Infinity }
+  }));
+  const explicitNull = normalizeMachineObservation(target, result('computer.inspect', 'probe', {
+    count: null, size: null, postcondition: { verified: true, count: null }
+  }));
+  assert.equal(Object.hasOwn(invalid.importantState, 'count'), false);
+  assert.equal(Object.hasOwn(invalid.importantState, 'size'), false);
+  assert.deepEqual(invalid.importantState.postcondition, { verified: true });
+  assert.equal(explicitNull.importantState.count, null);
+  assert.deepEqual(explicitNull.importantState.postcondition, { verified: true, count: null });
+  assert.notEqual(invalid.stateVersion, explicitNull.stateVersion);
+});
+
+test('C04 UIA durable process identity requires a literal numeric process ID', () => {
+  const request = action('app.inspect', { selector: { name: 'Save' } });
+  for (const processId of ['1500', true, [1500], null, Number.NaN]) {
+    const observation = normalizeMachineObservation(request, result('app.inspect', 'windows.uia', {
+      elements: [{ name: 'Save', processId }]
+    }));
+    assert.equal(Object.hasOwn((observation.importantState.uiaElements as any[])[0], 'processId'), false);
+  }
+  const exact = normalizeMachineObservation(request, result('app.inspect', 'windows.uia', {
+    elements: [{ name: 'Save', processId: 1500 }]
+  }));
+  assert.equal((exact.importantState.uiaElements as any[])[0]?.processId, 1500);
+});

@@ -7,6 +7,55 @@ export type TaskStateAssertion = {
   value?: unknown;
 };
 
+/**
+ * Assertion values become proof bytes. Reject JavaScript-only data BEFORE
+ * canonical JSON encoding: NaN/Infinity turn into null, sparse arrays become
+ * null-filled arrays, and undefined/function-valued object properties vanish.
+ * These collisions could otherwise let a malformed expectation match a
+ * different observed machine value during independent verification.
+ */
+function normalizeAssertionValue(value: unknown, label: string): unknown {
+  let visitedNodes = 0;
+  const ancestors = new Set<object>();
+  const fail = (): never => {
+    throw new OperatorError('TASK_GOAL_INVALID', `${label} must be bounded inert JSON data.`);
+  };
+  function inspect(node: unknown, depth: number): void {
+    if (++visitedNodes > 4096 || depth > 16) fail();
+    if (node === null || typeof node === 'boolean' || typeof node === 'string') return;
+    if (typeof node === 'number' && Number.isFinite(node)) return;
+    if (node === null || typeof node !== 'object') return fail();
+    if (ancestors.has(node)) return fail();
+    const array = Array.isArray(node);
+    const prototype = Object.getPrototypeOf(node);
+    if (!array && prototype !== Object.prototype && prototype !== null) fail();
+    const keys = Reflect.ownKeys(node);
+    if (keys.length > 4097 || keys.some(key => typeof key !== 'string')) fail();
+    if (array) {
+      if ((node as unknown[]).length > 4096) fail();
+      for (let i = 0; i < (node as unknown[]).length; i += 1) {
+        if (!Object.hasOwn(node, i)) fail();
+      }
+    }
+    ancestors.add(node);
+    for (const key of keys) {
+      if (array && key === 'length') continue;
+      if (array && (!/^(?:0|[1-9][0-9]*)$/.test(key as string) ||
+          Number(key) >= (node as unknown[]).length)) fail();
+      const descriptor = Object.getOwnPropertyDescriptor(node, key);
+      if (!descriptor || !('value' in descriptor) || !descriptor.enumerable) return fail();
+      inspect(descriptor.value, depth + 1);
+    }
+    ancestors.delete(node);
+  }
+  inspect(value, 0);
+  const json = canonicalJson(value);
+  if (Buffer.byteLength(json, 'utf8') > 16 * 1024) {
+    throw new OperatorError('TASK_GOAL_INVALID', `${label} is too large.`);
+  }
+  return JSON.parse(json);
+}
+
 export function normalizeTaskStateAssertions(input: unknown, label = 'assertions'): TaskStateAssertion[] {
   if (!Array.isArray(input) || input.length < 1 || input.length > 20) {
     throw new OperatorError('TASK_GOAL_INVALID', `${label} must contain 1-20 machine-state assertions.`);
@@ -27,9 +76,10 @@ export function normalizeTaskStateAssertions(input: unknown, label = 'assertions
       throw new OperatorError('TASK_GOAL_INVALID', `${label}[${index}].operator is invalid.`);
     }
     if (operator !== 'exists' && raw.value === undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}[${index}] requires value.`);
-    if (raw.value !== undefined && Buffer.byteLength(canonicalJson(raw.value)) > 16 * 1024) throw new OperatorError('TASK_GOAL_INVALID', `${label}[${index}].value is too large.`);
+    const value = raw.value === undefined
+      ? undefined : normalizeAssertionValue(raw.value, `${label}[${index}].value`);
     return { path, operator: operator as TaskStateAssertion['operator'],
-      ...(raw.value === undefined ? {} : { value: structuredClone(raw.value) }) };
+      ...(value === undefined ? {} : { value }) };
   });
 }
 
