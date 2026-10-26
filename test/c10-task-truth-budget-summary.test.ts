@@ -16,7 +16,7 @@ test('C10 task details separate goal verification and pre-call model reservation
   for(const label of expected) assert.ok(script.includes(label),label);
   assert.ok(script.includes('wrap.append(actions,taskProgressSummary(task,projection))'),
     'Task summary must be wired into real selected task UI');
-  assert.ok(script.includes('window.MecordTaskTimeline.render(timelineData.timeline)'),
+  assert.ok(script.includes('window.MecordTaskTimeline.render(') && script.includes('timelineData.timeline,async before'),
     'Only the separate approved timeline presentation renders model projection');
   assert.equal(script.includes('innerHTML'), false, 'Task objective must never be interpolated as unescaped HTML');
 });
