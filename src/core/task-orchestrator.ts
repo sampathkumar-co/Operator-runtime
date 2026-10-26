@@ -2364,6 +2364,7 @@ function browserDownloadActionInput(goal: Extract<AtomicSemanticTaskGoal, { kind
     operation: 'click',
     target: goal.target,
     expectDownload: true,
+    expectedOrigin: goal.origin,
     downloadTimeoutMs: goal.timeoutMs ?? 30_000
   };
 }
@@ -2422,6 +2423,14 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
     goal.url = url.toString();
     if (goal.targetId !== undefined) goal.targetId = boundedText(goal.targetId, 256, 'browser targetId');
   } else if (goal.kind === 'browser-download') {
+    goal.origin = boundedText(goal.origin, 2048, 'browser download approved origin');
+    let approved: URL;
+    try { approved = new URL(goal.origin); }
+    catch { throw new OperatorError('TASK_GOAL_INVALID', 'Browser download requires an absolute approved origin.'); }
+    if (!['http:', 'https:'].includes(approved.protocol) || approved.origin !== goal.origin ||
+        approved.username || approved.password) {
+      throw new OperatorError('TASK_GOAL_INVALID', 'Browser download requires an exact approved HTTP(S) origin.');
+    }
     goal.targetId = boundedText(goal.targetId, 256, 'browser download targetId');
     if (!/^[A-Za-z0-9._:-]{1,256}$/.test(goal.targetId)) throw new OperatorError('TASK_GOAL_INVALID', 'Browser download targetId is invalid.');
     goal.target = normalizeBrowserDownloadTarget(goal.target);
