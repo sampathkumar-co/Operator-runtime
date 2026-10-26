@@ -1554,3 +1554,36 @@ test('emergency stop aborts every active task controller and persists cancellati
   assert.equal(cancelled.execution?.records[0]?.errorCode, 'EXECUTION_ABORTED');
   assert.ok(cancelled.evidence.some((item) => item.kind === 'task_cancel'));
 });
+
+
+test('C05/C08 no-progress after a potentially dispatched write blocks without replan replay', async (t) => {
+  const root = await tempDir(t, 'operator-task-no-progress-reconcile-root-');
+  const state = await tempDir(t, 'operator-task-no-progress-reconcile-state-');
+  let dispatched = 0;
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime(), store: new TaskStore(state),
+    permissions: permissions(root, ['file.write']), planners: [new OneWritePlanner()],
+    executeAction: async action => {
+      dispatched++;
+      return { ok: false, capability: action.capability, provider: 'test.side-effect-uncertain',
+        evidence: [], durationMs: 1, error: {
+          code: 'ACTION_NO_PROGRESS', message: 'Provider did not confirm desired state', retryable: false,
+          executionPhase: 'dispatched', sideEffectState: 'uncertain'
+        } };
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Do not repeat uncertain no-progress mutation.', authorizedScope: [root],
+    successConditions: ['wait for independent reconciliation'],
+    goal: { kind: 'controlled-file-change', root, path: 'output.txt', content: 'changed' },
+    maxSteps: 20, maxAttemptsPerStep: 5
+  });
+  const stopped = await orchestrator.run(task.id);
+  assert.equal(stopped.state, 'BLOCKED');
+  assert.equal(dispatched, 1);
+  assert.equal(stopped.execution?.records[0]?.sideEffectState, 'uncertain');
+  assert.equal(stopped.execution?.records[0]?.state, 'BLOCKED');
+  assert.ok(stopped.evidence.some(item => item.kind === 'strategy_reconcile' && item.data?.strategy === 'replan'));
+  const persisted = await new TaskStore(state).get(task.id);
+  assert.equal(persisted.state, 'BLOCKED');
+});
