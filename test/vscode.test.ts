@@ -187,3 +187,58 @@ test('VS Code native CLI resolver accepts one bounded versioned cli.js and rejec
   await fs.writeFile(path.join(second, 'cli.js'), 'console.log("stale")');
   await assert.rejects(resolveVsCodeCliScript(code), /Multiple VS Code CLI entrypoints/);
 });
+
+test('C06 VS Code cancellation before launch performs no provider subprocess work', async (t) => {
+  const root = await tempDir(t, 'operator-vscode-abort-root-');
+  const authority = await tempDir(t, 'operator-vscode-abort-data-');
+  const fake = await makeFakeCode(t);
+  const provider = new VsCodeProvider({
+    allowedRoots: [root], codeExecutable: fake.executable,
+    codeArgsPrefix: fake.prefix, dataDir: path.join(authority, 'data')
+  });
+  const stopped = new AbortController();
+  stopped.abort('owner-stop');
+  const result = await provider.execute({
+    id: 'abort-version', capability: 'vscode.inspect', risk: 'read',
+    input: { operation: 'version' }, provenance: { kind: 'chatgpt' }
+  }, { signal: stopped.signal });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'EXECUTION_ABORTED');
+  assert.equal(result.error?.sideEffectState, 'none');
+  assert.equal((await calls(fake.logPath)).length, 0);
+});
+
+test('C06 cancellation of a dispatched VS Code window never claims zero side effects', async (t) => {
+  const root = await tempDir(t, 'operator-vscode-abort-open-');
+  const authority = await tempDir(t, 'operator-vscode-abort-authority-');
+  const fake = await makeFakeCode(t);
+  const script = fake.prefix[0]!;
+  await fs.writeFile(script, `
+const fs = require('node:fs');
+fs.appendFileSync(${JSON.stringify(fake.logPath)}, JSON.stringify({ args: process.argv.slice(2) }) + '\\n');
+setTimeout(() => process.exit(0), 60000);
+`);
+  const provider = new VsCodeProvider({
+    allowedRoots: [root], codeExecutable: fake.executable,
+    codeArgsPrefix: fake.prefix, dataDir: path.join(authority, 'data')
+  });
+  const controller = new AbortController();
+  const attempted = provider.execute({
+    id: 'abort-open', capability: 'vscode.open', risk: 'system',
+    input: { mode: 'folder', path: root, timeoutMs: 15000 },
+    provenance: { kind: 'chatgpt' }
+  }, { signal: controller.signal });
+  let started = false;
+  for (let index = 0; index < 200; index++) {
+    if ((await calls(fake.logPath)).length) { started = true; break; }
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  if (!started) controller.abort('start-timeout');
+  assert.equal(started, true, 'fake CLI must start before the dispatched cancellation test');
+  controller.abort('owner-stop');
+  const result = await attempted;
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'EXECUTION_ABORTED');
+  assert.equal(result.error?.sideEffectState, 'uncertain');
+  assert.equal(result.error?.executionPhase, 'dispatched');
+});
