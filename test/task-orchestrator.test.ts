@@ -1587,3 +1587,33 @@ test('C05/C08 no-progress after a potentially dispatched write blocks without re
   const persisted = await new TaskStore(state).get(task.id);
   assert.equal(persisted.state, 'BLOCKED');
 });
+
+
+test('C05/C08 known-effect no-progress cannot repeat identical mutating input as a fresh action', async (t) => {
+  const root = await tempDir(t, 'operator-task-no-progress-known-root-');
+  const state = await tempDir(t, 'operator-task-no-progress-known-state-');
+  let dispatched = 0;
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime(), store: new TaskStore(state),
+    permissions: permissions(root, ['file.write']), planners: [new OneWritePlanner()],
+    executeAction: async action => {
+      dispatched++;
+      return { ok: false, capability: action.capability, provider: 'test.known-effect-no-progress',
+        evidence: [], durationMs: 1, error: {
+          code: 'ACTION_NO_PROGRESS', message: 'Mutation completed without meaningful progress', retryable: false,
+          executionPhase: 'effect_observed', sideEffectState: 'known'
+        } };
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Never replay an identical known-effect failed mutation.',
+    authorizedScope: [root], successConditions: ['do not duplicate a known effect'],
+    goal: { kind: 'controlled-file-change', root, path: 'output.txt', content: 'changed' },
+    maxSteps: 20, maxAttemptsPerStep: 5
+  });
+  const failed = await orchestrator.run(task.id);
+  assert.equal(failed.state, 'FAILED');
+  assert.equal(failed.failures.at(-1)?.code, 'TASK_NO_PROGRESS_REPLAY_DENIED');
+  assert.equal(dispatched, 1);
+  assert.equal(failed.execution?.records.length, 1);
+});
