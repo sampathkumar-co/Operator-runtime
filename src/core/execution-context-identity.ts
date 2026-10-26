@@ -49,10 +49,26 @@ function optionalPositiveInteger(value: unknown, label: string): number | undefi
 }
 
 export function normalizeExecutionContextIdentity(input: unknown): ExecutionContextIdentity {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    throw invalid('Execution context identity must be an object.');
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      (Object.getPrototypeOf(input) !== Object.prototype &&
+       Object.getPrototypeOf(input) !== null)) {
+    throw invalid('Execution context identity must be an inert plain object.');
   }
-  const raw = input as Record<string, unknown>;
+  // Snapshot all source values exactly once before parsing principal, device,
+  // intent or authority fields. Direct raw.foo access runs getters, which may
+  // return different identities on successive reads or execute attacker code.
+  const descriptors = Object.getOwnPropertyDescriptors(input);
+  const raw: Record<string, unknown> = Object.create(null);
+  for (const key of Reflect.ownKeys(input)) {
+    if (typeof key !== 'string') {
+      throw invalid('Execution context identity may not contain symbol fields.');
+    }
+    const descriptor = descriptors[key];
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+      throw invalid('Execution context identity may contain only enumerable own data fields.');
+    }
+    raw[key] = descriptor.value;
+  }
   if (raw.schemaVersion !== 1) throw invalid('Execution context identity schemaVersion must be 1.');
 
   const conversationId = optionalId(raw.conversationId, 'conversationId');
