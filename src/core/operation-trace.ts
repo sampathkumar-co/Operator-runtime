@@ -310,7 +310,13 @@ function scalarAttributes(input: unknown): Record<string, string | number | bool
     if (value !== null && !['string','number','boolean'].includes(typeof value)) throw invalid('attribute value is invalid.');
     if (typeof value === 'string' && Buffer.byteLength(value,'utf8') > 1024) throw invalid('attribute string is too large.');
     if (typeof value === 'number' && !Number.isFinite(value)) throw invalid('attribute number is invalid.');
-    out[key] = value as string | number | boolean | null;
+    // A permitted own "__proto__" string is still trace evidence.
+    // Bracket assignment on a normal object can invoke its inherited setter
+    // and silently discard that field, changing the persisted event digest.
+    Object.defineProperty(out, key, {
+      value: value as string | number | boolean | null,
+      enumerable: true, writable: true, configurable: true
+    });
   }
   return out;
 }
