@@ -77,11 +77,14 @@ export function mapCoordinateBounds(bounds: CoordinateBounds, transformInput: Co
     throw new OperatorError('COORDINATE_TRANSFORM_INVALID', 'Bounds must be an exact rectangle object.');
   }
   const point = mapCoordinatePoint(bounds, transform);
-  return {
-    ...point,
-    width: positive(positive(bounds.width, 'bounds.width') * transform.scaleX, 'mapped bounds.width'),
-    height: positive(positive(bounds.height, 'bounds.height') * transform.scaleY, 'mapped bounds.height')
-  };
+  const width = positive(positive(bounds.width, 'bounds.width') * transform.scaleX, 'mapped bounds.width');
+  const height = positive(positive(bounds.height, 'bounds.height') * transform.scaleY, 'mapped bounds.height');
+  // A valid origin and independently bounded size can still overflow at the
+  // far corner. Require the entire resulting physical rectangle to remain in
+  // the numeric safety envelope, not just its top-left point and dimensions.
+  finite(point.x + width, 'mapped bounds.right');
+  finite(point.y + height, 'mapped bounds.bottom');
+  return { ...point, width, height };
 }
 
 export function composeCoordinateTransforms(firstInput: CoordinateTransform, secondInput: CoordinateTransform): CoordinateTransform {
