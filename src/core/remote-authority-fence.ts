@@ -72,8 +72,15 @@ export class RemoteAuthorityFenceStore {
     if (previous && previous.kind === 'revoked' && subject.authorityGeneration <= previous.revokedGeneration) {
       throw blocked('REMOTE_AUTHORITY_REVOKED', 'Account-device generation has been revoked.');
     }
-    if (previous && previous.kind === 'active' && Date.parse(current!.expiresAt ?? '') > now) {
-      throw blocked('REMOTE_AUTHORITY_HELD', 'Another worker still holds this device generation.');
+    if (previous && previous.kind === 'active') {
+      // A malformed or missing expiry is uncertainty about a live owner's
+      // lease, never proof that this worker may seize the device generation.
+      if (!current?.expiresAt || !Number.isFinite(Date.parse(current.expiresAt))) {
+        throw blocked('REMOTE_AUTHORITY_CORRUPT', 'Active authority is missing its trustworthy expiry.');
+      }
+      if (Date.parse(current.expiresAt) > now) {
+        throw blocked('REMOTE_AUTHORITY_HELD', 'Another worker still holds this device generation.');
+      }
     }
     if (previous && (previous.kind === 'active' || previous.kind === 'released')) {
       if (subject.authorityGeneration < previous.authorityGeneration) {
