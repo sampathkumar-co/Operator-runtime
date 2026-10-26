@@ -415,8 +415,21 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
     try { envelope = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
     catch { return invalid('Local model reply was not valid JSON.'); }
     if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) ||
-      typeof (envelope as { response?: unknown }).response !== 'string') invalid('Local model envelope is invalid.');
-    const text = (envelope as { response: string }).response;
+      typeof (envelope as { response?: unknown }).response !== 'string') {
+      invalid('Local model envelope is invalid.');
+    }
+    const result = envelope as Record<string, unknown>;
+    // Ollama-style /api/generate can return syntactically valid JSON text
+    // while its outer metadata says the model stopped at a token limit.
+    // Such output is not a settled planning decision. A missing finality
+    // field is supported only for minimal backward-compatible fixtures.
+    if ((Object.hasOwn(result, 'done') && result.done !== true) ||
+        (Object.hasOwn(result, 'done_reason') && result.done_reason !== 'stop') ||
+        Object.hasOwn(result, 'error') || Object.hasOwn(result, 'tool_calls') ||
+        Object.hasOwn(result, 'function_call')) {
+      invalid('Local model decision was unfinished, errored, or attempted a tool call.');
+    }
+    const text = result.response as string;
     if (text.length > 1024) invalid('Local model response is too large.');
     return text;
   }
