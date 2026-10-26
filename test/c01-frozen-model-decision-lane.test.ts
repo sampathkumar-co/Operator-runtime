@@ -86,6 +86,17 @@ test('C01 model rejection and bounded timeout cannot be scored as oracle success
   assert.equal(times.oracleMatches,0);
 });
 
+test('C01 model-controlled timeout message cannot spoof timing failure attribution', async () => {
+  for (const thrown of [new Error('MODEL_TIMEOUT'), 'MODEL_TIMEOUT']) {
+    const report = await runFrozenModelDecisionLane(args({
+      decide: async () => { throw thrown; }
+    }));
+    assert.equal(report.results[0]?.matchedOracle, false);
+    assert.equal(report.results[0]?.failureStage, 'model');
+    assert.equal(report.oracleMatches, 0);
+  }
+});
+
 test('C01 rejects forged scripted-model evidence, duplicate suite identities and invalid provenance', async () => {
   const c=choice();
   for(const mutation of [
