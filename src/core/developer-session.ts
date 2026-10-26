@@ -107,8 +107,15 @@ export class DeveloperSessionStore {
     this.#dir = path.join(path.resolve(stateDir), 'developer-sessions');
   }
 
-  async put(sessionInput: DeveloperSession): Promise<void> {
+  async put(sessionInput: DeveloperSession, expectedInput?: DeveloperSession): Promise<void> {
     const session = normalizeDeveloperSession(sessionInput);
+    // Review/coordinator paths supply the exact source snapshot they read.
+    // A later timestamp alone cannot prove it is still the same session.
+    const expected = expectedInput === undefined ? undefined : normalizeDeveloperSession(expectedInput);
+    if (expected && expected.id !== session.id) {
+      throw new OperatorError('DEVELOPER_SESSION_STALE_WRITE',
+        'Expected session identity does not match the proposed update.', { retryable: true });
+    }
     await this.#init();
     const file = this.#file(session.id);
     // Session state is a mutable ownership/plan record. Atomic rename protects
@@ -123,6 +130,10 @@ export class DeveloperSessionStore {
           if (error instanceof OperatorError) throw error;
           throw invalid('Developer Session could not be read before durable update.');
         }
+      }
+      if (expected && (!existing || JSON.stringify(existing) !== JSON.stringify(expected))) {
+        throw new OperatorError('DEVELOPER_SESSION_STALE_WRITE',
+          'Developer Session changed after the coordinator read its snapshot.', { retryable: true });
       }
       if (existing) {
         const priorTime = Date.parse(existing.updatedAt);
