@@ -1,4 +1,4 @@
-import type { ActionRequest, ActionResult } from './types.ts';
+import type { ActionRequest, ActionResult, ProviderReconciliationResult } from './types.ts';
 import { OperatorError } from './errors.ts';
 
 /**
@@ -56,4 +56,48 @@ export function assertProviderResultContract(
         (typeof error.executionPhase !== 'string' || !['pre_dispatch','dispatched','effect_observed','reconciled'].includes(error.executionPhase))) reject();
   }
   return input as ActionResult;
+}
+
+/**
+ * Provider reconciliation is an authority-bearing observation, not a trusted
+ * promise. A bogus "completed" reply must not release quarantine on an action
+ * whose actual result is absent or refers to another provider/capability.
+ */
+export function assertProviderReconciliationContract(
+  input: unknown,
+  action: Pick<ActionRequest, 'capability'>,
+  providerName: string
+): ProviderReconciliationResult {
+  const reject = (): never => {
+    throw new OperatorError('PROVIDER_RECONCILIATION_CONTRACT_INVALID',
+      'Provider reconciliation did not establish a valid source-bound outcome.', {
+        retryable: false,
+        details: { executionPhase: 'reconciled', sideEffectState: 'uncertain' }
+      });
+  };
+  if (!input || typeof input !== 'object' || Array.isArray(input)) reject();
+  const value = input as Record<string, unknown>;
+  if (!['completed','not_applied','uncertain'].includes(value.status as string) ||
+      !Array.isArray(value.evidence) || value.evidence.length > 256) reject();
+
+  // Reuse the exact same receipt shape and canonical timestamp checks as
+  // normal action results, including the no-coercion provider identity rule.
+  try {
+    assertProviderResultContract({
+      ok: true, capability: action.capability, provider: providerName,
+      durationMs: 0, evidence: value.evidence
+    }, action, providerName);
+  } catch { reject(); }
+
+  if (value.status === 'completed') {
+    if (value.result === undefined) reject();
+    let result: ActionResult;
+    try { result = assertProviderResultContract(value.result, action, providerName); }
+    catch { reject(); }
+    if (!result!.ok) reject();
+  } else if (value.result !== undefined) {
+    // Failure/uncertainty cannot smuggle a success receipt for another action.
+    reject();
+  }
+  return input as ProviderReconciliationResult;
 }

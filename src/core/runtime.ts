@@ -1,9 +1,9 @@
 import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, ExecutionPhase, PermissionProfile, ProviderCapabilitySchema, ProviderReconciliationResult, SideEffectState } from './types.ts';
 import { AuthorityKernel } from './authority-kernel.ts';
 import { discoverBuiltInCapabilities, type CapabilityDiscoverySnapshot } from './capability-discovery.ts';
-import { CapabilityRouter } from './router.ts';
+import { CapabilityRouter, providerSupports } from './router.ts';
 import { evidence } from './evidence.ts';
-import { assertProviderResultContract } from './provider-result-contract.ts';
+import { assertProviderResultContract, assertProviderReconciliationContract } from './provider-result-contract.ts';
 import { OperatorError } from './errors.ts';
 import type { ProviderLearning } from './provider-learning.ts';
 import { conservativeExecutionPhase, conservativeSideEffectState, retrySafeWithoutReconciliation, validExecutionPhase, validSideEffectState } from './side-effect.ts';
@@ -120,7 +120,7 @@ export class OperatorRuntime {
       let trustedPreDispatchAbort = false;
       try {
         if (context.signal?.aborted) return abortedResult(canonicalAction, start);
-        if (!await provider.supports(canonicalAction)) {
+        if (!await providerSupports(provider, canonicalAction)) {
           failures.push({ code: 'PROVIDER_SUPPORT_CHANGED', message: `${provider.name} no longer supports the canonical action.`, retryable: true, sideEffectState: 'none' as const, executionPhase: 'pre_dispatch' as const });
           continue;
         }
@@ -223,7 +223,7 @@ export class OperatorRuntime {
     const provider = await this.router.provider(providerName);
     let supported = false;
     try {
-      supported = provider ? await provider.supports(action) : false;
+      supported = provider ? await providerSupports(provider, action) : false;
     } catch (error) {
       if (context.signal?.aborted || isAbortError(error)) {
         return cancelledReconciliation(providerName, 'while provider support was being revalidated');
@@ -236,13 +236,15 @@ export class OperatorRuntime {
     }
     if (!provider.reconcile) {
       const policy = MUTATION_RECONCILIATION_POLICIES[action.capability];
-      if (policy?.mode === 'side_effect_free') return reconcileFromDurableResult(providerName, action.capability, priorResult);
+      if (policy?.mode === 'side_effect_free') return assertProviderReconciliationContract(
+        reconcileFromDurableResult(providerName, action.capability, priorResult), action, providerName
+      );
       throw new OperatorError('PROVIDER_RECONCILIATION_CONTRACT_MISSING', `Provider ${providerName} has no reconciliation contract for mutable capability ${action.capability}.`);
     }
     try {
       const outcome = await provider.reconcile({ action, ...(priorResult ? { priorResult } : {}) }, context);
       if (context.signal?.aborted) return cancelledReconciliation(providerName, 'while provider reconciliation was in progress');
-      return outcome;
+      return assertProviderReconciliationContract(outcome, action, providerName);
     } catch (error) {
       if (context.signal?.aborted || isAbortError(error)) {
         return cancelledReconciliation(providerName, 'while provider reconciliation was in progress');
