@@ -156,3 +156,22 @@ test('C06 Git recovery does not claim a durable completion after Stop', async ()
     error?.code === 'EXECUTION_ABORTED' &&
     error?.details?.sideEffectState === 'none');
 });
+
+gitTest('C06 failed dispatched Git pathspec is uncertain and never automatically retryable', async (t) => {
+  const root = await createRepo(t);
+  const checkpoint = new GitCheckpointProvider({ allowedRoots: [root] });
+  const writer = new GitWriteProvider({ allowedRoots: [root] });
+  const before = await fingerprint(checkpoint, root);
+  const failed = await writer.execute({
+    id: 'missing-path-failed-after-checkpoint', capability: 'git.write', risk: 'write',
+    input: { operation: 'stage', cwd: root, paths: ['absent-file-never-added.txt'],
+      expectedCurrentFingerprint: before },
+    provenance: { kind: 'runtime' }
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.error?.code, 'GIT_COMMAND_FAILED');
+  assert.equal(failed.error?.retryable, false);
+  assert.equal(failed.error?.sideEffectState, 'uncertain');
+  assert.equal(failed.error?.executionPhase, 'dispatched');
+  assert.equal(git(root, 'diff', '--cached', '--name-only').trim(), '');
+});
