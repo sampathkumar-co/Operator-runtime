@@ -167,7 +167,7 @@ export class CapabilityRouter {
           || !['read', 'write', 'external', 'system', 'destructive', 'dynamic'].includes(entry.risk)
           || !Number.isSafeInteger(entry.inputMaxBytes) || entry.inputMaxBytes < 1
           || entry.inputMaxBytes > 4 * 1024 * 1024 || !Array.isArray(entry.resourceKinds)
-          || entry.resourceKinds.some((kind) => typeof kind !== 'string' || kind.length < 1 || kind.length > 128)) {
+          || entry.resourceKinds.some((kind: unknown) => typeof kind !== 'string' || kind.length < 1 || kind.length > 128)) {
           throw new OperatorError('CAPABILITY_SCHEMA_INVALID', `Provider ${provider.name} returned an invalid capability schema.`);
         }
         schemas.push({ ...structuredClone(entry), provider: provider.name });
