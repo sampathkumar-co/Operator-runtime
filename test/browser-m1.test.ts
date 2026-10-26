@@ -585,7 +585,8 @@ test('browser provider prevents a second equivalent no-progress action and prese
     assert.equal(second.ok, false);
     assert.equal(second.error?.code, 'BROWSER_NO_PROGRESS');
     assert.equal(second.error?.retryable, false);
-    assert.equal(second.error?.sideEffectState, 'known');
+    assert.equal(second.error?.sideEffectState, 'uncertain', 'visible no-progress cannot prove a dispatched click had no hidden effect');
+    assert.equal(second.error?.executionPhase, 'effect_observed');
     assert.equal((second.error?.details as any)?.repeatedNoProgress, 2);
   });
 });
