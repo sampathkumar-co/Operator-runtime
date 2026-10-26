@@ -36,6 +36,28 @@ function digestOf(value: unknown): string {
 }
 
 /** Reject holes and property accessors in proof-bearing arrays. */
+function inertVerificationEnvelope(input: unknown): Record<'subjectKind' | 'subjectId' | 'contract' | 'checks', unknown> {
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      (Object.getPrototypeOf(input) !== Object.prototype && Object.getPrototypeOf(input) !== null)) {
+    throw new OperatorError('VERIFICATION_INPUT_INVALID', 'Verification request must be an inert plain object.');
+  }
+  const allowed = ['subjectKind', 'subjectId', 'contract', 'checks'];
+  const descriptors = Object.getOwnPropertyDescriptors(input);
+  if (Reflect.ownKeys(input).length !== allowed.length ||
+      Reflect.ownKeys(input).some(key => typeof key !== 'string' || !allowed.includes(key)) ||
+      allowed.some(key => !Object.hasOwn(descriptors, key))) {
+    throw new OperatorError('VERIFICATION_INPUT_INVALID', 'Verification request has missing or unsupported fields.');
+  }
+  const snapshot: Record<string, unknown> = Object.create(null);
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (!descriptor.enumerable || !('value' in descriptor)) {
+      throw new OperatorError('VERIFICATION_INPUT_INVALID', 'Verification request contains an executable field.');
+    }
+    snapshot[key] = descriptor.value;
+  }
+  return snapshot as Record<'subjectKind' | 'subjectId' | 'contract' | 'checks', unknown>;
+}
+
 function inertProofArray(input: unknown, min: number, max: number, label: string): unknown[] {
   if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype ||
       input.length < min || input.length > max ||
@@ -89,12 +111,10 @@ export class VerificationKernel {
     contract: unknown;
     checks: VerificationCheck[];
   }): VerificationReceipt {
-    if (!input || typeof input !== 'object' || Array.isArray(input)) {
-      throw new OperatorError('VERIFICATION_INPUT_INVALID', 'Verification request is invalid.');
-    }
-    const subjectKind = bounded(input.subjectKind, 128, 'subjectKind');
-    const subjectId = bounded(input.subjectId, 512, 'subjectId');
-    const suppliedChecks = inertProofArray(input.checks, 1, 10_000, 'checks');
+    const request = inertVerificationEnvelope(input);
+    const subjectKind = bounded(request.subjectKind, 128, 'subjectKind');
+    const subjectId = bounded(request.subjectId, 512, 'subjectId');
+    const suppliedChecks = inertProofArray(request.checks, 1, 10_000, 'checks');
     const names = new Set<string>();
     const checks = suppliedChecks.map((raw, index) => {
       // A forged getter-backed "ok" or an absent array slot must never
@@ -117,7 +137,7 @@ export class VerificationKernel {
       return { name, ok: check.ok, detail, evidenceDigests };
     }).sort((a, b) => a.name.localeCompare(b.name));
 
-    const contractDigest = digestOf(input.contract);
+    const contractDigest = digestOf(request.contract);
     const base = {
       version: 1 as const,
       subjectKind,
