@@ -48,5 +48,5 @@ render(payload.status)
 if(requestId===latestStatusRequest){body.replaceChildren();body.textContent="Runtime status is temporarily unavailable; other dashboard panels may be stale."}
 }
 }
-void refreshStatus();const timer=setInterval(refreshStatus,2500);window.addEventListener("beforeunload",()=>{latestStatusRequest++;clearInterval(timer)});
+void refreshStatus();const timer=setInterval(refreshStatus,2500);window.addEventListener("mecord:signout",()=>{latestStatusRequest++;body.replaceChildren();body.textContent="Sign in to load source and capability status."});window.addEventListener("beforeunload",()=>{latestStatusRequest++;clearInterval(timer)});
 })();
