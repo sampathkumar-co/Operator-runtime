@@ -260,7 +260,10 @@ test('no-progress becomes a durable planner event and triggers bounded replannin
 
 class UncertainNoProgressBrowserProvider implements CapabilityProvider {
   readonly name = 'test.uncertain-no-progress';
-  constructor(readonly includeProviderEffectReceipt = true) {}
+  readonly includeProviderEffectReceipt: boolean;
+  constructor(includeProviderEffectReceipt = true) {
+    this.includeProviderEffectReceipt = includeProviderEffectReceipt;
+  }
   calls = 0;
   supports(action: ActionRequest): boolean { return action.capability === 'browser.interact'; }
   score(): CapabilityScore { return SCORE; }
