@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "runId": "internal-baseline-f2b002a-20260928",
+  "sourceCommit": "f2b002a15eef1aa432c4c03e4d35c533dc1cef92",
+  "suite": "internal-performance-plus-stage18",
+  "result": {
+    "tests": 9,
+    "passed": 9,
+    "failed": 0
+  },
+  "metrics": {
+    "policyAuthorizeMsPerOp": 0.003,
+    "auditAppendTailMsPerOp": 3.981,
+    "relayEnqueueAckMsPerOp": 3.922,
+    "localAgentInspectMsPerOp": 2.969,
+    "authorityKernelMsPerOp": 0.005,
+    "verificationKernelMsPerOp": 0.009
+  },
+  "stage18": {
+    "claimedVsVerifiedSuccess": "pass",
+    "regressionComparison": "pass",
+    "retryIdempotencyConflictSafety": "pass"
+  },
+  "notes": [
+    "Run from an isolated detached worktree at the exact current-main source commit.",
+    "These are infrastructure/evaluation baselines, not external leaderboard scores.",
+    "No external benchmark score is recorded until the official environment and scorer execute successfully."
+  ]
+}
