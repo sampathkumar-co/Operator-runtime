@@ -89,6 +89,16 @@ class SourceOnlyPolicy(unittest.TestCase):
         self.assertEqual([c["bid"] for c in choices], ["dom1"])
         self.assertIn("body:nth-of-type(1)", choices[0]["css"])
 
+    def test_multi_document_dom_requires_observed_frame_identity(self):
+        doc = {"nodes": {
+            "parentIndex": [-1], "nodeType": [1], "nodeName": [0],
+            "nodeValue": [-1], "attributes": [[]],
+            "isClickable": {"index": [0]}
+        }}
+        snapshot = {"dom_object": {"strings": ["button"], "documents": [doc, doc]}}
+        self.assertEqual(observed_candidates(snapshot), [],
+                         "A document-local selector must not identify multiple frames")
+
     def test_prompt_is_data_only_and_bounded(self):
         prompt = model_prompt("do something", self.candidates, [])
         self.assertIn("Do not claim completion", prompt)
