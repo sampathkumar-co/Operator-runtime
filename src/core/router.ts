@@ -67,6 +67,17 @@ export class CapabilityRouter {
   }
 
   register(provider: CapabilityProvider): void {
+    // Provider names are reconciliation identities. Two instances with one name
+    // can select one implementation and later reconcile against another.
+    if (!provider || typeof provider.name !== 'string' ||
+        !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(provider.name) ||
+        typeof provider.supports !== 'function' ||
+        typeof provider.score !== 'function' ||
+        typeof provider.execute !== 'function' ||
+        this.#providers.some((existing) => existing.name === provider.name)) {
+      throw new OperatorError('PROVIDER_REGISTRY_INVALID',
+        'Provider registration requires a unique bounded identity and valid execution contract.');
+    }
     this.#providers.push(provider);
   }
 
