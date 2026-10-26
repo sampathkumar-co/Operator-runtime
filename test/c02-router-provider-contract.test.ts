@@ -97,3 +97,28 @@ test('C02 final pre-dispatch supports recheck blocks provider that changes its s
     await runtime.close();
   }
 });
+
+test('C02 provider identity is unique and cannot be confused during reconciliation', async () => {
+  const router = new CapabilityRouter();
+  router.register(provider(() => true));
+  assert.throws(() => router.register(provider(() => true)), (error: any) =>
+    error?.code === 'PROVIDER_REGISTRY_INVALID');
+  for (const name of ['', 'bad name', 'bad\\nname', '__proto__']) {
+    const other = { ...provider(() => true), name };
+    assert.throws(() => router.register(other), (error: any) =>
+      error?.code === 'PROVIDER_REGISTRY_INVALID');
+  }
+  assert.equal((await router.provider('c02-fixture'))?.name, 'c02-fixture');
+  assert.equal(router.providers().length, 1);
+});
+
+test('C02 incomplete provider registration is rejected before any dispatch', () => {
+  const router = new CapabilityRouter();
+  assert.throws(() => router.register({
+    name: 'incomplete',
+    supports: () => true,
+    execute: async () => { throw new Error('must not run'); }
+  } as unknown as CapabilityProvider), (error: any) =>
+    error?.code === 'PROVIDER_REGISTRY_INVALID');
+  assert.equal(router.providers().length, 0);
+});
