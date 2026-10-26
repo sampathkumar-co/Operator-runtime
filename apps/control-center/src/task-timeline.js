@@ -10,10 +10,38 @@ const facts=[];if(event.attempt!==undefined)facts.push("Attempt "+event.attempt)
 if(event.observation)card.append(el("div","timelineObservation","Observed "+event.observation.domain+" via "+event.observation.channel+(event.observation.epistemicStatus?" · "+event.observation.epistemicStatus:"")));
 if(event.error){const error=el("div","callout critical");error.append(el("div","taskTitle","Error · "+event.error.code),el("div","eventMeta",event.error.message||[event.error.executionPhase&&"Phase "+event.error.executionPhase,event.error.sideEffectState&&"Side effect "+event.error.sideEffectState].filter(Boolean).join(" · ")||"No execution-phase detail recorded."));card.append(error)}
 if(event.kind==="ACTION")card.append(evidenceDetails(event.evidence||[]));item.append(marker,card);return item}
-function render(model){const root=el("section","taskTimeline");root.setAttribute("aria-labelledby","taskTimelineTitle");root.append(el("h3","","Task timeline"));root.lastChild.id="taskTimelineTitle";
+function render(model,loadEarlier){const root=el("section","taskTimeline");root.setAttribute("aria-labelledby","taskTimelineTitle");root.append(el("h3","","Task timeline"));root.lastChild.id="taskTimelineTitle";
 const overview=el("div","metricGrid");overview.append(metric("Planner",model.planning.plannerId),metric("Model",model.planning.modelIdentity.status.replaceAll("_"," ")),metric("Verification",model.verification.state),metric("Evidence",model.evidence.total));root.append(overview);
 const budget=el("section","timelineBudget");budget.append(el("h4","","Cost and usage"));const reserved=el("div","metricGrid");reserved.append(metric("Reserved calls",model.cost.reserved.calls),metric("Reserved tokens",model.cost.reserved.tokens),metric("Reserved ceiling",micros(model.cost.reserved.ceilingMicros)),metric("Actual cost",model.cost.actual.status.replaceAll("_"," ")));budget.append(reserved,el("p","muted",model.cost.actual.reason),el("p","muted",model.planning.modelIdentity.reason));root.append(budget,recovery(model));
 const evidence=el("div","timelineEvidenceSummary");evidence.append(el("span","badge PASS","Pass "+model.evidence.pass),el("span","badge FAIL","Fail "+model.evidence.fail),el("span","badge INFO","Info "+model.evidence.info));root.append(evidence);if(model.evidence.truncated)root.append(el("p","muted","Evidence status counts cover "+model.evidence.classified.toLocaleString()+" of "+model.evidence.total.toLocaleString()+" items; the projection is bounded."));
-if(model.truncated)root.append(el("div","callout warning","Only the newest 500 action records are displayed."));const list=el("ol","timelineList");for(const event of model.timeline||[])list.append(eventCard(event));root.append(list);return root}
+const list=el("ol","timelineList");for(const event of model.timeline||[])list.append(eventCard(event));
+if(model.page&&model.page.nextBefore!==null&&typeof loadEarlier==="function"){
+  const controls=el("div","timelineHistoryControls");
+  const button=el("button","btn","Load earlier actions");button.type="button";
+  const message=el("span","muted","");
+  let cursor=model.page.nextBefore;
+  button.addEventListener("click",async()=>{
+    if(!Number.isSafeInteger(cursor)||cursor<1||button.disabled)return;
+    button.disabled=true;message.textContent="Loading earlier history...";
+    try{
+      const earlier=await loadEarlier(cursor);
+      if(!earlier||!earlier.page||!Array.isArray(earlier.timeline)||
+        (earlier.page.nextBefore!==null&&(!Number.isSafeInteger(earlier.page.nextBefore)||earlier.page.nextBefore>=cursor)))
+        throw new Error("History cursor is stale; refresh this task to continue.");
+      const fragment=document.createDocumentFragment();
+      for(const event of earlier.timeline)fragment.append(eventCard(event));
+      // Keep the already-visible task creation marker at the beginning.
+      list.insertBefore(fragment,list.children[1]||null);
+      cursor=earlier.page.nextBefore;
+      if(cursor===null)controls.remove();
+      message.textContent="";
+    }catch(error){message.textContent=error instanceof Error?error.message:"Earlier history could not be loaded.";}
+    finally{button.disabled=false;}
+  });
+  controls.append(button,message);root.append(controls);
+}else if(model.truncated){
+  root.append(el("div","callout warning","Only the newest actions are shown; earlier history is not available in this view."));
+}
+root.append(list);return root}
 window.MecordTaskTimeline=Object.freeze({render});
 })();
