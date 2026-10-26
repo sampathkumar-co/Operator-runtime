@@ -18,7 +18,7 @@ function harness(script: string) {
   const list = element();
   const queue: Array<(result: any)=>void> = [];
   let interval!: ()=>void;
-  let unload!: ()=>void;
+  const listeners = new Map<string,()=>void>();
   const context = {
     document: {
       getElementById(id: string) {
@@ -29,11 +29,12 @@ function harness(script: string) {
     fetch: () => new Promise(resolve => { queue.push(resolve); }),
     setInterval: (cb: ()=>void) => { interval=cb; return 1; },
     clearInterval: () => {},
-    window: { addEventListener(_name: string,cb: ()=>void) { unload=cb; } }
+    window: { addEventListener(name: string,cb: ()=>void) { listeners.set(name,cb); } }
   };
   vm.runInNewContext(script,context);
   const body=()=>diagnostics.children[0].children[1];
-  return { queue, tick:()=>interval(), unload:()=>unload(), body };
+  return { queue, tick:()=>interval(), unload:()=>listeners.get('beforeunload')?.(),
+    signout:()=>listeners.get('mecord:signout')?.(), body };
 }
 const status = {
   product: {
@@ -73,5 +74,23 @@ test('C10 failed newer status refresh removes previously successful metrics', as
   await settle();
   assert.equal(ui.body().children.length,0,'old metrics must be removed on error');
   assert.match(ui.body().textContent,/temporarily unavailable/);
+  ui.unload();
+});
+
+test('C10 dashboard signout clears shown runtime metrics immediately and invalidates late fetch', async () => {
+  const script=await fs.readFile(path.resolve('apps/control-center/src/runtime-status.js'),'utf8');
+  const ui=harness(script);
+  ui.queue[0]!({status:200,ok:true,json:async()=>({status})});
+  await settle();
+  assert.ok(ui.body().children.length>0);
+  ui.tick();
+  const pending=ui.queue[1]!;
+  ui.signout();
+  assert.equal(ui.body().children.length,0);
+  assert.equal(ui.body().textContent,'Sign in to load source and capability status.');
+  pending({status:200,ok:true,json:async()=>({status})});
+  await settle();
+  assert.equal(ui.body().children.length,0);
+  assert.equal(ui.body().textContent,'Sign in to load source and capability status.');
   ui.unload();
 });
