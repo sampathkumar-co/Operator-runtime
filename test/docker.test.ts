@@ -251,3 +251,109 @@ test('Docker reconciliation proves start and stop from current project state and
   const restart = await provider.reconcile({ action: { ...baseAction, id: 'reconcile-restart', input: { ...baseAction.input, operation: 'restart' } } });
   assert.equal(restart.status, 'uncertain', 'final running/exited state alone cannot prove restart history');
 });
+
+test('C06 project inventory refuses silent global Compose enumeration truncation', async (t) => {
+  const projectRoot = await tempDir(t, 'operator-docker-overlimit-');
+  const containers = Array.from({ length: 101 }, (_, index) => ({
+    ...container(projectRoot),
+    id: (index + 1).toString(16).padStart(64, '0'),
+    name: 'demo-web-' + String(index + 1)
+  }));
+  const fake = await makeFakeDocker(t, {
+    host: 'unix:///var/run/docker.sock', version: '27.5.1', containers
+  });
+  const provider = new DockerProvider({
+    allowedRoots: [projectRoot], dockerExecutable: fake.executable, dockerArgsPrefix: fake.prefix
+  });
+  const inspected = await provider.execute({
+    id: 'inventory-over-limit', capability: 'docker.inspect', risk: 'read',
+    input: { path: projectRoot }, provenance: { kind: 'runtime' }
+  });
+  assert.equal(inspected.ok, false);
+  assert.equal(inspected.error?.code, 'DOCKER_PROJECT_INVENTORY_INCOMPLETE');
+  const lifecycle = await provider.execute({
+    id: 'manage-over-limit', capability: 'docker.manage', risk: 'system',
+    input: { path: projectRoot, operation: 'start', services: ['web'],
+      expectedCurrentFingerprint: '0'.repeat(64) }, provenance: { kind: 'runtime' }
+  });
+  assert.equal(lifecycle.ok, false);
+  assert.equal(lifecycle.error?.code, 'DOCKER_PROJECT_INVENTORY_INCOMPLETE');
+  const calls = await readCalls(fake.logPath);
+  assert.equal(calls.some((call) => call.argv.includes('start')), false);
+});
+
+test('C06 duplicate or malformed Docker Compose IDs cannot make a partial project fingerprint', async (t) => {
+  const projectRoot = await tempDir(t, 'operator-docker-duplicate-inventory-');
+  const original = container(projectRoot);
+  const fake = await makeFakeDocker(t, {
+    host: 'unix:///var/run/docker.sock', version: '27.5.1',
+    containers: [original, { ...original, name: 'same-id-second-container' }]
+  });
+  const provider = new DockerProvider({
+    allowedRoots: [projectRoot], dockerExecutable: fake.executable, dockerArgsPrefix: fake.prefix
+  });
+  const duplicate = await provider.execute({
+    id: 'inventory-duplicate', capability: 'docker.inspect', risk: 'read',
+    input: { path: projectRoot }, provenance: { kind: 'runtime' }
+  });
+  assert.equal(duplicate.ok, false);
+  assert.equal(duplicate.error?.code, 'DOCKER_PROJECT_INVENTORY_INVALID');
+  const state = JSON.parse(await fs.readFile(fake.statePath, 'utf8')) as FakeState;
+  state.containers = [{ ...original, id: 'not-a-valid-id' }];
+  await fs.writeFile(fake.statePath, JSON.stringify(state));
+  const malformed = await provider.execute({
+    id: 'inventory-malformed', capability: 'docker.inspect', risk: 'read',
+    input: { path: projectRoot }, provenance: { kind: 'runtime' }
+  });
+  assert.equal(malformed.ok, false);
+  assert.equal(malformed.error?.code, 'DOCKER_PROJECT_INVENTORY_INVALID');
+});
+
+test('C06 distinct Compose project names sharing an authorized directory cannot be managed together', async (t) => {
+  const projectRoot = await tempDir(t, 'operator-docker-ambiguous-compose-root-');
+  const first = container(projectRoot);
+  const second: FakeContainer = {
+    ...first, id: 'b'.repeat(64), project: 'different-project',
+    service: 'web', name: 'other-web-1'
+  };
+  const fake = await makeFakeDocker(t, {
+    host: 'unix:///var/run/docker.sock', version: '27.5.1',
+    containers: [first, second]
+  });
+  const provider = new DockerProvider({
+    allowedRoots: [projectRoot], dockerExecutable: fake.executable, dockerArgsPrefix: fake.prefix
+  });
+  const inspect = await provider.execute({
+    id: 'ambiguous-root-inspect', capability: 'docker.inspect', risk: 'read',
+    input: { path: projectRoot }, provenance: { kind: 'runtime' }
+  });
+  assert.equal(inspect.ok, false);
+  assert.equal(inspect.error?.code, 'DOCKER_PROJECT_AMBIGUOUS');
+  const manage = await provider.execute({
+    id: 'ambiguous-root-manage', capability: 'docker.manage', risk: 'system',
+    input: { path: projectRoot, services: ['web'], operation: 'stop',
+      expectedCurrentFingerprint: '0'.repeat(64) }, provenance: { kind: 'runtime' }
+  });
+  assert.equal(manage.ok, false);
+  assert.equal(manage.error?.code, 'DOCKER_PROJECT_AMBIGUOUS');
+  const calls = await readCalls(fake.logPath);
+  assert.equal(calls.some((call) => call.argv.includes('stop')), false,
+    'no container in either Compose project may be touched');
+});
+
+test('C06 Docker daemon inspection rejects type-confused container rows instead of string coercion', async (t) => {
+  const projectRoot = await tempDir(t, 'operator-docker-coerced-daemon-');
+  const fake = await makeFakeDocker(t, {
+    host: 'unix:///var/run/docker.sock', version: '27.5.1',
+    containers: [{ ...container(projectRoot), id: ['a'.repeat(64)] as unknown as string }]
+  });
+  const provider = new DockerProvider({
+    allowedRoots: [projectRoot], dockerExecutable: fake.executable, dockerArgsPrefix: fake.prefix
+  });
+  const result = await provider.execute({
+    id: 'malformed-daemon-read', capability: 'docker.inspect', risk: 'read',
+    input: {}, provenance: { kind: 'runtime' }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'DOCKER_OUTPUT_INVALID');
+});

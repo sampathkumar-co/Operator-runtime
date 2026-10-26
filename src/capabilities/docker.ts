@@ -296,13 +296,29 @@ export class DockerProvider implements CapabilityProvider {
     for (const line of lines.slice(0, MAX_CONTAINERS)) {
       try {
         const raw = JSON.parse(line) as Record<string, unknown>;
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+          throw new OperatorError('DOCKER_OUTPUT_INVALID', 'Docker container row is not an object.');
+        }
+        const exact = (key: string, maximum: number): string => {
+          const value = raw[key];
+          if (typeof value !== 'string' || value.length > maximum * 8 ||
+              value.includes(String.fromCharCode(0))) {
+            throw new OperatorError('DOCKER_OUTPUT_INVALID',
+              'Docker container output contains malformed or oversized fields.');
+          }
+          return value.slice(0, maximum);
+        };
+        const id = exact('ID', 64);
+        if (!/^[0-9a-f]{12,64}$/i.test(id)) {
+          throw new OperatorError('DOCKER_OUTPUT_INVALID', 'Docker container ID is not a literal hexadecimal identity.');
+        }
         items.push({
-          id: String(raw.ID ?? '').slice(0, 12),
-          name: String(raw.Names ?? '').slice(0, 256),
-          image: String(raw.Image ?? '').slice(0, 512),
-          state: String(raw.State ?? '').slice(0, 64),
-          status: String(raw.Status ?? '').slice(0, 256),
-          ports: String(raw.Ports ?? '').slice(0, 1024)
+          id: id.slice(0, 12),
+          name: exact('Names', 256),
+          image: exact('Image', 512),
+          state: exact('State', 64),
+          status: exact('Status', 256),
+          ports: exact('Ports', 1024)
         });
       } catch {
         throw new OperatorError('DOCKER_OUTPUT_INVALID', 'Docker container JSON output could not be parsed.');
@@ -315,14 +331,41 @@ export class DockerProvider implements CapabilityProvider {
     const root = await this.#scope.resolveExisting(inputPath);
     const context = await this.#localContext(signal);
     const listed = await this.#run(context, ['ps', '--all', '--filter', 'label=com.docker.compose.project', '--format', '{{json .ID}}'], 20_000, signal);
-    const ids = listed.stdout.split(/\r?\n/).filter(Boolean).slice(0, MAX_CONTAINERS).map((line) => {
-      try { return String(JSON.parse(line)); } catch { throw new OperatorError('DOCKER_OUTPUT_INVALID', 'Docker container id output could not be parsed.'); }
-    }).filter((id) => /^[0-9a-f]{12,64}$/i.test(id));
+    const lines = listed.stdout.split(/\r?\n/).filter(Boolean);
+    // Project lifecycle authority depends on an exhaustive Compose inventory.
+    // Truncating the global list can omit same-project containers and produce
+    // an incomplete fingerprint that appears valid at dispatch/reconciliation.
+    if (listed.truncated || lines.length > MAX_CONTAINERS) {
+      throw new OperatorError('DOCKER_PROJECT_INVENTORY_INCOMPLETE',
+        'Docker returned an incomplete Compose inventory; no project lifecycle action is safe.');
+    }
+    const seenIds = new Set<string>();
+    const ids = lines.map((line) => {
+      let id: unknown;
+      try { id = JSON.parse(line) as unknown; } catch {
+        throw new OperatorError('DOCKER_PROJECT_INVENTORY_INVALID',
+          'Docker returned a malformed Compose container identifier.');
+      }
+      if (typeof id !== 'string' || !/^[0-9a-f]{12,64}$/i.test(id) || seenIds.has(id.toLowerCase())) {
+        throw new OperatorError('DOCKER_PROJECT_INVENTORY_INVALID',
+          'Docker returned an invalid or duplicated Compose container identifier.');
+      }
+      seenIds.add(id.toLowerCase());
+      return id;
+    });
 
     const containers = ids.length === 0 ? [] : await this.#inspectComposeContainers(context, ids, signal);
     const matched = containers
       .filter((container) => sameLocalPath(container.workingDir, root))
       .sort((a, b) => `${a.service}\0${a.id}`.localeCompare(`${b.service}\0${b.id}`));
+    // Two Compose projects can share a working directory (e.g. distinct
+    // --project-name flags). A bare project-root request does not authorize
+    // mutating both. Refuse to merge their container identities.
+    const projectNames = new Set(matched.map((container) => container.project));
+    if (projectNames.size > 1) {
+      throw new OperatorError('DOCKER_PROJECT_AMBIGUOUS',
+        'Multiple Compose project identities share this root; an exact unambiguous project scope is required.');
+    }
     return {
       root,
       context,
@@ -333,6 +376,16 @@ export class DockerProvider implements CapabilityProvider {
 
   async #inspectComposeContainers(context: DockerContext, ids: string[], signal?: AbortSignal): Promise<ComposeContainer[]> {
     const result = await this.#run(context, ['inspect', '--format', INSPECT_FORMAT, ...ids], 30_000, signal);
+    if (result.truncated) {
+      throw new OperatorError('DOCKER_PROJECT_INVENTORY_INCOMPLETE',
+        'Docker inspect output was truncated and cannot establish complete container identities.');
+    }
+    const expectedPrefixes = ids.map((id) => id.slice(0, 12).toLowerCase());
+    if (new Set(expectedPrefixes).size !== ids.length) {
+      throw new OperatorError('DOCKER_PROJECT_INVENTORY_INVALID',
+        'Docker returned ambiguous abbreviated Compose container identities.');
+    }
+    const seenPrefixes = new Set<string>();
     const containers: ComposeContainer[] = [];
     for (const line of result.stdout.split(/\r?\n/).filter(Boolean)) {
       const fields = line.split('\t');
@@ -341,7 +394,13 @@ export class DockerProvider implements CapabilityProvider {
         try { return JSON.parse(field) as unknown; } catch { throw new OperatorError('DOCKER_OUTPUT_INVALID', 'Docker inspect field was not valid JSON.'); }
       });
       const [id, rawName, image, state, project, service, workingDir] = parsed.map((value) => typeof value === 'string' ? value : '');
-      if (!/^[0-9a-f]{12,64}$/i.test(id) || !service || !workingDir) continue;
+      const prefix = id.slice(0, 12).toLowerCase();
+      if (!/^[0-9a-f]{12,64}$/i.test(id) || !project || !service || !workingDir ||
+          !expectedPrefixes.includes(prefix) || seenPrefixes.has(prefix)) {
+        throw new OperatorError('DOCKER_PROJECT_INVENTORY_INVALID',
+          'Docker inspect returned missing, foreign, invalid or duplicated Compose container identity.');
+      }
+      seenPrefixes.add(prefix);
       containers.push({
         id,
         name: rawName.replace(/^\//, '').slice(0, 256),
@@ -351,6 +410,10 @@ export class DockerProvider implements CapabilityProvider {
         service: service.slice(0, 256),
         workingDir
       });
+    }
+    if (seenPrefixes.size !== ids.length) {
+      throw new OperatorError('DOCKER_PROJECT_INVENTORY_INCOMPLETE',
+        'Docker inspect omitted one or more requested Compose container identities.');
     }
     return containers;
   }
