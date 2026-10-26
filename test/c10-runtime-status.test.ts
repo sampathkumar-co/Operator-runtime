@@ -59,6 +59,26 @@ test('C10 runtime status labels stale/unknown evidence without fabricating sourc
   assert.equal(status.relay.freshness, 'STALE');
 });
 
+test('C10 future relay heartbeat never becomes an invented fresh observation', () => {
+  const build = (updatedAt: unknown) => buildControlCenterRuntimeStatus({
+    productVersion: PRODUCT_VERSION,
+    startedAt: '2026-10-25T12:00:00.000Z',
+    observedAt: NOW,
+    runtimeStatus: { relay: { configured: true, state: 'READY', updatedAt } },
+    supportedCapabilities: [], authorizedRootCount: 0
+  });
+  const future = build('2026-10-25T12:11:00.000Z');
+  assert.equal(future.relay.state, 'READY');
+  assert.equal(future.relay.freshness, 'UNKNOWN');
+  assert.equal(future.relay.ageMs, undefined);
+  assert.equal(future.relay.updatedAt, undefined);
+  const forged = build(['2026-10-25T12:09:59.000Z']);
+  assert.equal(forged.relay.freshness, 'UNKNOWN');
+  const genuine = build('2026-10-25T12:09:59.000Z');
+  assert.equal(genuine.relay.freshness, 'FRESH');
+  assert.equal(genuine.relay.ageMs, 1000);
+});
+
 test('C10 runtime status rejects type-confused capabilities and impossible clocks', () => {
   const base = {
     productVersion: PRODUCT_VERSION,
