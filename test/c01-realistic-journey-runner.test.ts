@@ -179,3 +179,23 @@ test('external AbortSignal cancels an unresponsive signed-evidence supplier',asy
   assert.equal(result.authenticatedEvidence,false);
   assert.match(result.reasons.join(' '),/authentication failed: CANCELLED/);
 });
+
+
+test('fixture callback errors redact secrets instead of leaking into reports', async () => {
+  const secret = 'Bearer PRIVATE_FIXTURE_TOKEN_12345';
+  const fixture = input({ openScenario: async () => { throw new Error('request failed: ' + secret); } });
+  const report = await runRealisticJourneyCampaign(fixture.base);
+  assert.equal(report.status, 'FAIL');
+  assert.match(report.reasons.join(' '), /UNTRUSTED_CALLBACK_ERROR/);
+  assert.ok(!JSON.stringify(report).includes(secret));
+});
+
+test('evidence authentication errors redact secrets instead of leaking into reports', async () => {
+  const secret = 'password=PRIVATE_AUTHENTICATOR_SECRET';
+  const fixture = input({ authenticateEvidence: async () => { throw new Error(secret); } });
+  const report = await runRealisticJourneyCampaign(fixture.base);
+  assert.equal(report.status, 'FAIL');
+  assert.equal(report.authenticatedEvidence, false);
+  assert.match(report.reasons.join(' '), /Independent evidence authentication failed: UNTRUSTED_CALLBACK_ERROR/);
+  assert.ok(!JSON.stringify(report).includes(secret));
+});
