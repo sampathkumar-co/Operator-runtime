@@ -411,3 +411,105 @@ test('C05 local model composer remains disabled unless separately opted in', asy
   assert.equal(calls, 1, 'default opt-in may rank READY goals but must not compose checkpoints');
   assert.equal(state.durablePlan.revision, 1);
 });
+
+function composerContext(): TaskPlannerContext {
+  const ctx = context();
+  const state = ctx.task.execution!.plannerState;
+  for (const item of state.durablePlan.subgoals) item.resourceScope = ['/SECRET_PROJECT_PATH'];
+  ctx.task.execution!.records[0]!.observation!.stateVersion = 'a'.repeat(64);
+  ctx.capabilitySchemas = [{
+    provider: 'project', stepKey: 'setup', action: 'verify',
+    capability: 'project.inspect', risk: 'read', inputSchemaVersion: 1,
+    inputMaxBytes: 1024, cancellation: 'required', resourceKinds: ['project']
+  } as any];
+  return ctx;
+}
+
+test('C05 injected composer cannot execute getters, symbols, or hidden authority fields', async () => {
+  let accessorCalls = 0;
+  const unsafe = [
+    Object.defineProperties({}, {
+      operation: { enumerable: true, get() { accessorCalls++; throw new Error('executed'); } },
+      observationRef: { enumerable: true, value: 'a'.repeat(64) }
+    }),
+    Object.assign({operation: 'none', observationRef: 'a'.repeat(64)},
+      { [Symbol('authorization')]: true }),
+    Object.defineProperty({ operation: 'none', observationRef: 'a'.repeat(64) },
+      'action', { enumerable: false, value: { capability: 'file.write' } }),
+    Object.create({operation: 'none'})
+  ];
+  for (const value of unsafe) {
+    const ctx = composerContext();
+    let reservations = 0;
+    ctx.reserveModelBudget = async () => { reservations++; };
+    const planner = new LocalModelAutonomousWorkflowPlanner({
+      model: 'injected-safe-model', now: () => TIME,
+      composer: { async compose() { return value as any; } }
+    });
+    await assert.rejects(() => planner.next(ctx), (error: any) =>
+      error?.code === 'TASK_MODEL_SUBGOAL_INVALID');
+    assert.equal(reservations, 1);
+    assert.equal(ctx.task.execution!.plannerState.activeSubgoalId, undefined);
+    assert.equal(ctx.task.execution!.plannerState.durablePlan.revision, 1);
+  }
+  assert.equal(accessorCalls, 0);
+});
+
+test('C05 injected composer rejects wrong observed-state ref and fabricated scope', async () => {
+  const proposals = [
+    { operation: 'insert_checkpoint', observationRef: 'a'.repeat(64), beforeIndex: 0, schemaIndex: 0, action: 'file.write' },
+    { operation: 'insert_checkpoint', observationRef: 'b'.repeat(64), beforeIndex: 0, schemaIndex: 0 },
+    { operation: 'insert_checkpoint', observationRef: 'a'.repeat(64), beforeIndex: 0, schemaIndex: 99 }
+  ];
+  for (const bad of proposals) {
+    const ctx = composerContext();
+    const planner = new LocalModelAutonomousWorkflowPlanner({
+      model: 'injected-safe-model', now: () => TIME,
+      composer: { async compose() { return bad as any; } }
+    });
+    await assert.rejects(() => planner.next(ctx), (error: any) =>
+      error?.code === 'TASK_MODEL_SUBGOAL_INVALID');
+    assert.equal(ctx.task.execution!.plannerState.durablePlan.revision, 1);
+    assert.equal(ctx.task.execution!.plannerState.activeSubgoalId, undefined);
+  }
+});
+
+test('C05 injected composer cannot be invoked for an unauthorized write schema', async () => {
+  const ctx = composerContext();
+  ctx.capabilitySchemas![0]!.risk = 'write';
+  let composeCalls = 0, rankCalls = 0;
+  const planner = new LocalModelAutonomousWorkflowPlanner({
+    model: 'injected-safe-model', now: () => TIME,
+    composer: { async compose() { composeCalls++; throw new Error('must not transmit'); } },
+    ranker: { async select() { rankCalls++; return 0; } }
+  });
+  const result = await planner.next(ctx);
+  assert.equal(result.type, 'step');
+  assert.equal(composeCalls, 0);
+  assert.equal(rankCalls, 1);
+  assert.equal(ctx.task.execution!.plannerState.durablePlan.revision, 1);
+});
+
+test('C05 Stop rejects composer ignoring cancellation without mutating the durable plan', async () => {
+  const ctx = composerContext();
+  let invoked!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { invoked = resolve; });
+  const gated = new Promise<void>(resolve => { release = resolve; });
+  const controller = new AbortController();
+  ctx.signal = controller.signal;
+  const planner = new LocalModelAutonomousWorkflowPlanner({
+    model: 'injected-safe-model', now: () => TIME,
+    composer: { async compose() {
+      invoked(); await gated;
+      return { operation: 'none', observationRef: 'a'.repeat(64) };
+    } }
+  });
+  const pending = planner.next(ctx);
+  await entered;
+  controller.abort();
+  await assert.rejects(() => pending, (error: any) => error?.code === 'TASK_PLANNER_ABORTED');
+  release();
+  await Promise.resolve();
+  assert.equal(ctx.task.execution!.plannerState.durablePlan.revision, 1);
+  assert.equal(ctx.task.execution!.plannerState.activeSubgoalId, undefined);
+});
