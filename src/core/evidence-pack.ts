@@ -143,7 +143,7 @@ function normalizeRollbackStatus(value: unknown): EvidencePack['rollbackStatus']
 
 function uniqueDigests(input: unknown, label: string): string[] {
   if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype ||
-      input.length > 5000 || Object.keys(input).length !== input.length) {
+      input.length > 5000 || Reflect.ownKeys(input).length !== input.length + 1) {
     throw new OperatorError('EVIDENCE_PACK_INVALID', `${label} must be a dense bounded array.`);
   }
   const values: string[] = [];
@@ -164,9 +164,10 @@ function uniqueBoundedText(input: unknown, maxItems: number, maxBytes: number, l
 }
 
 function boundedId(value: unknown, label: string): string {
-  const text = String(value ?? '');
-  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(text)) throw new OperatorError('EVIDENCE_PACK_INVALID', `${label} is invalid.`);
-  return text;
+  if (typeof value !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(value)) {
+    throw new OperatorError('EVIDENCE_PACK_INVALID', `${label} must be a literal bounded identifier.`);
+  }
+  return value;
 }
 
 function boundedText(value: unknown, maxBytes: number, label: string): string {
@@ -177,9 +178,9 @@ function boundedText(value: unknown, maxBytes: number, label: string): string {
 }
 
 function canonicalIso(value: unknown): string {
-  const text = String(value ?? '');
-  if (!text || !Number.isFinite(Date.parse(text)) || new Date(text).toISOString() !== text) {
-    throw new OperatorError('EVIDENCE_PACK_INVALID', 'Evidence Pack timestamp must be canonical ISO.');
+  if (typeof value !== 'string' || !value ||
+      !Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value) {
+    throw new OperatorError('EVIDENCE_PACK_INVALID', 'Evidence Pack timestamp must be a literal canonical ISO string.');
   }
-  return text;
+  return value;
 }
