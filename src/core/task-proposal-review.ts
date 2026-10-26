@@ -80,6 +80,9 @@ function validateInertReviewJson(value: unknown): void {
     }
     ancestors.add(node);
     for (const key of own) {
+      if (typeof key !== 'string') {
+        reject('TASK_PROPOSAL_REVIEW_INVALID', 'Review data cannot contain symbol fields.');
+      }
       if (isArray && key === 'length') continue;
       if (isArray && (!/^(?:0|[1-9][0-9]*)$/.test(key) || Number(key) >= node.length)) {
         reject('TASK_PROPOSAL_REVIEW_INVALID', 'Review array contains an unknown property.');
