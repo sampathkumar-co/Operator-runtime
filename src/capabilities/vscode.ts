@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { reconcileFromDurableResult } from '../core/reconciliation-coverage.ts';
@@ -44,26 +44,29 @@ export class VsCodeProvider implements CapabilityProvider {
 
   score(): CapabilityScore { return SCORE; }
 
-  async reconcile(request: ProviderReconciliationRequest): Promise<ProviderReconciliationResult> {
+  async reconcile(request: ProviderReconciliationRequest, context: CapabilityExecutionContext = {}): Promise<ProviderReconciliationResult> {
+    throwIfAborted(context.signal, false);
     return reconcileFromDurableResult(this.name, request.action.capability, request.priorResult);
   }
 
-  async execute(action: ActionRequest): Promise<ActionResult> {
+  async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
+      throwIfAborted(context.signal, false);
       if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'VS Code provider does not support this capability.');
       assertTypedVsCodeRequest(action);
       await this.#assertDataDirOutsideProjects();
+      throwIfAborted(context.signal, false);
       if (action.capability === 'vscode.inspect') {
         const operation = action.input.operation ?? 'status';
         if (operation === 'version') {
-          const result = await this.#run(['--version'], process.cwd(), 10_000);
+          const result = await this.#run(['--version'], process.cwd(), 10_000, context.signal, false);
           return ok(action, started, { operation, version: result.stdout.trim().split(/\r?\n/)[0] ?? '' }, [
             evidence('vscode_cli', 'pass', 'Read VS Code CLI version without opening a workspace.')
           ]);
         }
         if (operation === 'extensions') {
-          const result = await this.#run(['--list-extensions', '--show-versions'], process.cwd(), 15_000);
+          const result = await this.#run(['--list-extensions', '--show-versions'], process.cwd(), 15_000, context.signal, false);
           const extensions = result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, MAX_EXTENSIONS).map((line) => {
             const at = line.lastIndexOf('@');
             return at > 0 ? { id: line.slice(0, at), version: line.slice(at + 1) } : { id: line };
@@ -73,7 +76,7 @@ export class VsCodeProvider implements CapabilityProvider {
           ]);
         }
         if (operation === 'status') {
-          const result = await this.#run(['--status'], process.cwd(), 15_000);
+          const result = await this.#run(['--status'], process.cwd(), 15_000, context.signal, false);
           return ok(action, started, { operation, status: result.stdout.slice(0, MAX_OUTPUT_BYTES), truncated: result.truncated }, [
             evidence('vscode_status', 'pass', 'Read bounded VS Code process/status diagnostics through the official CLI.')
           ]);
@@ -84,6 +87,7 @@ export class VsCodeProvider implements CapabilityProvider {
       const mode = action.input.mode ?? 'folder';
       const timeoutMs = boundedInteger(action.input.timeoutMs, 15_000, 1_000, 60_000);
       await fs.mkdir(this.#dataDir, { recursive: true, mode: 0o700 });
+      throwIfAborted(context.signal, false);
       const args = ['--new-window', '--disable-extensions', `--user-data-dir=${this.#dataDir}`];
       let targetSummary: Record<string, unknown>;
       let cwd: string;
@@ -121,7 +125,8 @@ export class VsCodeProvider implements CapabilityProvider {
         throw new OperatorError('INVALID_VSCODE_OPEN_MODE', 'mode must be folder, file, goto, or diff.');
       }
 
-      const result = await this.#run(args, cwd, timeoutMs);
+      throwIfAborted(context.signal, false);
+      const result = await this.#run(args, cwd, timeoutMs, context.signal, true);
       return ok(action, started, {
         ...targetSummary,
         isolated: true,
@@ -145,7 +150,14 @@ export class VsCodeProvider implements CapabilityProvider {
         capability: action.capability,
         provider: this.name,
         evidence: [evidence('vscode', 'fail', op.message, { code: op.code })],
-        error: { code: op.code, message: op.message, retryable: op.retryable },
+        error: {
+          code: op.code, message: op.message, retryable: op.retryable,
+          ...(op.details && ['none', 'known', 'uncertain'].includes(String(op.details.sideEffectState))
+            ? { sideEffectState: op.details.sideEffectState as 'none' | 'known' | 'uncertain' } : {}),
+          ...(op.details && ['pre_dispatch', 'dispatched', 'effect_observed', 'reconciled'].includes(String(op.details.executionPhase))
+            ? { executionPhase: op.details.executionPhase as 'pre_dispatch' | 'dispatched' | 'effect_observed' | 'reconciled' } : {}),
+          ...(op.details ? { details: structuredClone(op.details) } : {})
+        },
         durationMs: Math.round(performance.now() - started)
       };
     }
@@ -171,8 +183,10 @@ export class VsCodeProvider implements CapabilityProvider {
     }
   }
 
-  async #run(args: string[], cwd: string, timeoutMs: number): Promise<{ stdout: string; stderr: string; truncated: boolean }> {
-    const output = await runCode(this.#codeExecutable, [...this.#codeArgsPrefix, ...args], cwd, timeoutMs);
+  async #run(
+    args: string[], cwd: string, timeoutMs: number, signal: AbortSignal | undefined, mayOpenWindow: boolean
+  ): Promise<{ stdout: string; stderr: string; truncated: boolean }> {
+    const output = await runCode(this.#codeExecutable, [...this.#codeArgsPrefix, ...args], cwd, timeoutMs, signal, mayOpenWindow);
     if (output.code !== 0) throw new OperatorError('VSCODE_CLI_FAILED', `VS Code CLI exited with code ${output.code}.`, { details: { stderr: output.stderr.slice(-4000) } });
     return output;
   }
@@ -292,7 +306,15 @@ export async function resolveVsCodeCliScript(codeExecutable: string): Promise<st
   return candidates[0]!;
 }
 
-async function runCode(executable: string, args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string; truncated: boolean }> {
+async function runCode(
+  executable: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+  mayOpenWindow = false
+): Promise<{ code: number; stdout: string; stderr: string; truncated: boolean }> {
+  throwIfAborted(signal, false);
   const baseEnvironment = safeEnvironment();
   const codeExecutable = resolveVsCodeExecutable(executable, baseEnvironment);
   const nativeCli = process.platform === 'win32' && path.win32.basename(codeExecutable).toLowerCase() === 'code.exe'
@@ -301,6 +323,10 @@ async function runCode(executable: string, args: string[], cwd: string, timeoutM
   const environment = nativeCli ? { ...baseEnvironment, ELECTRON_RUN_AS_NODE: '1' } : baseEnvironment;
   const invocationArgs = nativeCli ? [nativeCli, ...args] : args;
   return await new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(aborted(false));
+      return;
+    }
     const child = spawn(codeExecutable, invocationArgs, {
       cwd,
       shell: false,
@@ -313,6 +339,8 @@ async function runCode(executable: string, args: string[], cwd: string, timeoutM
     let bytes = 0;
     let truncated = false;
     let timedOut = false;
+    let cancelled = false;
+    let settled = false;
     const capture = (bucket: Buffer[]) => (chunk: Buffer) => {
       if (bytes >= MAX_OUTPUT_BYTES) { truncated = true; return; }
       const remaining = MAX_OUTPUT_BYTES - bytes;
@@ -323,21 +351,58 @@ async function runCode(executable: string, args: string[], cwd: string, timeoutM
     };
     child.stdout.on('data', capture(stdout));
     child.stderr.on('data', capture(stderr));
-    child.once('error', reject);
-    const timer = setTimeout(() => {
-      timedOut = true;
+    const finishReject = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      reject(error);
+    };
+    child.once('error', finishReject);
+    const terminate = () => {
       child.kill('SIGTERM');
       setTimeout(() => child.kill('SIGKILL'), 1000).unref();
+    };
+    const onAbort = () => {
+      if (settled || cancelled) return;
+      cancelled = true;
+      terminate();
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminate();
     }, timeoutMs);
     timer.unref();
     child.once('close', (code) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      if (settled) return;
+      settled = true;
+      if (cancelled) {
+        reject(aborted(mayOpenWindow));
+        return;
+      }
       if (timedOut) {
         reject(new OperatorError('VSCODE_TIMEOUT', `VS Code CLI exceeded ${timeoutMs}ms timeout.`, { retryable: true }));
         return;
       }
       resolve({ code: code ?? -1, stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8'), truncated });
     });
+  });
+}
+
+function throwIfAborted(signal: AbortSignal | undefined, dispatched: boolean): void {
+  if (signal?.aborted) throw aborted(dispatched);
+}
+
+function aborted(dispatched: boolean): OperatorError {
+  return new OperatorError('EXECUTION_ABORTED', 'VS Code execution was cancelled.', {
+    retryable: false,
+    details: {
+      sideEffectState: dispatched ? 'uncertain' : 'none',
+      executionPhase: dispatched ? 'dispatched' : 'pre_dispatch'
+    }
   });
 }
 
