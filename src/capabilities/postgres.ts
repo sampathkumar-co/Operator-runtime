@@ -534,50 +534,89 @@ async function runPsql(executable: string, args: string[], cwd: string, profile:
   });
 }
 
-function parseCsvObjects(csv: string, maxRows: number): Array<Record<string, string | null>> {
-  if (!csv.trim()) return [];
-  const records: Array<Array<{ value: string; quoted: boolean }>> = [];
-  let row: Array<{ value: string; quoted: boolean }> = [];
+export function parseCsvObjects(csv: string, maxRows: number): Array<Record<string, string | null>> {
+  if (typeof csv !== 'string' || Buffer.byteLength(csv, 'utf8') > MAX_OUTPUT_BYTES ||
+      !Number.isSafeInteger(maxRows) || maxRows < 0 || maxRows > MAX_ROWS) {
+    throw new OperatorError('POSTGRES_CSV_INVALID', 'PostgreSQL CSV parse input or row budget is invalid.');
+  }
+  if (csv.length === 0) return [];
+
+  // Strict CSV state machine: an unquoted empty field is SQL NULL and a
+  // quoted empty field is an actual empty string. A row consisting of just
+  // an unquoted empty field is still a row, never a discardable blank line.
+  type Cell = { value: string; quoted: boolean };
+  const records: Cell[][] = [];
+  let row: Cell[] = [];
   let field = '';
   let quoted = false;
-  let inQuotes = false;
-  for (let i = 0; i < csv.length; i += 1) {
-    const ch = csv[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (csv[i + 1] === '"') { field += '"'; i += 1; }
-        else inQuotes = false;
-      } else field += ch;
+  let state: 'start' | 'unquoted' | 'quoted' | 'after_quote' = 'start';
+  const pushField = () => {
+    row.push({ value: field, quoted });
+    field = '';
+    quoted = false;
+    state = 'start';
+  };
+  const pushRow = () => {
+    pushField();
+    records.push(row);
+    if (records.length > maxRows + 1) {
+      throw new OperatorError('POSTGRES_ROW_LIMIT_EXCEEDED',
+        'PostgreSQL returned more rows than the configured bound.');
+    }
+    row = [];
+  };
+
+  for (let index = 0; index < csv.length; index += 1) {
+    const char = csv[index]!;
+    if (state === 'quoted') {
+      if (char === '"') {
+        if (csv[index + 1] === '"') { field += '"'; index += 1; }
+        else state = 'after_quote';
+      } else {
+        field += char;
+      }
       continue;
     }
-    if (ch === '"' && field.length === 0) { inQuotes = true; quoted = true; continue; }
-    if (ch === ',') { row.push({ value: field, quoted }); field = ''; quoted = false; continue; }
-    if (ch === '\n' || ch === '\r') {
-      if (ch === '\r' && csv[i + 1] === '\n') i += 1;
-      row.push({ value: field, quoted });
-      records.push(row);
-      row = [];
-      field = '';
-      quoted = false;
+    if (char === ',') { pushField(); continue; }
+    if (char === '\n' || char === '\r') {
+      if (char === '\r' && csv[index + 1] === '\n') index += 1;
+      pushRow();
       continue;
     }
-    field += ch;
+    if (state === 'after_quote') {
+      throw new OperatorError('POSTGRES_CSV_INVALID',
+        'Unexpected data after a closed PostgreSQL CSV quoted field.');
+    }
+    if (char === '"') {
+      if (state !== 'start') {
+        throw new OperatorError('POSTGRES_CSV_INVALID',
+          'Unexpected quote inside an unquoted PostgreSQL CSV field.');
+      }
+      state = 'quoted';
+      quoted = true;
+      continue;
+    }
+    field += char;
+    state = 'unquoted';
   }
-  if (inQuotes) throw new OperatorError('POSTGRES_CSV_INVALID', 'PostgreSQL CSV output ended inside a quoted field.');
-  if (field.length > 0 || quoted || row.length > 0) { row.push({ value: field, quoted }); records.push(row); }
+  if (state === 'quoted') {
+    throw new OperatorError('POSTGRES_CSV_INVALID', 'PostgreSQL CSV output ended inside a quoted field.');
+  }
+  if (state !== 'start' || row.length > 0) pushRow();
   if (records.length === 0) return [];
-  const headers = records[0].map((cell) => cell.value);
+
+  const headers = records[0]!.map((cell) => cell.value);
   if (headers.some((header) => !header || header.length > 256) || new Set(headers).size !== headers.length) {
     throw new OperatorError('POSTGRES_CSV_INVALID', 'PostgreSQL CSV headers are invalid or duplicated.');
   }
-  const data = records.slice(1).filter((record) => !(record.length === 1 && record[0].value === ''));
-  if (data.length > maxRows) throw new OperatorError('POSTGRES_ROW_LIMIT_EXCEEDED', 'PostgreSQL returned more rows than the configured bound.');
-  return data.map((record) => {
-    if (record.length !== headers.length) throw new OperatorError('POSTGRES_CSV_INVALID', 'PostgreSQL CSV row width does not match headers.');
+  return records.slice(1).map((record) => {
+    if (record.length !== headers.length) {
+      throw new OperatorError('POSTGRES_CSV_INVALID', 'PostgreSQL CSV row width does not match headers.');
+    }
     const object: Record<string, string | null> = Object.create(null);
     for (let index = 0; index < headers.length; index += 1) {
-      const cell = record[index];
-      object[headers[index]] = cell.value === '' && !cell.quoted ? null : cell.value;
+      const cell = record[index]!;
+      object[headers[index]!] = cell.value === '' && !cell.quoted ? null : cell.value;
     }
     return object;
   });
