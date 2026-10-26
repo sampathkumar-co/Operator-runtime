@@ -202,7 +202,8 @@ function sameDownloadFile(left: { dev: number; ino: number }, right: { dev: numb
 async function bindCompletedDownloadArtifact(
   download: BrowserDownloadEvent,
   targetId: string,
-  target: JsonMap
+  target: JsonMap,
+  signal?: AbortSignal
 ): Promise<BrowserDownloadEvent & Record<string, unknown>> {
   const bound = {
     ...download,
@@ -210,11 +211,14 @@ async function bindCompletedDownloadArtifact(
     actionTargetDigest: crypto.createHash('sha256').update(canonicalJson({ targetId, target })).digest('hex'),
     completedAt: new Date().toISOString()
   };
+  if (signal?.aborted) throw abortError();
   if (download.state !== 'completed' || !download.filePath) return bound;
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
+    if (signal?.aborted) throw abortError();
     const before = await lstat(download.filePath);
     if (!before.isFile() || before.isSymbolicLink() || before.size < 0 || before.size > MAX_HASHED_DOWNLOAD_BYTES) return { ...bound, artifactStatus: 'unavailable' };
+    if (signal?.aborted) throw abortError();
     handle = await open(download.filePath, fsConstants.O_RDONLY);
     const opened = await handle.stat();
     if (!opened.isFile() || !sameDownloadFile(before, opened)
@@ -223,13 +227,16 @@ async function bindCompletedDownloadArtifact(
     const chunk = Buffer.allocUnsafe(64 * 1024);
     let artifactBytes = 0;
     while (artifactBytes < opened.size) {
+      if (signal?.aborted) throw abortError();
       const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, opened.size - artifactBytes), artifactBytes);
       if (bytesRead < 1) return { ...bound, artifactStatus: 'unavailable' };
       artifactBytes += bytesRead;
       digest.update(chunk.subarray(0, bytesRead));
     }
+    if (signal?.aborted) throw abortError();
     const after = await handle.stat();
     const finalPath = await lstat(download.filePath);
+    if (signal?.aborted) throw abortError();
     if (artifactBytes !== opened.size || !sameDownloadFile(opened, after)
       || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs
       || finalPath.isSymbolicLink() || !sameDownloadFile(opened, finalPath)
@@ -238,6 +245,9 @@ async function bindCompletedDownloadArtifact(
     }
     return { ...bound, artifactStatus: 'hashed', artifactSha256: digest.digest('hex'), artifactBytes };
   } catch {
+    // A deliberate owner Stop is never a completed, harmless hash fallback.
+    // It must reach the dispatched-side-effect cancellation fence.
+    if (signal?.aborted) throw abortError();
     return { ...bound, artifactStatus: 'unavailable' };
   } finally {
     await handle?.close().catch(() => undefined);
@@ -970,7 +980,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
       // URLs. Hash locally, then remove those fields before writing any
       // durable ActionResult, evidence, diagnostic or user-visible response.
       const boundDownload = rawDownloadResult
-        ? await bindCompletedDownloadArtifact(rawDownloadResult, targetId, targetSpec)
+        ? await bindCompletedDownloadArtifact(rawDownloadResult, targetId, targetSpec, signal)
         : undefined;
       const downloadResult = boundDownload ? { ...boundDownload } : undefined;
       if (downloadResult) {
