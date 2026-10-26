@@ -127,7 +127,24 @@ export class RemoteAuthorityFenceStore {
     // this policy check.
     await this.#authorize({ accountId: lease.accountId, deviceId: lease.deviceId,
       authorityGeneration: lease.authorityGeneration }, 'acquire');
-    return { ...lease, expiresAt: record.expiresAt };
+    // The independently authoritative policy may await network/storage work.
+    // A revocation or lease transfer can win while that hook is pending.
+    // Never return the earlier snapshot as current after an async gap.
+    const afterPolicy = await this.#store.get(NS, resourceKey(lease));
+    const after = parseValue(afterPolicy);
+    if (!afterPolicy || !after || after.kind !== 'active' ||
+      !afterPolicy.expiresAt || Date.parse(afterPolicy.expiresAt) <= this.#clock().getTime() ||
+      afterPolicy.generation !== lease.generation ||
+      after.accountId !== lease.accountId || after.deviceId !== lease.deviceId ||
+      after.authorityGeneration !== lease.authorityGeneration || after.ownerId !== lease.ownerId ||
+      after.leaseId !== lease.leaseId || !sameToken(after.fenceToken, lease.fenceToken) ||
+      after.process.pid !== lease.process.pid || after.process.started !== lease.process.started) {
+      throw blocked('REMOTE_AUTHORITY_FENCE_LOST',
+        'Remote authority changed during policy verification; the previous lease is not current.');
+    }
+    // External effects still require their own final provider-side authority
+    // check or atomic commit. A read check alone is never a write capability.
+    return { ...lease, expiresAt: afterPolicy.expiresAt };
   }
 
   async heartbeat(leaseInput: RemoteAuthorityLease, ttlMs = 30_000): Promise<RemoteAuthorityLease> {
