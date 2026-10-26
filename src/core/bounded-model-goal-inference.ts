@@ -240,6 +240,13 @@ export class BoundedModelGoalInference {
         // to finalize is a hard failure even after valid JSON was received.
         await this.#ledger.finalize({ reservationId, callId, outcome: status });
       }
+      // A late Stop can arrive while durable spend accounting is being
+      // finalized after valid model JSON. Account for the call but never
+      // surface the cancelled proposal as a live execution recommendation.
+      if (request.signal?.aborted) {
+        refused('TASK_MODEL_INFERENCE_ABORTED',
+          'Model inference was cancelled while the durable budget ledger finalized.');
+      }
       if (!proposal) refused('TASK_MODEL_INFERENCE_INVALID', 'No validated model proposal.');
       return { modelId: this.#modelId, reservationId, proposal, executionStarted: false };
     } finally {
