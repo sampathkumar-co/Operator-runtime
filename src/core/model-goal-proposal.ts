@@ -91,19 +91,42 @@ function within(candidate: string, root: string): boolean {
   return rel === '' || (rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel));
 }
 function scopes(input: ModelGoalProposalRequest) {
-  if (!input || typeof input !== 'object' || !Array.isArray(input.approvedRoots) ||
-      !Array.isArray(input.approvedBrowserOrigins) ||
-      input.approvedRoots.length > 12 || input.approvedBrowserOrigins.length > 12 ||
-      input.approvedRoots.length + input.approvedBrowserOrigins.length === 0) {
+  // This validator is also exposed as a standalone SDK function. Do not rely
+  // on the trusted intake's separate snapshot: a direct caller may supply
+  // getters/proxies or changing arrays that execute code on field access.
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      (Object.getPrototypeOf(input) !== Object.prototype && Object.getPrototypeOf(input) !== null)) {
+    denied('Provide a plain inert owner-approved model scope.');
+  }
+  const fields = Object.getOwnPropertyDescriptors(input);
+  const expected = ['objective', 'approvedRoots', 'approvedBrowserOrigins'] as const;
+  if (Reflect.ownKeys(input).length !== expected.length ||
+      expected.some(key => !Object.hasOwn(fields, key) ||
+        !fields[key]!.enumerable || !('value' in fields[key]!))) {
+    denied('Approved model scope must have only exact inert consent fields.');
+  }
+  const objective = fields.objective!.value;
+  const approvedRoots = fields.approvedRoots!.value;
+  const approvedBrowserOrigins = fields.approvedBrowserOrigins!.value;
+  if (!Array.isArray(approvedRoots) || !Array.isArray(approvedBrowserOrigins) ||
+      approvedRoots.length > 12 || approvedBrowserOrigins.length > 12 ||
+      approvedRoots.length + approvedBrowserOrigins.length === 0) {
     denied('Provide bounded explicit user-approved browser origins or project roots.');
   }
-  exactList(input.approvedRoots, 0, 12, 'approved project roots');
-  exactList(input.approvedBrowserOrigins, 0, 12, 'approved browser origins');
-  boundedText(input.objective, 4096, 'objective');
-  return {
-    roots: input.approvedRoots.map(approvedRoot),
-    origins: new Set(input.approvedBrowserOrigins.map(approvedOrigin))
-  };
+  exactList(approvedRoots, 0, 12, 'approved project roots');
+  exactList(approvedBrowserOrigins, 0, 12, 'approved browser origins');
+  boundedText(objective, 4096, 'objective');
+  const roots: string[] = [];
+  const origins = new Set<string>();
+  // Read each scope element from its own verified data descriptor exactly once.
+  // No mutable caller-owned array is traversed again after validation.
+  for (let i = 0; i < approvedRoots.length; i++) {
+    roots.push(approvedRoot(Object.getOwnPropertyDescriptor(approvedRoots, String(i))!.value));
+  }
+  for (let i = 0; i < approvedBrowserOrigins.length; i++) {
+    origins.add(approvedOrigin(Object.getOwnPropertyDescriptor(approvedBrowserOrigins, String(i))!.value));
+  }
+  return { roots, origins };
 }
 type Scope = ReturnType<typeof scopes>;
 function atomic(value: unknown, scope: Scope): AtomicProposal {
