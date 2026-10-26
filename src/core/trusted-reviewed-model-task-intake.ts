@@ -51,16 +51,62 @@ function boundedPrincipal(principal: unknown): asserts principal is string {
     denied('TASK_MODEL_INTAKE_AUTH_INVALID', 'An authenticated bounded principal is mandatory.');
   }
 }
-function normalizedScope(value: ModelGoalProposalRequest): string {
-  if (!value || !Array.isArray(value.approvedRoots) ||
-      !Array.isArray(value.approvedBrowserOrigins) ||
-      typeof value.objective !== 'string' || !value.objective.trim()) {
+/**
+ * Bind both the caller's consent and the trusted authority's answer to inert
+ * source-time values before crossing an await. An input object with getters,
+ * sparse arrays, or custom iterators cannot redefine its own consent later.
+ * This snapshot does not grant authority or replace the final kernel check.
+ */
+function snapshotScope(value: unknown): ModelGoalProposalRequest {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
     denied('TASK_MODEL_INTAKE_SCOPE_DENIED', 'Current approved model request is invalid.');
   }
+  const proto = Object.getPrototypeOf(value);
+  const keys = ['objective', 'approvedRoots', 'approvedBrowserOrigins'] as const;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if ((proto !== Object.prototype && proto !== null) ||
+      Reflect.ownKeys(value).length !== keys.length ||
+      keys.some(key => !Object.hasOwn(descriptors, key) ||
+        !descriptors[key]?.enumerable || !('value' in descriptors[key]!))) {
+    denied('TASK_MODEL_INTAKE_SCOPE_DENIED', 'Approved model scope must contain only inert consent fields.');
+  }
+  const objective: unknown = descriptors.objective!.value;
+  if (typeof objective !== 'string' || !objective.trim() || objective.trim() !== objective ||
+      objective.length > 4096 || objective.includes('\0')) {
+    denied('TASK_MODEL_INTAKE_SCOPE_DENIED', 'Approved model objective is invalid.');
+  }
+  const copy = (field: 'approvedRoots' | 'approvedBrowserOrigins'): string[] => {
+    const values: unknown = descriptors[field]!.value;
+    if (!Array.isArray(values) || Object.getPrototypeOf(values) !== Array.prototype ||
+        values.length > 12 || Reflect.ownKeys(values).length !== values.length + 1) {
+      denied('TASK_MODEL_INTAKE_SCOPE_DENIED', 'Approved resource list must be an exact bounded array.');
+    }
+    const result: string[] = [];
+    for (let index = 0; index < values.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(values, String(index));
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor) ||
+          typeof descriptor.value !== 'string' ||
+          descriptor.value.length < 1 || descriptor.value.length > 4096) {
+        denied('TASK_MODEL_INTAKE_SCOPE_DENIED', 'Approved resource list contains an invalid or executable field.');
+      }
+      result.push(descriptor.value);
+    }
+    return result;
+  };
+  const approvedRoots = copy('approvedRoots');
+  const approvedBrowserOrigins = copy('approvedBrowserOrigins');
+  if (!approvedRoots.length && !approvedBrowserOrigins.length) {
+    denied('TASK_MODEL_INTAKE_SCOPE_DENIED', 'Current approved model request has no resources.');
+  }
+  return { objective, approvedRoots, approvedBrowserOrigins };
+}
+
+function normalizedScope(value: ModelGoalProposalRequest): string {
+  const snapshot = snapshotScope(value);
   return JSON.stringify({
-    objective: value.objective,
-    roots: [...value.approvedRoots].sort(),
-    browserOrigins: [...value.approvedBrowserOrigins].sort()
+    objective: snapshot.objective,
+    roots: [...snapshot.approvedRoots].sort(),
+    browserOrigins: [...snapshot.approvedBrowserOrigins].sort()
   });
 }
 
@@ -97,13 +143,20 @@ export class TrustedReviewedModelTaskIntake {
     if (input.allowModelTransmission !== true) {
       denied('TASK_MODEL_TRANSMISSION_DENIED', 'No model transmission without explicit consent.');
     }
+    // Capture consent before the first asynchronous authority read; all later
+    // comparisons and review issuance must use exactly these values.
+    const requestSnapshot = snapshotScope(input.request);
+    const consentDigest = normalizedScope(requestSnapshot);
     const current = await this.#authority.currentApprovedScope(input.principal);
-    if (!current || normalizedScope(current) !== normalizedScope(input.request)) {
+    if (input.signal?.aborted) {
+      denied('TASK_MODEL_INFERENCE_ABORTED', 'Model inference was cancelled during authority lookup.');
+    }
+    if (!current || normalizedScope(current) !== consentDigest) {
       denied('TASK_MODEL_INTAKE_SCOPE_DENIED',
         'Model may only observe exactly the current explicitly approved objective and resources.');
     }
     const response = await this.#model.propose({
-      scope: input.request, allowModelTransmission: true, signal: input.signal
+      scope: requestSnapshot, allowModelTransmission: true, signal: input.signal
     });
     // A long inference may finish after Stop, scope revocation, or intent replacement.
     // Discard its valid JSON rather than issuing a review against stale rights.
@@ -111,13 +164,13 @@ export class TrustedReviewedModelTaskIntake {
     if (input.signal?.aborted) {
       denied('TASK_MODEL_INFERENCE_ABORTED', 'Model review generation was cancelled after inference.');
     }
-    if (!refreshed || normalizedScope(refreshed) !== normalizedScope(input.request)) {
+    if (!refreshed || normalizedScope(refreshed) !== consentDigest) {
       denied('TASK_MODEL_INTAKE_SCOPE_DENIED',
         'Approved model objective or resource scope changed while inference was running.');
     }
     const issued = this.#review.propose({
       principal: input.principal,
-      request: input.request,
+      request: requestSnapshot,
       modelOutput: response.proposal
     });
     return {
