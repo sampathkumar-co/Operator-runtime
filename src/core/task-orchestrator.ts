@@ -1304,6 +1304,14 @@ export class TaskOrchestrator {
         throw new OperatorError('TASK_TERMINAL', 'Task cancellation is already in progress.');
       }
       if (!['PAUSED', 'BLOCKED'].includes(task.state)) throw new OperatorError('TASK_NOT_RESUMABLE', 'Only paused or blocked tasks can resume.');
+      // A BLOCKED action with uncertain external effects cannot be replayed
+      // merely by issuing a task resume (even with new permission receipts).
+      // Reconciliation must first update the durable action/effect truth.
+      if (task.execution?.records.some(record => record.state === 'BLOCKED' &&
+          record.risk !== 'read' && record.sideEffectState === 'uncertain')) {
+        throw new OperatorError('TASK_RECONCILIATION_REQUIRED',
+          'An uncertain blocked mutation needs independent reconciliation before task resume.');
+      }
       if (this.#controlRequests.get(taskId) === 'PAUSED') this.#controlRequests.delete(taskId);
       task.state = 'PENDING';
       for (const node of task.nodes) if (node.state === 'BLOCKED') node.state = 'PENDING';
