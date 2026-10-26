@@ -56,13 +56,45 @@ function normalizeAssertionValue(value: unknown, label: string): unknown {
   return JSON.parse(json);
 }
 
-export function normalizeTaskStateAssertions(input: unknown, label = 'assertions'): TaskStateAssertion[] {
-  if (!Array.isArray(input) || input.length < 1 || input.length > 20) {
-    throw new OperatorError('TASK_GOAL_INVALID', `${label} must contain 1-20 machine-state assertions.`);
+/**
+ * Proof checks must be an exact JSON-shaped list. Sparse slots are skipped by
+ * Array.map, and JS-only hidden/accessor fields cannot be authenticated in a
+ * canonical JSON assertion digest.
+ */
+function exactAssertionList(input: unknown, label: string): asserts input is unknown[] {
+  if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype ||
+      input.length < 1 || input.length > 20 ||
+      Reflect.ownKeys(input).length !== input.length + 1) {
+    throw new OperatorError('TASK_GOAL_INVALID', `${label} must be an exact dense list of 1-20 assertions.`);
   }
+  for (let index = 0; index < input.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+      throw new OperatorError('TASK_GOAL_INVALID', `${label} contains a missing or executable assertion slot.`);
+    }
+  }
+}
+
+function exactAssertionRecord(input: Record<string, unknown>, label: string): void {
+  const proto = Object.getPrototypeOf(input);
+  if ((proto !== Object.prototype && proto !== null) ||
+      Reflect.ownKeys(input).some(key => typeof key !== 'string' ||
+        !['path', 'operator', 'value'].includes(key))) {
+    throw new OperatorError('TASK_GOAL_INVALID', `${label} must contain only typed assertion fields.`);
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(input);
+  if (!Object.hasOwn(descriptors, 'path') || !Object.hasOwn(descriptors, 'operator') ||
+      Object.values(descriptors).some(desc => !('value' in desc) || !desc.enumerable)) {
+    throw new OperatorError('TASK_GOAL_INVALID', `${label} contains missing or executable fields.`);
+  }
+}
+
+export function normalizeTaskStateAssertions(input: unknown, label = 'assertions'): TaskStateAssertion[] {
+  exactAssertionList(input, label);
   return input.map((item, index) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw new OperatorError('TASK_GOAL_INVALID', `${label}[${index}] is invalid.`);
     const raw = item as Record<string, unknown>;
+    exactAssertionRecord(raw, `${label}[${index}]`);
     // An array/object converted through String() is not a typed assertion.
     // Its accidental coercion must not become a different machine-state path
     // or turn an unrecognised operation into an accepted comparison.
@@ -75,8 +107,13 @@ export function normalizeTaskStateAssertions(input: unknown, label = 'assertions
     if (typeof operator !== 'string' || !['exists', 'equals', 'not_equals', 'includes'].includes(operator)) {
       throw new OperatorError('TASK_GOAL_INVALID', `${label}[${index}].operator is invalid.`);
     }
-    if (operator !== 'exists' && raw.value === undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}[${index}] requires value.`);
-    const value = raw.value === undefined
+    if (operator === 'exists' && Object.hasOwn(raw, 'value')) {
+      throw new OperatorError('TASK_GOAL_INVALID', `${label}[${index}] exists checks cannot carry ignored values.`);
+    }
+    if (operator !== 'exists' && !Object.hasOwn(raw, 'value')) {
+      throw new OperatorError('TASK_GOAL_INVALID', `${label}[${index}] requires value.`);
+    }
+    const value = operator === 'exists'
       ? undefined : normalizeAssertionValue(raw.value, `${label}[${index}].value`);
     return { path, operator: operator as TaskStateAssertion['operator'],
       ...(value === undefined ? {} : { value }) };
