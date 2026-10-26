@@ -110,6 +110,10 @@ export class OperatorRuntime {
 
     const failures = [];
     for (const { provider, score, baseScore, learnedAdjustment } of ranked) {
+      // A trusted dispatch callback may veto before the journal moves to
+      // DISPATCHED. Never confuse that exact pre-dispatch veto with an abort
+      // thrown later by a provider whose effects may already have occurred.
+      let trustedPreDispatchAbort = false;
       try {
         if (context.signal?.aborted) return abortedResult(canonicalAction, start);
         if (!await provider.supports(canonicalAction)) {
@@ -135,7 +139,16 @@ export class OperatorRuntime {
           return policyDeniedBeforeDispatch(canonicalAction, error, start);
         }
         if (context.signal?.aborted) return abortedResult(canonicalAction, start);
-        await context.onProviderDispatch?.(provider.name);
+        try {
+          await context.onProviderDispatch?.(provider.name);
+        } catch (error) {
+          if (error instanceof OperatorError && error.code === 'EXECUTION_ABORTED'
+              && error.details?.executionPhase === 'pre_dispatch'
+              && error.details?.sideEffectState === 'none') {
+            trustedPreDispatchAbort = true;
+          }
+          throw error;
+        }
         // The callback is the durable dispatch linearization point for AgentKernel.
         // Cancellation after it cannot prove that no provider effect began, even
         // when this runtime has not yet invoked provider.execute.
@@ -159,7 +172,9 @@ export class OperatorRuntime {
           return { ...result, error: failure };
         }
       } catch (error) {
-        if (context.signal?.aborted || isAbortError(error)) return abortedResult(canonicalAction, start, true);
+        if (context.signal?.aborted || isAbortError(error)) {
+          return abortedResult(canonicalAction, start, !trustedPreDispatchAbort);
+        }
         const op = error instanceof OperatorError
           ? error
           : new OperatorError('PROVIDER_EXCEPTION', error instanceof Error ? error.message : String(error), { retryable: true });
