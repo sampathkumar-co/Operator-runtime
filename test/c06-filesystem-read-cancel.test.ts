@@ -119,3 +119,36 @@ test('C06 recursive search rejects file replaced with a symlink before stat', as
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, 'FILE_SEARCH_ENTRY_CHANGED');
 });
+
+test('C06 recursive search refuses a directory redirected to a different in-scope directory', async (t) => {
+  if (process.platform === 'win32') return t.skip('Windows path-lease symlink/junction race tested by native matrix');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-c06-search-inscope-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const descend = path.join(root, 'descend');
+  const other = path.join(root, 'different');
+  await fs.mkdir(descend);
+  await fs.mkdir(other);
+  await fs.writeFile(path.join(other, 'find-secret.txt'), 'different directory data');
+  const original = fs.readdir;
+  let switched = false;
+  fs.readdir = (async (...args: Parameters<typeof fs.readdir>) => {
+    const rows = await (original as any)(...args);
+    if (String(args[0]) === root && !switched) {
+      switched = true;
+      await fs.rename(descend, path.join(root, 'old-descend'));
+      await fs.symlink(other, descend, 'dir');
+    }
+    return rows;
+  }) as typeof fs.readdir;
+  t.after(() => { fs.readdir = original; });
+  const provider = new FilesystemProvider({ allowedRoots: [root] });
+  const result = await provider.execute({
+    id: 'search-in-scope-replacement', capability: 'file.search', risk: 'read',
+    input: { path: root, query: 'find-secret', maxDepth: 4 },
+    provenance: { kind: 'runtime' }
+  });
+  assert.equal(switched, true);
+  assert.equal(result.ok, false, 'searching a replaced directory is not the authorized original observation');
+  assert.equal(result.error?.code, 'FILE_SEARCH_DIRECTORY_CHANGED');
+  assert.equal(JSON.stringify(result).includes('find-secret.txt'), false);
+});
