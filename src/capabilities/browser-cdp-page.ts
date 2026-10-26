@@ -95,6 +95,12 @@ export function requireTarget(targets: CdpTarget[], id: string): CdpTarget {
         details: { remedy: 'reobserve_before_retry', executionPhase: 'pre_dispatch', sideEffectState: 'none' }
       });
   }
+  if (matches[0]!.type !== 'page') {
+    throw new OperatorError('BROWSER_TARGET_NOT_PAGE',
+      'The observed target is not an interactive page. Select a page target from current browser inspection.', {
+        details: { remedy: 'select_page_target', executionPhase: 'pre_dispatch', sideEffectState: 'none' }
+      });
+  }
   return matches[0]!;
 }
 
