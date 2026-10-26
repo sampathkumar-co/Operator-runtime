@@ -118,3 +118,60 @@ gitTest('structured Git write rejects stale fingerprints and pathspec magic befo
   assert.equal(magic.error?.code, 'INVALID_GIT_PATH');
   assert.equal(git(root, 'diff', '--cached', '--name-only').trim(), '');
 });
+
+test('C06 Git write cancelled before dispatch cannot create repository changes or checkpoint', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-git-write-preabort-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const writer = new GitWriteProvider({ allowedRoots: [root] });
+  const controller = new AbortController();
+  controller.abort('owner-stop');
+  const result = await writer.execute({
+    id: 'cancel-git-write-before-checkpoint', capability: 'git.write', risk: 'write',
+    input: { operation: 'stage', cwd: root, paths: ['file.txt'],
+      expectedCurrentFingerprint: '0'.repeat(64) },
+    provenance: { kind: 'runtime' }
+  }, { signal: controller.signal });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'EXECUTION_ABORTED');
+  assert.equal(result.error?.retryable, false);
+  assert.equal(result.error?.sideEffectState, 'none');
+  assert.equal(result.error?.executionPhase, 'pre_dispatch');
+  await assert.rejects(fs.access(path.join(root, '.git')));
+});
+
+test('C06 Git recovery does not claim a durable completion after Stop', async () => {
+  const writer = new GitWriteProvider({ allowedRoots: [os.tmpdir()] });
+  const controller = new AbortController();
+  controller.abort('owner-stop');
+  await assert.rejects(writer.reconcile({
+    action: {
+      id: 'cancel-reconciliation', capability: 'git.write', risk: 'write',
+      input: {}, provenance: { kind: 'runtime' }
+    },
+    priorResult: {
+      ok: true, capability: 'git.write', provider: 'git.write.native',
+      durationMs: 0, evidence: []
+    }
+  }, { signal: controller.signal }), (error: any) =>
+    error?.code === 'EXECUTION_ABORTED' &&
+    error?.details?.sideEffectState === 'none');
+});
+
+gitTest('C06 failed dispatched Git pathspec is uncertain and never automatically retryable', async (t) => {
+  const root = await createRepo(t);
+  const checkpoint = new GitCheckpointProvider({ allowedRoots: [root] });
+  const writer = new GitWriteProvider({ allowedRoots: [root] });
+  const before = await fingerprint(checkpoint, root);
+  const failed = await writer.execute({
+    id: 'missing-path-failed-after-checkpoint', capability: 'git.write', risk: 'write',
+    input: { operation: 'stage', cwd: root, paths: ['absent-file-never-added.txt'],
+      expectedCurrentFingerprint: before },
+    provenance: { kind: 'runtime' }
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.error?.code, 'GIT_COMMAND_FAILED');
+  assert.equal(failed.error?.retryable, false);
+  assert.equal(failed.error?.sideEffectState, 'uncertain');
+  assert.equal(failed.error?.executionPhase, 'dispatched');
+  assert.equal(git(root, 'diff', '--cached', '--name-only').trim(), '');
+});
