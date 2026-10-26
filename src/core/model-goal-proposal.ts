@@ -90,6 +90,20 @@ function within(candidate: string, root: string): boolean {
   const rel = path.relative(root, candidate);
   return rel === '' || (rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel));
 }
+/** Capture each owner-scoped array element from one inert descriptor set. */
+function approvedScopeList(value: unknown, label: string): unknown[] {
+  exactList(value, 0, 12, label);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const copied: unknown[] = [];
+  for (let i = 0; i < value.length; i++) {
+    const slot = descriptors[String(i)];
+    if (!slot || !slot.enumerable || !('value' in slot)) {
+      invalid(label + ' contains an executable or missing scope slot.');
+    }
+    copied.push(slot.value);
+  }
+  return copied;
+}
 function scopes(input: ModelGoalProposalRequest) {
   // This validator is also exposed as a standalone SDK function. Do not rely
   // on the trusted intake's separate snapshot: a direct caller may supply
@@ -113,19 +127,9 @@ function scopes(input: ModelGoalProposalRequest) {
       approvedRoots.length + approvedBrowserOrigins.length === 0) {
     denied('Provide bounded explicit user-approved browser origins or project roots.');
   }
-  exactList(approvedRoots, 0, 12, 'approved project roots');
-  exactList(approvedBrowserOrigins, 0, 12, 'approved browser origins');
+  const roots = approvedScopeList(approvedRoots, 'approved project roots').map(approvedRoot);
+  const origins = new Set(approvedScopeList(approvedBrowserOrigins, 'approved browser origins').map(approvedOrigin));
   boundedText(objective, 4096, 'objective');
-  const roots: string[] = [];
-  const origins = new Set<string>();
-  // Read each scope element from its own verified data descriptor exactly once.
-  // No mutable caller-owned array is traversed again after validation.
-  for (let i = 0; i < approvedRoots.length; i++) {
-    roots.push(approvedRoot(Object.getOwnPropertyDescriptor(approvedRoots, String(i))!.value));
-  }
-  for (let i = 0; i < approvedBrowserOrigins.length; i++) {
-    origins.add(approvedOrigin(Object.getOwnPropertyDescriptor(approvedBrowserOrigins, String(i))!.value));
-  }
   return { roots, origins };
 }
 type Scope = ReturnType<typeof scopes>;
