@@ -72,7 +72,7 @@ function snapshotScope(value: unknown): ModelGoalProposalRequest {
   }
   const objective: unknown = descriptors.objective!.value;
   if (typeof objective !== 'string' || !objective.trim() || objective.trim() !== objective ||
-      objective.length > 4096 || objective.includes('\\0')) {
+      objective.length > 4096 || objective.includes('\0')) {
     denied('TASK_MODEL_INTAKE_SCOPE_DENIED', 'Approved model objective is invalid.');
   }
   const copy = (field: 'approvedRoots' | 'approvedBrowserOrigins'): string[] => {
