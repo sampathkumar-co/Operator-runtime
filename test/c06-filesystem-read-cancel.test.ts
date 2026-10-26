@@ -57,3 +57,65 @@ test('C06 Stop during scoped filesystem read refuses a stale successful observat
   assert.equal(result.error?.code, 'EXECUTION_ABORTED');
   assert.equal(result.error?.sideEffectState, 'none');
 });
+
+test('C06 recursive search refuses child directory replaced with a symlink after enumeration', async (t) => {
+  if (process.platform === 'win32') return t.skip('native junction and path-lease race is separately Windows-certified');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-c06-search-root-'));
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-c06-search-external-'));
+  t.after(async () => { await fs.rm(root, { recursive: true, force: true }); await fs.rm(outside, { recursive: true, force: true }); });
+  await fs.mkdir(path.join(root, 'descend'));
+  await fs.writeFile(path.join(outside, 'private-target.txt'), 'sensitive external fixture');
+  const original = fs.readdir;
+  let switched = false;
+  fs.readdir = (async (...args: Parameters<typeof fs.readdir>) => {
+    const values = await (original as any)(...args);
+    if (String(args[0]) === root && !switched) {
+      switched = true;
+      await fs.rename(path.join(root, 'descend'), path.join(root, 'old-descend'));
+      await fs.symlink(outside, path.join(root, 'descend'), 'dir');
+    }
+    return values;
+  }) as typeof fs.readdir;
+  t.after(() => { fs.readdir = original; });
+  const provider = new FilesystemProvider({ allowedRoots: [root] });
+  const result = await provider.execute({
+    id: 'search-symlink-redirect', capability: 'file.search', risk: 'read',
+    input: { path: root, query: 'private-target', maxDepth: 4 },
+    provenance: { kind: 'runtime' }
+  });
+  assert.equal(switched, true);
+  assert.equal(result.ok, false, 'A child redirected outside scope cannot be silently enumerated.');
+  assert.equal(result.error?.code, 'PATH_OUTSIDE_SCOPE');
+  assert.equal(JSON.stringify(result).includes('private-target.txt'), false);
+});
+
+test('C06 recursive search rejects file replaced with a symlink before stat', async (t) => {
+  if (process.platform === 'win32') return t.skip('native Windows symlink privilege and path-lease race certified separately');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-c06-search-file-root-'));
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-c06-search-file-external-'));
+  t.after(async () => { await fs.rm(root, { recursive: true, force: true }); await fs.rm(outside, { recursive: true, force: true }); });
+  const target = path.join(root, 'find-item.txt');
+  await fs.writeFile(target, 'normal');
+  await fs.writeFile(path.join(outside, 'private'), 'external fixture');
+  const original = fs.readdir;
+  let switched = false;
+  fs.readdir = (async (...args: Parameters<typeof fs.readdir>) => {
+    const values = await (original as any)(...args);
+    if (String(args[0]) === root && !switched) {
+      switched = true;
+      await fs.rm(target);
+      await fs.symlink(path.join(outside, 'private'), target);
+    }
+    return values;
+  }) as typeof fs.readdir;
+  t.after(() => { fs.readdir = original; });
+  const provider = new FilesystemProvider({ allowedRoots: [root] });
+  const result = await provider.execute({
+    id: 'search-swapped-file', capability: 'file.search', risk: 'read',
+    input: { path: root, query: 'find-item', maxDepth: 1 },
+    provenance: { kind: 'runtime' }
+  });
+  assert.equal(switched, true);
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'FILE_SEARCH_ENTRY_CHANGED');
+});
