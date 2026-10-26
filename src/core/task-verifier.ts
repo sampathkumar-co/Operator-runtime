@@ -329,7 +329,15 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
     if (!record || !targetValid || !targetId || !expectedSha256 || !timeoutValid || !filenameValid) {
       return outcome(true, false, 'Browser download goal or its terminal action evidence is missing or malformed.', versions(record));
     }
-    const expectedInput = { targetId, operation: 'click', target, expectDownload: true, downloadTimeoutMs: timeoutMs };
+    const origin = typeof goal.origin === 'string' ? goal.origin : '';
+    let originValid = false;
+    try {
+      const parsedOrigin = new URL(origin);
+      originValid = ['http:', 'https:'].includes(parsedOrigin.protocol) && parsedOrigin.origin === origin
+        && !parsedOrigin.username && !parsedOrigin.password;
+    } catch { /* Invalid origin is not proof. */ }
+    const expectedInput = { targetId, operation: 'click', target, expectDownload: true,
+      expectedOrigin: origin, downloadTimeoutMs: timeoutMs };
     const expectedTargetDigest = sha256(canonicalJson({ targetId, target }));
     const start = Date.parse(record.startedAt);
     const finish = Date.parse(record.finishedAt ?? '');
@@ -339,7 +347,7 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
     const artifactBytes = download.artifactBytes;
     const predicates = {
       capability: record.capability === 'browser.interact',
-      inputHash: record.inputHash === sha256(canonicalJson(expectedInput)),
+      inputHash: originValid && record.inputHash === sha256(canonicalJson(expectedInput)),
       observation: observed?.schemaVersion === 2 && observed.capability === record.capability
         && observed.epistemicStatus === 'KNOWN' && observed.ambiguous === false,
       freshness: Number.isFinite(start) && Number.isFinite(finish) && Number.isFinite(seen)
