@@ -87,6 +87,7 @@ test('C06 recursive search refuses child directory replaced with a symlink after
   assert.equal(result.ok, false, 'A child redirected outside scope cannot be silently enumerated.');
   assert.equal(result.error?.code, 'PATH_OUTSIDE_SCOPE');
   assert.equal(JSON.stringify(result).includes('private-target.txt'), false);
+  assert.equal(JSON.stringify(result).includes(outside), false, 'scope denial must not disclose the external realpath');
 });
 
 test('C06 recursive search rejects file replaced with a symlink before stat', async (t) => {
