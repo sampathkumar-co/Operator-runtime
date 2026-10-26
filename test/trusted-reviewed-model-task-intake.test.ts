@@ -406,7 +406,8 @@ test('C05 malformed task intake scope cannot invoke a getter or reserve model sp
     getter,
     { ...scope, approvedBrowserOrigins: sparse },
     { ...scope, approvedBrowserOrigins: symbolArray },
-    { ...scope, ignoredPermission: true }
+    { ...scope, ignoredPermission: true },
+    { ...scope, objective: scope.objective + String.fromCharCode(0) }
   ]) {
     await assert.rejects(intake.propose({
       principal: 'authenticated-owner', request: request as typeof scope, allowModelTransmission: true
