@@ -7,6 +7,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import {
+  BoundedGitOutputCapture,
   DeveloperWorktreeManager,
   developerWorktreeRecordPath,
   type DeveloperWorktreeRecord
@@ -438,4 +439,42 @@ await mgr.create({sessionId,repositoryRoot,baseCommit});`;
  assert.equal(inspected.record.phase,'ACTIVE');
  assert.equal(inspected.head,fx.commit);
  assert.equal(inspected.clean,true);
+});
+
+test('C06 Git output capture preserves complete combined stdout/stderr within cap', () => {
+  const capture = new BoundedGitOutputCapture(16);
+  capture.append('stdout', Buffer.from('worktree'));
+  capture.append('stderr', Buffer.from('warning!'));
+  assert.equal(capture.truncated, false);
+  assert.equal(capture.bytes, 16);
+  assert.equal(Buffer.concat(capture.stdout).toString(), 'worktree');
+  assert.equal(Buffer.concat(capture.stderr).toString(), 'warning!');
+});
+
+test('C06 truncated Git stdout cannot be mistaken for complete worktree enumeration', () => {
+  const capture = new BoundedGitOutputCapture(12);
+  capture.append('stdout', Buffer.from('worktree /a\\0worktree /b\\0'));
+  assert.equal(capture.truncated, true);
+  assert.equal(capture.bytes, 12);
+  assert.ok(Buffer.concat(capture.stdout).toString('utf8').startsWith('worktree /a'));
+  assert.ok(capture.bytes <= capture.maxBytes);
+  capture.append('stdout', Buffer.from('worktree /c'));
+  assert.equal(capture.truncated, true);
+  assert.equal(capture.bytes, 12, 'late child output must not increase memory budget');
+});
+
+test('C06 stderr consumes shared Git output bound and cannot be silently omitted', () => {
+  const capture = new BoundedGitOutputCapture(10);
+  capture.append('stderr', Buffer.alloc(9, 120));
+  capture.append('stdout', Buffer.from('OK'));
+  assert.equal(capture.truncated, true);
+  assert.equal(capture.bytes, 10);
+  assert.equal(Buffer.concat(capture.stdout).toString(), 'O');
+});
+
+test('C06 worktree output limits accept only bounded literal integers', () => {
+  for (const invalid of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 1.5, '10', true]) {
+    assert.throws(() => new BoundedGitOutputCapture(invalid as any),
+      (err: any) => err?.code === 'DEVELOPER_WORKTREE_GIT_OUTPUT_LIMIT_INVALID');
+  }
 });

@@ -660,6 +660,37 @@ async function listedWorktree(repositoryRoot: string, candidatePath: string): Pr
   return false;
 }
 
+/**
+ * Bounded combined stdout/stderr evidence. Excess bytes make the *entire*
+ * result untrustworthy, especially worktree list --porcelain enumeration.
+ * Public export is only a pure testing seam, not a runtime capability.
+ */
+export class BoundedGitOutputCapture {
+  readonly stdout: Buffer[] = [];
+  readonly stderr: Buffer[] = [];
+  readonly maxBytes: number;
+  bytes = 0;
+  truncated = false;
+
+  constructor(maxBytes = MAX_GIT_OUTPUT_BYTES) {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_GIT_OUTPUT_BYTES) {
+      throw new OperatorError('DEVELOPER_WORKTREE_GIT_OUTPUT_LIMIT_INVALID',
+        'Git capture limit must be an exact bounded positive integer.');
+    }
+    this.maxBytes = maxBytes;
+  }
+
+  append(stream: 'stdout' | 'stderr', chunk: Buffer): void {
+    const remaining = Math.max(0, this.maxBytes - this.bytes);
+    if (chunk.byteLength > remaining) this.truncated = true;
+    if (remaining === 0) return;
+    const part = chunk.subarray(0, remaining);
+    if (stream === 'stdout') this.stdout.push(part);
+    else this.stderr.push(part);
+    this.bytes += part.byteLength;
+  }
+}
+
 async function runGit(
   cwd: string,
   args: string[],
@@ -675,19 +706,10 @@ async function runGit(
       stdio: ['ignore', 'pipe', 'pipe'],
       env: environment
     });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    let bytes = 0;
+    const capture = new BoundedGitOutputCapture();
     let timedOut = false;
-    const capture = (bucket: Buffer[]) => (chunk: Buffer) => {
-      if (bytes >= MAX_GIT_OUTPUT_BYTES) return;
-      const remaining = MAX_GIT_OUTPUT_BYTES - bytes;
-      const part = chunk.subarray(0, remaining);
-      bucket.push(part);
-      bytes += part.byteLength;
-    };
-    child.stdout.on('data', capture(stdout));
-    child.stderr.on('data', capture(stderr));
+    child.stdout.on('data', (chunk: Buffer) => capture.append('stdout', chunk));
+    child.stderr.on('data', (chunk: Buffer) => capture.append('stderr', chunk));
     child.once('error', reject);
     const timer = setTimeout(() => {
       timedOut = true;
@@ -699,13 +721,20 @@ async function runGit(
       clearTimeout(timer);
       const result = {
         code: code ?? -1,
-        stdout: Buffer.concat(stdout).toString('utf8'),
-        stderr: Buffer.concat(stderr).toString('utf8')
+        stdout: Buffer.concat(capture.stdout).toString('utf8'),
+        stderr: Buffer.concat(capture.stderr).toString('utf8')
       };
       if (timedOut) {
         reject(new OperatorError(
           'DEVELOPER_WORKTREE_GIT_TIMEOUT',
           'Git worktree operation exceeded the bounded timeout.'
+        ));
+        return;
+      }
+      if (capture.truncated) {
+        reject(new OperatorError(
+          'DEVELOPER_WORKTREE_GIT_OUTPUT_TRUNCATED',
+          'Git command output exceeded the complete-output budget; inventory and postcondition are untrusted.'
         ));
         return;
       }
