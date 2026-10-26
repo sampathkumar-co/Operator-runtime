@@ -31,3 +31,81 @@ test('C07 mixed verification probe lists reject a hidden mutation instead of par
   assert.throws(()=>normalizeCanonicalVerificationRequest(mixed),
     (err:any)=>err?.code==='CANONICAL_VERIFICATION_INVALID');
 });
+
+test('C07 verifier strictly checks probe shape and inert JSON without dispatch', () => {
+  const valid = request('file.read');
+  for (const hostile of [
+    { ...valid, approvals: ['all'] },
+    { probes: [{ ...valid.probes[0], risk: 'write' }] },
+    { probes: [{ ...valid.probes[0], input: null }] },
+    { probes: [{ ...valid.probes[0], input: { fn: () => 'execute' } }] },
+    { probes: [{ ...valid.probes[0], input: { bytes: Number.NaN } }] },
+    { probes: [{ ...valid.probes[0], input: { input: new Date() } }] },
+    { probes: [{ ...valid.probes[0], input: { unsafe: undefined } }] },
+    { probes: [{ ...valid.probes[0], input: { deep: 'x'.repeat(270 * 1024) } }] }
+  ]) {
+    assert.throws(
+      () => normalizeCanonicalVerificationRequest(hostile),
+      (error: any) => error?.code === 'CANONICAL_VERIFICATION_INVALID'
+    );
+  }
+  const cyclic: any = {}; cyclic.self = cyclic;
+  const getter = Object.defineProperty({}, 'password', {
+    enumerable: true, get() { throw new Error('must never evaluate accessor'); }
+  });
+  const hidden = Object.defineProperty({}, 'unlisted', { value: 'hidden' });
+  for (const input of [cyclic, getter, hidden]) {
+    assert.throws(
+      () => normalizeCanonicalVerificationRequest({
+        probes: [{ ...valid.probes[0], input }]
+      }),
+      (error: any) => error?.code === 'CANONICAL_VERIFICATION_INVALID'
+    );
+  }
+});
+
+test('C07 read-only probe supports bounded nested JSON arrays and preserves exact data', () => {
+  const valid = request('file.read');
+  const nested = { selectors: [{ path: ['files', 'name'], enabled: true, limit: 4 }] };
+  const normalized = normalizeCanonicalVerificationRequest({
+    probes: [{ ...valid.probes[0], input: nested }]
+  });
+  assert.deepEqual(normalized.probes[0]?.input, nested);
+  assert.notEqual(normalized.probes[0]?.input, nested);
+});
+
+test('C07 rejects sparse and symbol-bearing arrays instead of silently canonicalizing to null', () => {
+  const valid = request('file.read');
+  const sparse: unknown[] = new Array(2);
+  sparse[1] = 'present';
+  const extra = Object.assign(['valid'], { extraneous: 'dropped-by-json' });
+  const symbolArray = ['valid'] as unknown[] & Record<symbol, unknown>;
+  symbolArray[Symbol('proof')] = 'hidden';
+  for (const input of [{ values: sparse }, { values: extra }, { values: symbolArray }]) {
+    assert.throws(() => normalizeCanonicalVerificationRequest({
+      probes: [{ ...valid.probes[0], input }]
+    }), (error: any) => error?.code === 'CANONICAL_VERIFICATION_INVALID');
+  }
+});
+
+test('C07 rejects executable or hidden envelope fields before reading them', () => {
+  const valid = request('file.read');
+  let invoked = false;
+  const getterRoot = Object.defineProperty({}, 'probes', {
+    enumerable: true,
+    get() { invoked = true; return valid.probes; }
+  });
+  const getterProbe = Object.defineProperty({ ...valid.probes[0] }, 'input', {
+    enumerable: true,
+    get() { invoked = true; return { path: '/synthetic' }; }
+  });
+  const hiddenEnvelope = Object.defineProperty({ ...valid }, 'policy', {
+    enumerable: false, value: 'new-authority'
+  });
+  const symbolEnvelope = { ...valid, [Symbol('authority')]: true };
+  for (const requestValue of [getterRoot, { probes: [getterProbe] }, hiddenEnvelope, symbolEnvelope]) {
+    assert.throws(() => normalizeCanonicalVerificationRequest(requestValue),
+      (error: any) => error?.code === 'CANONICAL_VERIFICATION_INVALID');
+  }
+  assert.equal(invoked, false);
+});
