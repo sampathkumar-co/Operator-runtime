@@ -37,19 +37,20 @@ jobs:
           python3 - <<'PY'
           import ast
           from pathlib import Path
-          source = Path('benchmarks/miniwob/controller.py').read_text(encoding='utf-8')
-          tree = ast.parse(source)
-          modules = []
-          for node in ast.walk(tree):
-              if isinstance(node, ast.Import): modules.extend(n.name.split('.')[0] for n in node.names)
-              if isinstance(node, ast.ImportFrom) and node.module:
-                  modules.append(node.module.split('.')[0])
-          allowed = {'json', 'hashlib', 're', 'dataclasses', 'typing', '__future__'}
-          unexpected = set(modules) - allowed
-          if unexpected: raise SystemExit(f'FORBIDDEN_CONTROLLER_IMPORT: {sorted(unexpected)}')
+          allowed = {'json', 'hashlib', 're', 'math', 'dataclasses', 'typing', '__future__'}
           forbidden_calls = {'eval', 'exec', 'compile', '__import__', 'open'}
-          calls = {n.func.id for n in ast.walk(tree)
-                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-          if calls & forbidden_calls: raise SystemExit(f'FORBIDDEN_CONTROLLER_CALL: {calls & forbidden_calls}')
-          print('CONTROLLER_OFFLINE_AUTHORITY=PASS')
+          for filename in ['controller.py', 'audit_results.py']:
+              source = (Path('benchmarks/miniwob') / filename).read_text(encoding='utf-8')
+              tree = ast.parse(source)
+              modules = []
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import): modules.extend(n.name.split('.')[0] for n in node.names)
+                  if isinstance(node, ast.ImportFrom) and node.module:
+                      modules.append(node.module.split('.')[0])
+              unexpected = set(modules) - allowed
+              if unexpected: raise SystemExit(f'FORBIDDEN_SOURCE_IMPORT {filename}: {sorted(unexpected)}')
+              calls = {n.func.id for n in ast.walk(tree)
+                       if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+              if calls & forbidden_calls: raise SystemExit(f'FORBIDDEN_SOURCE_CALL {filename}: {calls & forbidden_calls}')
+          print('CONTROLLER_AND_SCORER_AUDIT_OFFLINE_AUTHORITY=PASS')
           PY
