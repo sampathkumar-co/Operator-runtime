@@ -85,3 +85,49 @@ test('C07 assertions refuse hidden, cyclic, executable and sparse JSON values', 
   assert.notEqual(validated[0]?.value, dense);
   assert.doesNotThrow(() => assertTaskMachineState({ state: dense }, validated));
 });
+
+test('C07 assertion envelope rejects holes, accessors, hidden fields and forged values', () => {
+  const valid = { path: 'browser.expanded', operator: 'equals', value: true };
+  const sparse: unknown[] = new Array(2);
+  sparse[1] = valid;
+  const extra = Object.assign([valid], { ignore: 1 });
+  const symbolSlots = [valid] as unknown[] & Record<symbol, unknown>;
+  symbolSlots[Symbol('hidden')] = valid;
+  const getterSlot = [valid];
+  let getters = 0;
+  Object.defineProperty(getterSlot, '0', {
+    enumerable: true, get() { getters++; throw Error('getter must never run'); }
+  });
+  const hiddenSlot = [valid];
+  Object.defineProperty(hiddenSlot, '0', { enumerable: false, value: valid });
+  const foreignPrototype = [valid];
+  Object.setPrototypeOf(foreignPrototype, Object.create(Array.prototype));
+  for (const input of [sparse, extra, symbolSlots, getterSlot, hiddenSlot, foreignPrototype]) {
+    assert.throws(() => normalizeTaskStateAssertions(input),
+      (error: any) => error?.code === 'TASK_GOAL_INVALID');
+  }
+  const accessor = Object.defineProperty({ operator: 'exists' }, 'path', {
+    enumerable: true, get() { getters++; throw Error('accessor must never run'); }
+  });
+  const hidden = Object.defineProperty({ ...valid }, 'approval', {
+    enumerable: false, value: 'granted'
+  });
+  for (const item of [
+    accessor,
+    hidden,
+    { ...valid, skipVerification: true },
+    { ...valid, [Symbol('allow')]: true },
+    Object.create({ path: 'browser.expanded', operator: 'exists' }),
+    { path: 'browser.expanded', operator: 'exists', value: true },
+    { path: 'browser.expanded', operator: 'equals', value: undefined }
+  ]) {
+    assert.throws(() => normalizeTaskStateAssertions([item]),
+      (error: any) => error?.code === 'TASK_GOAL_INVALID');
+  }
+  assert.equal(getters, 0);
+  assert.equal(normalizeTaskStateAssertions([{ path: 'browser.expanded', operator: 'exists' }]).length, 1);
+  assert.doesNotThrow(() => assertTaskMachineState(
+    { browser: { expanded: true } },
+    normalizeTaskStateAssertions([valid])
+  ));
+});
