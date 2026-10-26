@@ -110,6 +110,11 @@ export function compareMatchedPerformance({ baseline, candidate }) {
   const introducedHumanInterventionJourneys = keys.filter(key =>
     newRows.get(key).humanInterventions > oldRows.get(key).humanInterventions
   ).length;
+  // Aggregate savings cannot excuse a per-journey spend increase: the model
+  // could silently spend more on one user's task while underfunding another.
+  const increasedCostJourneys = keys.filter(key =>
+    newRows.get(key).costMicros > oldRows.get(key).costMicros
+  ).length;
   const missingStageInstrumentation = STAGES.filter(stage =>
     b.stageMs[stage].observed < a.stageMs[stage].observed
   );
@@ -132,6 +137,7 @@ export function compareMatchedPerformance({ baseline, candidate }) {
     ...(b.humanInterventions > a.humanInterventions ? ['HUMAN_INTERVENTION_TOTAL_INCREASE'] : []),
     ...(introducedHumanInterventionJourneys ? ['NEW_HUMAN_INTERVENTION_JOURNEY'] : []),
     ...(b.costMicros > a.costMicros ? ['COST_INCREASE'] : []),
+    ...(increasedCostJourneys ? ['MATCHED_JOURNEY_COST_INCREASE'] : []),
     ...(b.unauthorizedOperations ? ['UNAUTHORIZED_OPERATION'] : []),
     ...(b.uncertainReplays ? ['UNCERTAIN_REPLAY'] : [])
   ];
@@ -166,6 +172,7 @@ export function compareMatchedPerformance({ baseline, candidate }) {
     regressionDiagnostics: {
       introducedFalseCompletionJourneys,
       introducedHumanInterventionJourneys,
+      increasedCostJourneys,
       missingStageInstrumentation,
       lostStageInstrumentationJourneys,
       reasons
