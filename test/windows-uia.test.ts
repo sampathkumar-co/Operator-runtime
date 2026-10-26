@@ -1,9 +1,36 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { WindowsUiaProvider, strictUiaSidecarOutcome } from '../src/capabilities/windows-uia.ts';
+import { WindowsUiaProvider, strictUiaSidecarHealth, strictUiaSidecarOutcome } from '../src/capabilities/windows-uia.ts';
 import { OperatorError } from '../src/core/errors.ts';
 
 const provenance = { kind: 'chatgpt' as const };
+
+test('C04 native UIA helper health is exact and capability-complete', () => {
+  const valid = {
+    service: 'operator-windows-uia', version: '0.1.0', protocol: 1,
+    uia_available: false,
+    capabilities: ['inspect', 'visual_capture', 'physical_input']
+  };
+  assert.doesNotThrow(() => strictUiaSidecarHealth(valid));
+
+  for (const health of [
+    undefined,
+    { ...valid, service: 'foreign-helper' },
+    { ...valid, protocol: '1' },
+    { ...valid, version: ['0.1.0'] },
+    { ...valid, uia_available: 'false' },
+    { ...valid, capabilities: ['inspect', 'visual_capture'] },
+    { ...valid, capabilities: ['inspect', 'visual_capture', 'physical_input', 'physical_input'] },
+    { ...valid, capabilities: ['inspect', 'visual_capture', 'physical_input', { toString: () => 'invoke' }] }
+  ]) {
+    assert.throws(
+      () => strictUiaSidecarHealth(health),
+      (error: unknown) => error instanceof OperatorError
+        && error.code === 'UIA_SIDECAR_PROTOCOL_INVALID'
+        && error.retryable === false
+    );
+  }
+});
 
 test('Windows UIA provider is platform-gated', () => {
   const provider = new WindowsUiaProvider({ platform: 'linux' });
