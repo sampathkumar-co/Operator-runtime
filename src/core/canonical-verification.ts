@@ -59,8 +59,9 @@ function normalizedProbeJson(value: unknown): Record<string, unknown> {
       throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input contains a cycle.');
     }
     const proto = Object.getPrototypeOf(node);
-    if (!Array.isArray(node) && proto !== Object.prototype && proto !== null) {
-      throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input must contain plain objects.');
+    if (Array.isArray(node) ? proto !== Array.prototype :
+        proto !== Object.prototype && proto !== null) {
+      throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input must contain plain JSON objects and arrays.');
     }
     if (Object.getOwnPropertySymbols(node).length) {
       throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input cannot contain symbol fields.');
@@ -99,15 +100,33 @@ function normalizedProbeJson(value: unknown): Record<string, unknown> {
   return JSON.parse(json) as Record<string, unknown>;
 }
 
+/**
+ * The outer probe list is proof-bearing data, not an arbitrary JS collection.
+ * Array.map skips holes, permitting a nominal 1-20 probe request to contain
+ * fewer validated probes. Accessors and extra array keys also disappear from
+ * canonical JSON. Require the exact inert, dense JSON array shape first.
+ */
+function exactProbeList(value: unknown): asserts value is unknown[] {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype ||
+      value.length < 1 || value.length > 20 ||
+      Reflect.ownKeys(value).length !== value.length + 1) {
+    throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification requires 1-20 exact dense read-only probes.');
+  }
+  for (let i = 0; i < value.length; i += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(i));
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+      throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probes must be dense inert data.');
+    }
+  }
+}
+
 export function normalizeCanonicalVerificationRequest(input: unknown): CanonicalVerificationRequest {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification must be a typed read-only probe request.');
   }
   const raw = input as Record<string, unknown>;
   exactProbeFields(raw, ['probes'], 'Verification request');
-  if (!Array.isArray(raw.probes) || raw.probes.length < 1 || raw.probes.length > 20) {
-    throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification requires 1-20 typed read-only probes.');
-  }
+  exactProbeList(raw.probes);
   const names = new Set<string>();
   const probes = raw.probes.map((item, index) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
