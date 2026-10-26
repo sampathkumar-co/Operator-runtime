@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   strictPhysicalInputOperation,
+  strictNativeInputResult,
   strictNativeCaptureBase64,
   WindowsUiaProvider
 } from '../src/capabilities/windows-uia.ts';
@@ -64,4 +65,20 @@ test('C04 a non-string native screenshot never becomes an authorized pointer cap
     assert.equal(physical.error?.code, 'INPUT_CAPTURE_STALE');
     assert.equal(calls, 1, 'physical input cannot reach native helper without a valid capture lease');
   } finally { await provider.close(); }
+});
+
+test('C04 native physical input results must confirm exact operation, dispatch and capture window scope', () => {
+  const valid = { operation: 'click', postcondition: { dispatched: true, foreground: true } };
+  assert.deepEqual(strictNativeInputResult(valid, 'click', true), valid);
+  for (const invalid of [
+    null, true, [], {},
+    { ...valid, operation: ['click'] },
+    { ...valid, operation: 'hotkey' },
+    { ...valid, postcondition: { dispatched: 'true', foreground: true } },
+    { ...valid, postcondition: { dispatched: true, foreground: false } },
+    { ...valid, postcondition: { dispatched: true, foreground: ['true'] } }
+  ]) {
+    assert.throws(() => strictNativeInputResult(invalid, 'click', true),
+      (error: any) => error?.code === 'INPUT_NATIVE_RESULT_INVALID');
+  }
 });
