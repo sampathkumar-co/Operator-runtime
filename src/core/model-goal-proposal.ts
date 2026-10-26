@@ -31,7 +31,33 @@ function object(value: unknown, label: string): Record<string, unknown> {
       (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
     invalid(label + ' must be a plain JSON object.');
   }
+  // Object.keys skips non-enumerable and symbol fields. Reading a getter can
+  // also execute code before the model proposal has passed preflight.
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(value).some(key => typeof key !== 'string' ||
+      !Object.hasOwn(descriptors, key) ||
+      !('value' in descriptors[key]!) || !descriptors[key]!.enumerable)) {
+    invalid(label + ' must contain only inert enumerable JSON fields.');
+  }
   return value as Record<string, unknown>;
+}
+
+/**
+ * Typed workflow steps and success checks cannot use sparse JS arrays:
+ * Array.map skips holes and can silently weaken a proposed objective.
+ */
+function exactList(value: unknown, min: number, max: number, label: string): asserts value is unknown[] {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype ||
+      value.length < min || value.length > max ||
+      Reflect.ownKeys(value).length !== value.length + 1) {
+    invalid(label + ' must be an exact bounded JSON array.');
+  }
+  for (let i = 0; i < value.length; i += 1) {
+    const desc = Object.getOwnPropertyDescriptor(value, String(i));
+    if (!desc || !desc.enumerable || !('value' in desc)) {
+      invalid(label + ' must be a dense inert JSON array.');
+    }
+  }
 }
 function onlyKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
   for (const key of Object.keys(value)) {
@@ -71,6 +97,8 @@ function scopes(input: ModelGoalProposalRequest) {
       input.approvedRoots.length + input.approvedBrowserOrigins.length === 0) {
     denied('Provide bounded explicit user-approved browser origins or project roots.');
   }
+  exactList(input.approvedRoots, 0, 12, 'approved project roots');
+  exactList(input.approvedBrowserOrigins, 0, 12, 'approved browser origins');
   boundedText(input.objective, 4096, 'objective');
   return {
     roots: input.approvedRoots.map(approvedRoot),
@@ -127,9 +155,7 @@ export function validateModelGoalProposal(
   let goal: ValidatedModelGoal;
   if (source.kind === 'semantic-workflow') {
     onlyKeys(source, ['kind', 'steps'], 'semantic-workflow');
-    if (!Array.isArray(source.steps) || source.steps.length < 2 || source.steps.length > 4) {
-      invalid('Model workflows must have 2-4 typed steps.');
-    }
+    exactList(source.steps, 2, 4, 'Model workflow steps');
     const steps = source.steps.map(step => atomic(step, scope));
     if (new Set(steps.map(step => JSON.stringify(step))).size !== steps.length) {
       invalid('A model workflow must not repeat an identical step.');
@@ -143,8 +169,8 @@ export function validateModelGoalProposal(
     if (!scope.roots.some(approved => within(root, approved))) {
       denied('Model quality gate exceeds approved roots.');
     }
-    if (!Array.isArray(source.checks) || source.checks.length < 2 || source.checks.length > 3 ||
-        source.checks.some(check => check !== 'test' && check !== 'build' && check !== 'lint') ||
+    exactList(source.checks, 2, 3, 'Quality gate checks');
+    if (source.checks.some(check => check !== 'test' && check !== 'build' && check !== 'lint') ||
         new Set(source.checks).size !== source.checks.length || source.requireAll !== true) {
       invalid('Quality gates require 2-3 distinct registered checks and requireAll:true.');
     }
@@ -156,10 +182,7 @@ export function validateModelGoalProposal(
   } else {
     goal = atomic(source, scope);
   }
-  if (!Array.isArray(response.successConditions) || response.successConditions.length < 1 ||
-      response.successConditions.length > 5) {
-    invalid('Model must supply 1-5 observable success conditions.');
-  }
+  exactList(response.successConditions, 1, 5, 'Model success conditions');
   const successConditions = response.successConditions.map((entry, index) =>
     boundedText(entry, 512, 'successConditions[' + index + ']'));
   return { goal, successConditions };
