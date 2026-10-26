@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertProviderResultContract } from '../src/core/provider-result-contract.ts';
+import { assertProviderResultContract, assertProviderReconciliationContract } from '../src/core/provider-result-contract.ts';
 import { OperatorRuntime } from '../src/core/runtime.ts';
 import { evidence } from '../src/core/evidence.ts';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../src/core/types.ts';
@@ -96,4 +96,56 @@ test('C02 provider receipts retain legitimate fractional time and canonical evid
   const canonical = valid();
   canonical.durationMs = 0.125;
   assert.equal(assertProviderResultContract(canonical, action, 'probe').durationMs, 0.125);
+});
+
+test('C02 provider reconciliation cannot claim completion without the exact successful provider receipt', () => {
+  const completed = {
+    status: 'completed' as const,
+    result: valid(),
+    evidence: [evidence('reconciled', 'pass', 'Independent state matched recorded result.')]
+  };
+  assert.equal(assertProviderReconciliationContract(completed, action, 'probe').status, 'completed');
+  for (const untrusted of [
+    { ...completed, result: undefined },
+    { ...completed, result: { ...valid(), provider: 'foreign-provider' } },
+    { ...completed, result: { ...valid(), capability: 'file.write' } },
+    { ...completed, result: { ...valid(), ok: false } },
+    { ...completed, result: { ...valid(), durationMs: '0' } },
+    { ...completed, evidence: [{ ...evidence('reconciled','pass','ok'), timestamp: 'today' }] },
+    { ...completed, status: ['completed'] },
+    { ...completed, status: 'not_applied' },
+    { ...completed, status: 'uncertain' },
+    { status: 'uncertain', evidence: {} },
+    { status: 'not_applied', evidence: ['proof'] }
+  ]) {
+    assert.throws(() => assertProviderReconciliationContract(untrusted, action, 'probe'),
+      (error: any) => error?.code === 'PROVIDER_RECONCILIATION_CONTRACT_INVALID' &&
+        error?.details?.sideEffectState === 'uncertain');
+  }
+  assert.equal(assertProviderReconciliationContract({
+    status: 'uncertain', evidence: []
+  }, action, 'probe').status, 'uncertain');
+});
+
+test('C02 runtime reconciliation refuses a forged foreign or absent completion result', async () => {
+  let calls = 0;
+  const runtime = new OperatorRuntime().register({
+    name: 'probe',
+    supports: () => true,
+    score: () => score,
+    execute: async () => valid(),
+    reconcile: async () => {
+      calls++;
+      return {
+        status: 'completed',
+        result: { ...valid(), provider: 'another-provider' },
+        evidence: [evidence('reconcile', 'pass', 'forged')]
+      };
+    }
+  });
+  try {
+    await assert.rejects(runtime.reconcile(action, 'probe'), (error: any) =>
+      error?.code === 'PROVIDER_RECONCILIATION_CONTRACT_INVALID');
+    assert.equal(calls, 1);
+  } finally { await runtime.close(); }
 });
