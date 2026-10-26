@@ -368,6 +368,10 @@ export class FilesystemProvider implements CapabilityProvider {
       while (queue.length > 0 && results.length < maxResults && visited < MAX_SEARCH_VISITS) {
         assertFilesystemNotCancelled(signal);
         const current = queue.shift()!;
+        // Recheck the caller-owned descendant just before re-entering its
+        // path lease. This is also the deterministic test seam for races.
+        if (current.dir !== root) await this.#pathLeaseHook?.(action.capability, current.dir);
+        assertFilesystemNotCancelled(signal);
         // Directory entries are untrusted after enumeration: a child directory
         // can be exchanged for a symlink/junction between queueing and use.
         // Re-establish the path-lease for each descended directory, not only
@@ -401,6 +405,8 @@ export class FilesystemProvider implements CapabilityProvider {
           if (entry.name.toLowerCase().includes(query) && (kind === 'all' || kind === type)) {
             const item: { path: string; name: string; type: 'file' | 'directory'; size?: number } = { path: full, name: entry.name, type };
             if (type === 'file') {
+              await this.#pathLeaseHook?.(action.capability, full);
+              assertFilesystemNotCancelled(signal);
               // lstat does not dereference a symlink swapped into the name
               // after readdir. Never read metadata from the new target.
               const fileStat = await fs.lstat(full);
