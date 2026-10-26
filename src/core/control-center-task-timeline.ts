@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type { RuntimeControlProjection } from './runtime-projection.ts';
 import type { Evidence, EvidenceStatus } from './types.ts';
 import type { TaskActionRecord, TaskCapsule } from './task.ts';
@@ -20,7 +21,7 @@ export interface ControlCenterTaskTimeline {
   evidence: { total: number; classified: number; pass: number; fail: number; info: number; truncated: boolean };
   timeline: ControlCenterTaskTimelineEvent[];
   truncated: boolean;
-  page: { nextBefore: number | null; totalEvents: number; limit: number };
+  page: { nextBefore: number | null; totalEvents: number; limit: number; snapshot: string };
 }
 
 export interface ControlCenterTaskTimelineEvent {
@@ -45,7 +46,7 @@ const MAX_CLASSIFIED_EVIDENCE = 100_000;
 export function buildControlCenterTaskTimeline(
   task: TaskCapsule,
   projection: RuntimeControlProjection,
-  options: { before?: number; limit?: number } = {}
+  options: { before?: number; limit?: number; snapshot?: string } = {}
 ): ControlCenterTaskTimeline {
   const execution = task.execution;
   const records = execution?.records ?? [];
@@ -68,6 +69,18 @@ export function buildControlCenterTaskTimeline(
     }))
   ];
   refs.sort((a, b) => a.at.localeCompare(b.at) || a.order - b.order);
+  // Pagination must not silently change meaning while task records are being
+  // appended or revised. Bind all pages to the same exact history snapshot.
+  const historyHash = crypto.createHash('sha256').update(task.id).update('\0').update(task.updatedAt);
+  for (const ref of refs) {
+    const identity = ref.kind === 'action' ? records[ref.index]!.actionId :
+      `failure:${ref.index}:${task.failures[ref.index]!.code}`;
+    historyHash.update('\0').update(ref.kind).update(':').update(identity).update(':').update(ref.at);
+  }
+  const snapshot = historyHash.digest('hex');
+  if (options.before !== undefined && options.snapshot !== snapshot) {
+    throw new Error('TASK_TIMELINE_SNAPSHOT_STALE');
+  }
   const start = Math.max(0, before - limit);
   const visibleEvents = refs.slice(start, before).map((ref): ControlCenterTaskTimelineEvent => {
     if (ref.kind === 'action') return actionEvent(records[ref.index]!);
@@ -122,7 +135,7 @@ export function buildControlCenterTaskTimeline(
     // older pages only contribute the requested historical events.
     timeline: options.before === undefined ? [createdEvent(task), ...visibleEvents] : visibleEvents,
     truncated: start > 0,
-    page: { nextBefore: start > 0 ? start : null, totalEvents, limit }
+    page: { nextBefore: start > 0 ? start : null, totalEvents, limit, snapshot }
   };
 }
 
