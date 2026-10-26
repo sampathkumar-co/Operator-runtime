@@ -900,7 +900,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
         const approved = action.input.expectedOrigin as string;
         let activeOrigin = '';
         let observedOrigin = '';
-        try { activeOrigin = new URL(target.url).origin; } catch { /* No confirmed site identity. */ }
+        try { activeOrigin = new URL(target.url ?? '').origin; } catch { /* No confirmed site identity. */ }
         try { observedOrigin = new URL(before.url).origin; } catch { /* No confirmed document identity. */ }
         if (activeOrigin !== approved || observedOrigin !== approved) {
           throw new OperatorError('BROWSER_DOWNLOAD_ORIGIN_DENIED',
