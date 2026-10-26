@@ -138,6 +138,49 @@ export function absentBrowserTargetChecks(expect: JsonMap):
 const MAX_TABS = 100;
 const MAX_CDP_DISCOVERY_BYTES = 1024 * 1024;
 
+/**
+ * CDP target enumeration is an authority-bearing observation. Discarding
+ * excess targets or coercing foreign IDs could choose the wrong tab when
+ * multiple pages are present, so incomplete discovery must fail closed.
+ */
+export function normalizeCdpTargets(input: unknown): CdpTarget[] {
+  if (!Array.isArray(input) || input.length > MAX_TABS) {
+    throw new OperatorError('CDP_DISCOVERY_INCOMPLETE',
+      'Browser target inventory exceeds the supported bound or is malformed; choose a smaller dedicated browser session.');
+  }
+  const seen = new Set<string>();
+  return input.map((value, index) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new OperatorError('CDP_DISCOVERY_INVALID', 'CDP target inventory contains a non-object target.');
+    }
+    const tab = value as Record<string, unknown>;
+    if (typeof tab.id !== 'string' ||
+        !/^[A-Za-z0-9._:-]{1,256}$/.test(tab.id) || seen.has(tab.id)) {
+      throw new OperatorError('CDP_DISCOVERY_INVALID',
+        `CDP target inventory contains an invalid or duplicate target identity at position ${index}.`);
+    }
+    seen.add(tab.id);
+    const field = (key: 'type' | 'title' | 'url' | 'webSocketDebuggerUrl', max: number) => {
+      const entry = tab[key];
+      if (entry === undefined) return undefined;
+      if (typeof entry !== 'string' || entry.length > max || entry.includes('\\0')) {
+        throw new OperatorError('CDP_DISCOVERY_INVALID',
+          'CDP target inventory returned a malformed optional identity field.');
+      }
+      return entry;
+    };
+    return {
+      id: tab.id,
+      ...(field('type', 64) !== undefined ? { type: field('type', 64) } : {}),
+      ...(field('title', 4096) !== undefined ? { title: field('title', 4096) } : {}),
+      ...(field('url', 8192) !== undefined ? { url: field('url', 8192) } : {}),
+      ...(field('webSocketDebuggerUrl', 8192) !== undefined
+        ? { webSocketDebuggerUrl: field('webSocketDebuggerUrl', 8192) } : {})
+    };
+  });
+}
+
+
 /** Never let an oversized or malformed loopback DevTools endpoint allocate an
  * unbounded discovery response. This is independent of the inspect output cap.
  */
@@ -1326,16 +1369,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
     const response = await fetch(new URL('/json/list', this.#endpoint), { redirect: 'error', signal: combinedSignal(signal, 3_000) });
     if (!response.ok) throw new OperatorError('CDP_HTTP_ERROR', `CDP returned HTTP ${response.status}.`, { retryable: true });
     const raw = await boundedDiscoveryJson(response);
-    if (!Array.isArray(raw) || raw.some((tab) => !tab || typeof tab !== 'object' || Array.isArray(tab))) {
-      throw new OperatorError('CDP_DISCOVERY_INVALID', 'Browser target discovery must return an array of objects.');
-    }
-    return raw.slice(0, MAX_TABS).map((tab) => ({
-      id: String(tab.id ?? ''),
-      type: typeof tab.type === 'string' ? tab.type : undefined,
-      title: typeof tab.title === 'string' ? tab.title : undefined,
-      url: typeof tab.url === 'string' ? tab.url : undefined,
-      webSocketDebuggerUrl: typeof tab.webSocketDebuggerUrl === 'string' ? tab.webSocketDebuggerUrl : undefined
-    })).filter((tab) => tab.id.length > 0);
+    return normalizeCdpTargets(raw);
+
   }
 
   async #createTarget(url: string, signal?: AbortSignal): Promise<CdpTarget> {
