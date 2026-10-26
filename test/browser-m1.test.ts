@@ -947,3 +947,22 @@ test('C03 visible but not focused tab cannot produce a success receipt or automa
     assert.equal(result.error?.executionPhase, 'effect_observed');
   });
 });
+
+test('C03 browser.tab.close refuses repeat when target survives acknowledged close command', async t => {
+  const original = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
+  t.after(() => Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true }));
+  await withCdpServer(t, async endpoint => {
+    const provider = new BrowserCdpProvider(endpoint);
+    t.after(() => provider.close());
+    const result = await provider.execute({
+      id: 'close-target-still-present', capability: 'browser.tab.close', risk: 'external',
+      input: { targetId: 'tab-1' }, provenance: { kind: 'runtime' }
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, 'BROWSER_POSTCONDITION_FAILED');
+    assert.equal(result.error?.retryable, false);
+    assert.equal(result.error?.sideEffectState, 'uncertain');
+    assert.equal(result.error?.executionPhase, 'effect_observed');
+  });
+});
