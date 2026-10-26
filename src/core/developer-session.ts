@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 
 export type DeveloperSessionStatus = 'PLANNING' | 'ACTIVE' | 'PAUSED' | 'BLOCKED' | 'VERIFYING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
 
@@ -109,7 +110,32 @@ export class DeveloperSessionStore {
   async put(sessionInput: DeveloperSession): Promise<void> {
     const session = normalizeDeveloperSession(sessionInput);
     await this.#init();
-    await writeDurableStateText(this.#file(session.id), JSON.stringify(session, null, 2), OPTIONS);
+    const file = this.#file(session.id);
+    // Session state is a mutable ownership/plan record. Atomic rename protects
+    // the file bytes, but without a process-shared read/compare/write lock two
+    // independent writers can silently overwrite newer approval/plan evidence.
+    await withDurableStateLock(file, async () => {
+      let existing: DeveloperSession | undefined;
+      try {
+        existing = normalizeDeveloperSession(JSON.parse(await readDurableStateText(file, OPTIONS)));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          if (error instanceof OperatorError) throw error;
+          throw invalid('Developer Session could not be read before durable update.');
+        }
+      }
+      if (existing) {
+        const priorTime = Date.parse(existing.updatedAt);
+        const nextTime = Date.parse(session.updatedAt);
+        if (nextTime < priorTime ||
+          (nextTime === priorTime && JSON.stringify(existing) !== JSON.stringify(session))) {
+          throw new OperatorError('DEVELOPER_SESSION_STALE_WRITE',
+            'Developer Session changed since the proposed update; refresh before writing.', { retryable: true });
+        }
+        if (JSON.stringify(existing) === JSON.stringify(session)) return;
+      }
+      await writeDurableStateText(file, JSON.stringify(session, null, 2), OPTIONS);
+    });
   }
 
   async get(idInput: string): Promise<DeveloperSession> {
