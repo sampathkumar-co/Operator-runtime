@@ -160,3 +160,46 @@ test('C05 no hidden or sparse permission fields can enter reviewed proposal bind
     }), (err: any) => err?.code === 'TASK_PROPOSAL_SCOPE_DENIED');
   }
 });
+
+test('C05 confirmation refuses executable or hidden current-scope permissions before issuing options', () => {
+  const bridge = new ReviewedModelGoalBridge();
+  let invoked = 0;
+  const issued = bridge.propose({ principal: 'user:a', request, modelOutput });
+  const shifting = Object.defineProperty({
+    objective: request.objective,
+    approvedRoots: [...request.approvedRoots]
+  }, 'approvedBrowserOrigins', {
+    enumerable: true, get() {
+      invoked++;
+      return invoked === 1 ? [origin] : [origin, 'https://unauthorized.example'];
+    }
+  });
+  const confirm = (current: unknown) => bridge.confirm({
+    principal: 'user:a',
+    proposalId: issued.proposalId, proposalDigest: issued.proposalDigest,
+    currentApprovedScopeFor: () => current as typeof request
+  });
+  assert.throws(() => confirm(shifting),
+    (error: any) => error?.code === 'TASK_PROPOSAL_SCOPE_DENIED');
+  assert.equal(invoked, 0, 'No current permission getter may execute');
+  assert.throws(() => confirm(request),
+    (error: any) => error?.code === 'TASK_PROPOSAL_REVIEW_INVALID',
+    'Invalid current scope must burn the one-use review token');
+});
+
+test('C05 confirmation rejects a current authorized-root array with an executable slot', () => {
+  const bridge = new ReviewedModelGoalBridge();
+  const issued = bridge.propose({ principal: 'user:a', request, modelOutput });
+  let invoked = 0;
+  const roots = Object.defineProperty([...request.approvedRoots], '0', {
+    enumerable: true, get() { invoked++; return root; }
+  });
+  assert.throws(() => bridge.confirm({
+    principal: 'user:a', proposalId: issued.proposalId,
+    proposalDigest: issued.proposalDigest,
+    currentApprovedScopeFor: () => ({
+      ...request, approvedRoots: roots
+    })
+  }), (error: any) => error?.code === 'TASK_PROPOSAL_SCOPE_DENIED');
+  assert.equal(invoked, 0);
+});
