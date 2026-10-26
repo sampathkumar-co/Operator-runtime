@@ -1,0 +1,67 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {
+  strictPhysicalInputOperation,
+  strictNativeCaptureBase64,
+  WindowsUiaProvider
+} from '../src/capabilities/windows-uia.ts';
+
+test('C04 physical operations require literal operation strings, never coerced names', () => {
+  for (const operation of ['move', 'click', 'double_click', 'drag', 'scroll', 'type_text', 'key_press', 'hotkey']) {
+    assert.equal(strictPhysicalInputOperation(operation), operation);
+  }
+  let coerced = 0;
+  for (const invalid of [
+    ['click'], { toString() { coerced++; return 'click'; } },
+    null, undefined, true, 1, new String('click'), 'CLICK', ' click', ''
+  ]) {
+    assert.throws(() => strictPhysicalInputOperation(invalid),
+      (error: any) => error?.code === 'INPUT_OPERATION_INVALID');
+  }
+  assert.equal(coerced, 0);
+});
+
+test('C04 native screenshot payload must be a literal bounded string in all capture phases', () => {
+  const base64 = Buffer.alloc(32, 1).toString('base64');
+  for (const phase of ['initial', 'before_input', 'after_input'] as const) {
+    assert.equal(strictNativeCaptureBase64(base64, phase), base64);
+    const code = phase === 'initial' ? 'VISUAL_CAPTURE_INVALID'
+      : phase === 'before_input' ? 'INPUT_CAPTURE_INVALID' : 'INPUT_AFTER_CAPTURE_INVALID';
+    for (const invalid of [[base64], { toString() { return base64; } }, null, false, '', 'a'.repeat(4 * 1024 * 1024 + 1)]) {
+      assert.throws(() => strictNativeCaptureBase64(invalid, phase),
+        (error: any) => error?.code === code);
+    }
+  }
+});
+
+test('C04 a non-string native screenshot never becomes an authorized pointer capture lease', async () => {
+  let calls = 0;
+  const provider = new WindowsUiaProvider({
+    platform: 'win32',
+    client: {
+      async call(method) {
+        calls++;
+        assert.equal(method, 'capture');
+        return { png_base64: [Buffer.alloc(32, 1).toString('base64')], source: 'screen' };
+      },
+      close() {}
+    }
+  });
+  try {
+    const captured = await provider.execute({
+      id: 'non-literal-capture', capability: 'visual.capture', risk: 'read',
+      input: { source: 'screen' }, provenance: { kind: 'runtime' }
+    });
+    assert.equal(captured.ok, false);
+    assert.equal(captured.error?.code, 'VISUAL_CAPTURE_INVALID');
+    assert.equal(calls, 1);
+    const physical = await provider.execute({
+      id: 'no-leased-physical-target', capability: 'input.operate', risk: 'external',
+      input: { operation: 'click', captureId: 'unissued', expectedSha256: 'a'.repeat(64), x: 2, y: 3 },
+      provenance: { kind: 'runtime' }
+    });
+    assert.equal(physical.ok, false);
+    assert.equal(physical.error?.code, 'INPUT_CAPTURE_STALE');
+    assert.equal(calls, 1, 'physical input cannot reach native helper without a valid capture lease');
+  } finally { await provider.close(); }
+});
