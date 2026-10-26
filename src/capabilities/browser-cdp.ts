@@ -1,5 +1,8 @@
 import crypto from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
+import { lstat, open } from 'node:fs/promises';
 import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationResult } from '../core/types.ts';
+import { canonicalJson } from '../core/action-identity.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { CdpConnection, CdpSessionManager, type CdpTarget, type JsonMap } from './browser-cdp-connection.ts';
@@ -184,10 +187,72 @@ export async function boundedDiscoveryJson(response: Response): Promise<unknown>
   }
 }
 
+type BrowserDownloadEvent = { guid: string; state: string; url?: string; suggestedFilename?: string; receivedBytes?: number; totalBytes?: number; filePath?: string };
 type DownloadTracker = {
-  done: Promise<{ guid: string; state: string; url?: string; suggestedFilename?: string; receivedBytes?: number; totalBytes?: number; filePath?: string }>;
+  done: Promise<BrowserDownloadEvent>;
   stop(): void;
 };
+
+const MAX_HASHED_DOWNLOAD_BYTES = 512 * 1024 * 1024;
+
+function sameDownloadFile(left: { dev: number; ino: number }, right: { dev: number; ino: number }): boolean {
+  return left.dev === right.dev && (left.ino === 0 || right.ino === 0 || left.ino === right.ino);
+}
+
+async function bindCompletedDownloadArtifact(
+  download: BrowserDownloadEvent,
+  targetId: string,
+  target: JsonMap,
+  signal?: AbortSignal
+): Promise<BrowserDownloadEvent & Record<string, unknown>> {
+  const bound = {
+    ...download,
+    initiatingTargetId: targetId,
+    actionTargetDigest: crypto.createHash('sha256').update(canonicalJson({ targetId, target })).digest('hex'),
+    completedAt: new Date().toISOString()
+  };
+  if (signal?.aborted) throw abortError();
+  if (download.state !== 'completed' || !download.filePath) return bound;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    if (signal?.aborted) throw abortError();
+    const before = await lstat(download.filePath);
+    if (!before.isFile() || before.isSymbolicLink() || before.size < 0 || before.size > MAX_HASHED_DOWNLOAD_BYTES) return { ...bound, artifactStatus: 'unavailable' };
+    if (signal?.aborted) throw abortError();
+    handle = await open(download.filePath, fsConstants.O_RDONLY);
+    const opened = await handle.stat();
+    if (!opened.isFile() || !sameDownloadFile(before, opened)
+      || opened.size !== before.size || opened.mtimeMs !== before.mtimeMs) return { ...bound, artifactStatus: 'unavailable' };
+    const digest = crypto.createHash('sha256');
+    const chunk = Buffer.allocUnsafe(64 * 1024);
+    let artifactBytes = 0;
+    while (artifactBytes < opened.size) {
+      if (signal?.aborted) throw abortError();
+      const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, opened.size - artifactBytes), artifactBytes);
+      if (bytesRead < 1) return { ...bound, artifactStatus: 'unavailable' };
+      artifactBytes += bytesRead;
+      digest.update(chunk.subarray(0, bytesRead));
+    }
+    if (signal?.aborted) throw abortError();
+    const after = await handle.stat();
+    const finalPath = await lstat(download.filePath);
+    if (signal?.aborted) throw abortError();
+    if (artifactBytes !== opened.size || !sameDownloadFile(opened, after)
+      || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs
+      || finalPath.isSymbolicLink() || !sameDownloadFile(opened, finalPath)
+      || finalPath.size !== opened.size || finalPath.mtimeMs !== opened.mtimeMs) {
+      return { ...bound, artifactStatus: 'unavailable' };
+    }
+    return { ...bound, artifactStatus: 'hashed', artifactSha256: digest.digest('hex'), artifactBytes };
+  } catch {
+    // A deliberate owner Stop is never a completed, harmless hash fallback.
+    // It must reach the dispatched-side-effect cancellation fence.
+    if (signal?.aborted) throw abortError();
+    return { ...bound, artifactStatus: 'unavailable' };
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
 
 const JAVASCRIPT_DIALOG_TYPES = new Set(['alert', 'confirm', 'prompt', 'beforeunload']);
 const DIALOG_REF = /^bd-[0-9a-f]{16}-[1-9a-z][0-9a-z]*-[0-9a-f]{12}$/;
@@ -775,6 +840,23 @@ export class BrowserCdpProvider implements CapabilityProvider {
     if (action.input.expectDownload !== undefined && typeof action.input.expectDownload !== 'boolean') {
       throw new OperatorError('INVALID_DOWNLOAD_INTERACTION', 'expectDownload must be an exact Boolean.');
     }
+    // A tab ID is not a site permission: an approved download must be bound
+    // to the exact declared HTTP(S) origin at the moment of interaction.
+    if (action.input.expectDownload === true) {
+      const approvedOrigin = action.input.expectedOrigin;
+      if (typeof approvedOrigin !== 'string') {
+        throw new OperatorError('BROWSER_DOWNLOAD_ORIGIN_DENIED', 'Download requires an exact approved browser origin.');
+      }
+      let checked: URL;
+      try { checked = new URL(approvedOrigin); }
+      catch { throw new OperatorError('BROWSER_DOWNLOAD_ORIGIN_DENIED', 'Download origin is not a valid URL.'); }
+      if (!['http:', 'https:'].includes(checked.protocol) || checked.origin !== approvedOrigin
+          || checked.username || checked.password) {
+        throw new OperatorError('BROWSER_DOWNLOAD_ORIGIN_DENIED', 'Download origin must be a canonical approved HTTP(S) origin.');
+      }
+    } else if (action.input.expectedOrigin !== undefined) {
+      throw new OperatorError('INVALID_DOWNLOAD_INTERACTION', 'expectedOrigin is only valid for an expected browser download.');
+    }
     if (action.input.downloadTimeoutMs !== undefined &&
         (typeof action.input.downloadTimeoutMs !== 'number' ||
          !Number.isSafeInteger(action.input.downloadTimeoutMs) ||
@@ -824,6 +906,17 @@ export class BrowserCdpProvider implements CapabilityProvider {
         );
       }
       const before = await pageIdentity(session);
+      if (expectDownload) {
+        const approved = action.input.expectedOrigin as string;
+        let activeOrigin = '';
+        let observedOrigin = '';
+        try { activeOrigin = new URL(target.url ?? '').origin; } catch { /* No confirmed site identity. */ }
+        try { observedOrigin = new URL(before.url).origin; } catch { /* No confirmed document identity. */ }
+        if (activeOrigin !== approved || observedOrigin !== approved) {
+          throw new OperatorError('BROWSER_DOWNLOAD_ORIGIN_DENIED',
+            'The exact initiating tab and freshly observed page must remain inside the approved download origin.');
+        }
+      }
       const interaction = await performSemanticInteraction(session, {
         operation,
         target: targetSpec,
@@ -882,7 +975,18 @@ export class BrowserCdpProvider implements CapabilityProvider {
           value: semanticAfter.value, checked: semanticAfter.checked, selected: semanticAfter.selected,
           selection: semanticAfter.selection
         });
-      const downloadResult = download ? await download.done : undefined;
+      const rawDownloadResult = download ? await download.done : undefined;
+      // CDP events may contain absolute local paths or token-bearing download
+      // URLs. Hash locally, then remove those fields before writing any
+      // durable ActionResult, evidence, diagnostic or user-visible response.
+      const boundDownload = rawDownloadResult
+        ? await bindCompletedDownloadArtifact(rawDownloadResult, targetId, targetSpec, signal)
+        : undefined;
+      const downloadResult = boundDownload ? { ...boundDownload } : undefined;
+      if (downloadResult) {
+        delete downloadResult.filePath;
+        delete downloadResult.url;
+      }
       if (downloadResult?.state === 'canceled') {
         throw new OperatorError('BROWSER_DOWNLOAD_CANCELED', 'Browser download was canceled.', { retryable: true, details: downloadResult });
       }

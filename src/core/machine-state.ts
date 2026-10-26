@@ -119,6 +119,28 @@ function importantStateFromResult(result: ActionResult): Record<string, unknown>
     const directUrl = text(output.url);
     if (targetId) state.targetId = bounded(targetId, 256);
     if (directUrl) state.destinationDigest = browserDestinationDigest(directUrl);
+    const download = record(output.download);
+    const artifactSha256 = text(download.artifactSha256);
+    const actionTargetDigest = text(download.actionTargetDigest);
+    const initiatingTargetId = text(download.initiatingTargetId);
+    const completedAt = text(download.completedAt);
+    const artifactBytes = download.artifactBytes;
+    const suggestedFilename = text(download.suggestedFilename);
+    if (download.state === 'completed'
+      && download.artifactStatus === 'hashed'
+      && artifactSha256 && /^[0-9a-f]{64}$/.test(artifactSha256)
+      && actionTargetDigest && /^[0-9a-f]{64}$/.test(actionTargetDigest)
+      && initiatingTargetId && /^[A-Za-z0-9._:-]{1,256}$/.test(initiatingTargetId)
+      && completedAt && Number.isFinite(Date.parse(completedAt))
+      && typeof artifactBytes === 'number' && Number.isSafeInteger(artifactBytes)
+      && artifactBytes >= 0 && artifactBytes <= 512 * 1024 * 1024) {
+      state.download = {
+        state: 'completed', artifactSha256, artifactBytes,
+        actionTargetDigest, initiatingTargetId,
+        completedAt: new Date(Date.parse(completedAt)).toISOString(),
+        ...(suggestedFilename ? { suggestedFilenameDigest: sha256(suggestedFilename) } : {})
+      };
+    }
   }
   if (result.capability.startsWith('app.')) {
     const elements = Array.isArray(output.elements) ? output.elements.map(record).slice(0, 5) : [];

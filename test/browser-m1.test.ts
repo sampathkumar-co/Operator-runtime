@@ -162,7 +162,7 @@ class FakeWebSocket {
       if (scenario === 'simultaneous') {
         FakeWebSocket.#broadcast('Browser.downloadWillBegin', { guid: 'second', frameId: 'frame-main', url: 'https://example.test/second' });
       } else {
-        FakeWebSocket.#broadcast('Browser.downloadProgress', { guid: 'expected', state: scenario === 'canceled' ? 'canceled' : 'completed', receivedBytes: 10, totalBytes: 10 });
+        FakeWebSocket.#broadcast('Browser.downloadProgress', { guid: 'expected', state: scenario === 'canceled' ? 'canceled' : 'completed', receivedBytes: 10, totalBytes: 10, filePath: '/private/customer-records.csv' });
       }
     });
   }
@@ -443,7 +443,7 @@ test('download tracking binds events to the initiating target frame and fails cl
       try {
         return await provider.execute({
           id: `download-${scenario}`, capability: 'browser.interact', risk: 'external',
-          input: { targetId: 'tab-1', operation: 'click', target: { role: 'textbox', name: 'Email' }, expectDownload: true, downloadTimeoutMs: 1000 },
+          input: { targetId: 'tab-1', operation: 'click', target: { role: 'textbox', name: 'Email' }, expectDownload: true, expectedOrigin: 'https://example.test', downloadTimeoutMs: 1000 },
           provenance: { kind: 'runtime' }
         });
       } finally { provider.close(); }
@@ -452,6 +452,8 @@ test('download tracking binds events to the initiating target frame and fails cl
     const unrelatedFirst = await run('unrelated-first');
     assert.equal(unrelatedFirst.ok, true, unrelatedFirst.error?.message);
     assert.equal((unrelatedFirst.output as any).download.guid, 'expected');
+    assert.equal(JSON.stringify(unrelatedFirst).includes('/private/customer-records.csv'), false,
+      'raw CDP file paths must never escape in output or provider evidence');
 
     const simultaneous = await run('simultaneous');
     assert.equal(simultaneous.ok, false);

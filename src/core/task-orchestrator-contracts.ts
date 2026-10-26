@@ -22,6 +22,7 @@ export type AppPhysicalFallback = {
 export type PostgresTaskFilter = { column: string; op: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'like' | 'ilike' | 'is_null' | 'not_null'; value?: string };
 export type PostgresTaskOrder = { column: string; direction: 'asc' | 'desc' };
 export type ProjectQualityCheck = 'lint' | 'test' | 'build';
+export type BrowserDownloadTarget = { ref?: string; role?: string; name?: string; text?: string; css?: string };
 export type AutonomousTaskAction = { capability: string; input: Record<string, unknown>; target?: string };
 export type AutonomousTaskStep = {
   key: string;
@@ -38,6 +39,10 @@ export type AtomicSemanticTaskGoal =
   | { kind: 'controlled-file-change'; root: string; path: string; content: string }
   | { kind: 'trusted-project-command'; root: string; commandKind: 'build' | 'test' | 'lint' }
   | { kind: 'browser-navigation'; url: string; targetId?: string }
+  | {
+      kind: 'browser-download'; targetId: string; origin: string; target: BrowserDownloadTarget;
+      expectedSha256: string; expectedSuggestedFilename?: string; timeoutMs?: number;
+    }
   | { kind: 'docker-lifecycle'; root: string; operation: 'start' | 'stop' | 'restart'; services: string[]; timeoutMs?: number }
   | {
       kind: 'postgres-select'; root: string; profileId: string; schema?: string; table: string;

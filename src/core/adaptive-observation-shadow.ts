@@ -78,6 +78,7 @@ function observationCandidates(
     'trusted-project-command': [['project.inspect', 'runtime', 0.75, 1], ['git.status', 'runtime', 0.72, 1], ['git.diff', 'runtime', 0.82, 2]],
     'project-quality-gate': [['project.inspect', 'runtime', 0.75, 1], ['git.status', 'runtime', 0.72, 1], ['git.diff', 'runtime', 0.82, 2]],
     'browser-navigation': [['browser.inspect', 'dom', 0.9, 1], ['browser.verify', 'dom', 0.84, 1]],
+    'browser-download': [['browser.inspect', 'dom', 0.9, 1]],
     'docker-lifecycle': [['docker.inspect', 'runtime', 0.82, 1]],
     'postgres-select': [['postgres.inspect', 'runtime', 0.78, 1], ['postgres.select', 'runtime', 0.83, 2]],
     'app-operation': [['app.inspect', 'uia', 0.88, 1], ['perception.ground', 'accessibility', 0.84, 1], ['visual.capture', 'visual', 0.72, 3]]

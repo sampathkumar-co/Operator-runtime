@@ -91,5 +91,6 @@ function taskScopeKey(goal: SemanticTaskGoal, authorizedScope: string[]): string
 function taskSceneKey(goal: SemanticTaskGoal): string | undefined {
   if (goal.kind === 'app-operation' && goal.selector.processId) return `uia:process:${goal.selector.processId}`;
   if (goal.kind === 'browser-navigation' && goal.targetId) return `browser:target:${goal.targetId}`;
+  if (goal.kind === 'browser-download') return `browser:target:${goal.targetId}`;
   return undefined;
 }
