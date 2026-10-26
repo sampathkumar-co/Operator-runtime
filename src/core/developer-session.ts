@@ -159,8 +159,10 @@ function normalizePlanRef(input: unknown): { taskId: string; revision: number } 
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw invalid('planRef is invalid.');
   const raw = input as Record<string, unknown>;
   const taskId = validId(raw.taskId, 'planRef.taskId');
-  const revision = Number(raw.revision);
-  if (!Number.isSafeInteger(revision) || revision < 1) throw invalid('planRef.revision is invalid.');
+  // Durable plan revisions are identity/version authority, not a value
+  // which can be fabricated through JSON string or array coercion.
+  const revision = raw.revision;
+  if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1) throw invalid('planRef.revision is invalid.');
   return { taskId, revision };
 }
 
@@ -173,9 +175,9 @@ function normalizeStatus(input: unknown): DeveloperSessionStatus {
 function resourceKeyList(input: unknown, max: number, label: string): string[] {
   if (!Array.isArray(input) || input.length > max) throw invalid(`${label} is invalid.`);
   const values = input.map((item) => {
-    const value = String(item ?? '');
+    const value = item;
     if (
-      !value ||
+      typeof value !== 'string' || !value ||
       /[\0\r\n]/.test(value) ||
       Buffer.byteLength(value, 'utf8') > 4096
     ) {
@@ -207,7 +209,8 @@ function validId(input: unknown, label: string): string {
 }
 
 function digest(input: unknown, label: string): string {
-  const text = String(input ?? '').toLowerCase();
+  if (typeof input !== 'string') throw invalid(`${label} contains an invalid digest.`);
+  const text = input.toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(text)) throw invalid(`${label} contains an invalid digest.`);
   return text;
 }
@@ -218,7 +221,8 @@ function boundedText(input: unknown, maxBytes: number, label: string): string {
 }
 
 function canonicalIso(input: unknown, label: string): string {
-  const text = String(input ?? '');
+  if (typeof input !== 'string') throw invalid(`${label} must be canonical ISO.`);
+  const text = input;
   if (!text || !Number.isFinite(Date.parse(text)) || new Date(text).toISOString() !== text) throw invalid(`${label} must be canonical ISO.`);
   return text;
 }
