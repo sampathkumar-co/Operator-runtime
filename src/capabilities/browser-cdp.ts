@@ -966,9 +966,17 @@ export class BrowserCdpProvider implements CapabilityProvider {
           selection: semanticAfter.selection
         });
       const rawDownloadResult = download ? await download.done : undefined;
-      const downloadResult = rawDownloadResult
+      // CDP events may contain absolute local paths or token-bearing download
+      // URLs. Hash locally, then remove those fields before writing any
+      // durable ActionResult, evidence, diagnostic or user-visible response.
+      const boundDownload = rawDownloadResult
         ? await bindCompletedDownloadArtifact(rawDownloadResult, targetId, targetSpec)
         : undefined;
+      const downloadResult = boundDownload ? { ...boundDownload } : undefined;
+      if (downloadResult) {
+        delete downloadResult.filePath;
+        delete downloadResult.url;
+      }
       if (downloadResult?.state === 'canceled') {
         throw new OperatorError('BROWSER_DOWNLOAD_CANCELED', 'Browser download was canceled.', { retryable: true, details: downloadResult });
       }
