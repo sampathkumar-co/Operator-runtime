@@ -101,3 +101,17 @@ test('C07 machine evidence admits only a complete bounded hashed download outcom
   });
   assert.equal(JSON.stringify(result.importantState).includes('filePath'), false);
 });
+
+test('C07 wrong, missing and unrelated browser origins never certify a downloaded artifact', () => {
+  for (const attempted of [undefined, 'https://other.example', 'file:///private/data', 'https://allowed.example/path']) {
+    const task = fixture();
+    const goal = task.execution!.plannerState.goal as Record<string, unknown>;
+    goal.origin = attempted;
+    assert.equal(verifyGoalOutcomeTruth(task).ok, false);
+  }
+  const task = fixture();
+  task.execution!.records[0]!.inputHash = digest(canonicalJson({
+    ...actionInput, expectedOrigin: 'https://other.example'
+  }));
+  assert.equal(verifyGoalOutcomeTruth(task).ok, false);
+});
