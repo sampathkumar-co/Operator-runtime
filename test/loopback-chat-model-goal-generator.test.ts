@@ -135,3 +135,26 @@ test('C05 malformed local chat body or aborted signal does not become a goal pro
   }),(e:any)=>e.code==='TASK_MODEL_RESPONSE_INVALID');
   assert.equal(visits,1);
 });
+
+test('C05 local model cannot promote truncated, filtered or tool-call responses into valid proposals', async t => {
+  const samples = [
+    { choices: [{ finish_reason: 'length', message: { role: 'assistant', content: JSON.stringify(scopedProposal) } }] },
+    { choices: [{ finish_reason: 'content_filter', message: { role: 'assistant', content: JSON.stringify(scopedProposal) } }] },
+    { choices: [{ finish_reason: null, message: { role: 'assistant', content: JSON.stringify(scopedProposal) } }] },
+    { choices: [{ message: { role: 'user', content: JSON.stringify(scopedProposal) } }] },
+    { choices: [{ message: { role: 'assistant', content: JSON.stringify(scopedProposal), tool_calls: [] } }] },
+    { choices: [{ message: { content: JSON.stringify(scopedProposal), function_call: { name: 'danger' } } }] }
+  ];
+  let index = 0;
+  const endpoint = await local(t, (_req, res) => reply(res, 200, samples[index++]));
+  const generator = new LoopbackChatModelGoalGenerator({ endpoint });
+  for (let i = 0; i < samples.length; i += 1) {
+    await assert.rejects(generator.generate({
+      modelId: 'chosen-local-model',
+      prompt: 'Scoped objective',
+      maxOutputTokens: 256,
+      signal: new AbortController().signal
+    }), (error: any) => error?.code === 'TASK_MODEL_RESPONSE_INVALID');
+  }
+  assert.equal(index, samples.length);
+});
