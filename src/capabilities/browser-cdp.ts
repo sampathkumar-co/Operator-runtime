@@ -138,6 +138,53 @@ export function absentBrowserTargetChecks(expect: JsonMap):
 const MAX_TABS = 100;
 const MAX_CDP_DISCOVERY_BYTES = 1024 * 1024;
 
+/**
+ * CDP target enumeration is an authority-bearing observation. Discarding
+ * excess targets or coercing foreign IDs could choose the wrong tab when
+ * multiple pages are present, so incomplete discovery must fail closed.
+ */
+export function normalizeCdpTargets(input: unknown): CdpTarget[] {
+  if (!Array.isArray(input)) {
+    throw new OperatorError('CDP_DISCOVERY_INVALID',
+      'Browser target discovery must return an array of target objects.');
+  }
+  if (input.length > MAX_TABS) {
+    throw new OperatorError('CDP_DISCOVERY_INCOMPLETE',
+      'Browser target inventory exceeds the supported bound; choose a smaller dedicated browser session.');
+  }
+  const seen = new Set<string>();
+  return input.map((value, index) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new OperatorError('CDP_DISCOVERY_INVALID', 'CDP target inventory contains a non-object target.');
+    }
+    const tab = value as Record<string, unknown>;
+    if (typeof tab.id !== 'string' ||
+        !/^[A-Za-z0-9._:-]{1,256}$/.test(tab.id) || seen.has(tab.id)) {
+      throw new OperatorError('CDP_DISCOVERY_INVALID',
+        `CDP target inventory contains an invalid or duplicate target identity at position ${index}.`);
+    }
+    seen.add(tab.id);
+    const field = (key: 'type' | 'title' | 'url' | 'webSocketDebuggerUrl', max: number) => {
+      const entry = tab[key];
+      if (entry === undefined) return undefined;
+      if (typeof entry !== 'string' || entry.length > max || entry.includes(String.fromCharCode(0))) {
+        throw new OperatorError('CDP_DISCOVERY_INVALID',
+          'CDP target inventory returned a malformed optional identity field.');
+      }
+      return entry;
+    };
+    return {
+      id: tab.id,
+      ...(field('type', 64) !== undefined ? { type: field('type', 64) } : {}),
+      ...(field('title', 4096) !== undefined ? { title: field('title', 4096) } : {}),
+      ...(field('url', 8192) !== undefined ? { url: field('url', 8192) } : {}),
+      ...(field('webSocketDebuggerUrl', 8192) !== undefined
+        ? { webSocketDebuggerUrl: field('webSocketDebuggerUrl', 8192) } : {})
+    };
+  });
+}
+
+
 /** Never let an oversized or malformed loopback DevTools endpoint allocate an
  * unbounded discovery response. This is independent of the inspect output cap.
  */
@@ -672,19 +719,32 @@ export class BrowserCdpProvider implements CapabilityProvider {
     });
     if (!response.ok) throw new OperatorError('CDP_ACTIVATE_TAB_FAILED', `CDP returned HTTP ${response.status} while focusing a tab.`, { retryable: true });
     const session = this.#sessions.get(target);
-    const result = await session.send('Runtime.evaluate', { expression: 'document.visibilityState', returnByValue: true });
-    const visibilityState = unwrapRuntimeValue(result);
-    if (visibilityState !== 'visible') {
-      throw new OperatorError('BROWSER_POSTCONDITION_FAILED', 'Target did not become visible after activation.', { retryable: true, details: { targetId, visibilityState } });
+    const result = await session.send('Runtime.evaluate', {
+      expression: '({visible: document.visibilityState === "visible", focused: document.hasFocus() === true})',
+      returnByValue: true
+    });
+    const observedFocus = unwrapRuntimeValue(result);
+    throwIfAborted(signal);
+    if (!browserFocusActuallyProven(observedFocus)) {
+      throw new OperatorError('BROWSER_POSTCONDITION_FAILED',
+        'Tab activation was dispatched but document visibility and keyboard focus were not both proven.', {
+          retryable: false,
+          details: {
+            executionPhase: 'effect_observed',
+            sideEffectState: 'uncertain',
+            targetId,
+            remedy: 'reobserve_tab_focus_before_retry'
+          }
+        });
     }
     return {
       ok: true,
       capability: action.capability,
       provider: this.name,
-      output: { targetId, visibilityState },
+      output: { targetId, visibilityState: 'visible', focused: true },
       evidence: [
         evidence('browser_tab_focus', 'pass', 'Browser target activation command completed.', { targetId }),
-        evidence('postcondition', 'pass', 'Target document reports visible state after activation.', { targetId, visibilityState })
+        evidence('postcondition', 'pass', 'Target document was freshly observed both visible and keyboard-focused after activation.', { targetId, visible: true, focused: true })
       ],
       durationMs: Math.round(performance.now() - started)
     };
@@ -701,7 +761,11 @@ export class BrowserCdpProvider implements CapabilityProvider {
     this.#sessions.forget(targetId);
     const remaining = await this.#listTargets(signal);
     if (remaining.some((item) => item.id === targetId)) {
-      throw new OperatorError('BROWSER_POSTCONDITION_FAILED', 'Target still exists after close command.', { retryable: true, details: { targetId } });
+      throw new OperatorError('BROWSER_POSTCONDITION_FAILED',
+        'Tab close command completed but target is still present; a repeat close is not authorized without reconciliation.', {
+          retryable: false,
+          details: { targetId, sideEffectState: 'uncertain', executionPhase: 'effect_observed', remedy: 'reobserve_before_retry' }
+        });
     }
     return {
       ok: true,
@@ -1024,7 +1088,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
           this.#noProgressPrevented += 1;
           throw new OperatorError('BROWSER_NO_PROGRESS', 'The same browser action produced no meaningful state delta twice; re-observe and change strategy instead of repeating it.', {
             retryable: false,
-            details: { sideEffectState: 'known', repeatedAction: actionPayload, actionFamily: noProgressFamily, target: targetSpec, before: beforeRelevant, after: afterRelevant, repeatedNoProgress, preventedCount: this.#noProgressPrevented }
+            details: { sideEffectState: 'uncertain', executionPhase: 'effect_observed', repeatedAction: actionPayload, actionFamily: noProgressFamily, target: targetSpec, before: beforeRelevant, after: afterRelevant, repeatedNoProgress, preventedCount: this.#noProgressPrevented }
           });
         }
       } else if (stateProgress) {
@@ -1326,16 +1390,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
     const response = await fetch(new URL('/json/list', this.#endpoint), { redirect: 'error', signal: combinedSignal(signal, 3_000) });
     if (!response.ok) throw new OperatorError('CDP_HTTP_ERROR', `CDP returned HTTP ${response.status}.`, { retryable: true });
     const raw = await boundedDiscoveryJson(response);
-    if (!Array.isArray(raw) || raw.some((tab) => !tab || typeof tab !== 'object' || Array.isArray(tab))) {
-      throw new OperatorError('CDP_DISCOVERY_INVALID', 'Browser target discovery must return an array of objects.');
-    }
-    return raw.slice(0, MAX_TABS).map((tab) => ({
-      id: String(tab.id ?? ''),
-      type: typeof tab.type === 'string' ? tab.type : undefined,
-      title: typeof tab.title === 'string' ? tab.title : undefined,
-      url: typeof tab.url === 'string' ? tab.url : undefined,
-      webSocketDebuggerUrl: typeof tab.webSocketDebuggerUrl === 'string' ? tab.webSocketDebuggerUrl : undefined
-    })).filter((tab) => tab.id.length > 0);
+    return normalizeCdpTargets(raw);
+
   }
 
   async #createTarget(url: string, signal?: AbortSignal): Promise<CdpTarget> {

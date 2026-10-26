@@ -85,15 +85,39 @@ export function compactTab(tab: CdpTarget): JsonMap {
 }
 
 export function requireTarget(targets: CdpTarget[], id: string): CdpTarget {
-  const target = targets.find((item) => item.id === id);
-  if (!target) throw new OperatorError('BROWSER_TARGET_NOT_FOUND', `Browser target ${id} was not found.`, { retryable: true });
-  return target;
+  const matches = targets.filter((item) => item.id === id);
+  if (matches.length === 0) {
+    throw new OperatorError('BROWSER_TARGET_NOT_FOUND', 'Requested browser target was not found.', { retryable: true });
+  }
+  if (matches.length !== 1) {
+    throw new OperatorError('BROWSER_TARGET_AMBIGUOUS',
+      'Browser discovery returned duplicate target identities; reobserve before acting.', {
+        details: { remedy: 'reobserve_before_retry', executionPhase: 'pre_dispatch', sideEffectState: 'none' }
+      });
+  }
+  if (matches[0]!.type !== 'page') {
+    throw new OperatorError('BROWSER_TARGET_NOT_PAGE',
+      'The observed target is not an interactive page. Select a page target from current browser inspection.', {
+        details: { remedy: 'select_page_target', executionPhase: 'pre_dispatch', sideEffectState: 'none' }
+      });
+  }
+  return matches[0]!;
 }
 
 export function requirePageTarget(targets: CdpTarget[]): CdpTarget {
-  const target = targets.find((item) => item.type === 'page');
-  if (!target) throw new OperatorError('BROWSER_TARGET_NOT_FOUND', 'No browser page target is available.', { retryable: true });
-  return target;
+  const pages = targets.filter((item) => item.type === 'page');
+  if (pages.length === 0) {
+    throw new OperatorError('BROWSER_TARGET_NOT_FOUND', 'No browser page target is available.', { retryable: true });
+  }
+  // CDP does not prove which of multiple pages the user intended to navigate.
+  // Picking the first discovery result could redirect the wrong tab.
+  if (pages.length !== 1) {
+    throw new OperatorError('BROWSER_TARGET_AMBIGUOUS',
+      'Multiple browser pages are available. Choose an explicit targetId or request a new tab.', {
+        details: { remedy: 'select_target_id_from_current_tabs', executionPhase: 'pre_dispatch', sideEffectState: 'none' }
+      });
+  }
+  return pages[0]!;
 }
 
 export function validateNavigationUrl(raw: unknown): string {
