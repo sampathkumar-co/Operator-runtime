@@ -296,13 +296,29 @@ export class DockerProvider implements CapabilityProvider {
     for (const line of lines.slice(0, MAX_CONTAINERS)) {
       try {
         const raw = JSON.parse(line) as Record<string, unknown>;
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+          throw new OperatorError('DOCKER_OUTPUT_INVALID', 'Docker container row is not an object.');
+        }
+        const exact = (key: string, maximum: number): string => {
+          const value = raw[key];
+          if (typeof value !== 'string' || value.length > maximum * 8 ||
+              value.includes(String.fromCharCode(0))) {
+            throw new OperatorError('DOCKER_OUTPUT_INVALID',
+              'Docker container output contains malformed or oversized fields.');
+          }
+          return value.slice(0, maximum);
+        };
+        const id = exact('ID', 64);
+        if (!/^[0-9a-f]{12,64}$/i.test(id)) {
+          throw new OperatorError('DOCKER_OUTPUT_INVALID', 'Docker container ID is not a literal hexadecimal identity.');
+        }
         items.push({
-          id: String(raw.ID ?? '').slice(0, 12),
-          name: String(raw.Names ?? '').slice(0, 256),
-          image: String(raw.Image ?? '').slice(0, 512),
-          state: String(raw.State ?? '').slice(0, 64),
-          status: String(raw.Status ?? '').slice(0, 256),
-          ports: String(raw.Ports ?? '').slice(0, 1024)
+          id: id.slice(0, 12),
+          name: exact('Names', 256),
+          image: exact('Image', 512),
+          state: exact('State', 64),
+          status: exact('Status', 256),
+          ports: exact('Ports', 1024)
         });
       } catch {
         throw new OperatorError('DOCKER_OUTPUT_INVALID', 'Docker container JSON output could not be parsed.');
