@@ -149,3 +149,56 @@ test('C01 rejects coercible numeric scenario IDs before reset or external tool e
   await assert.rejects(runPairedLaneC(cfg),/source-pinned model/);
   assert.deepEqual(events,[]);
 });
+
+test('C01 Lane C bounds independent fixture reset and never dispatches if reset stalls',async()=>{
+  const {cfg,events}=setup();
+  cfg.deadlineMs=100;
+  let release!:()=>void;
+  const blocked=new Promise<void>(resolve=>{release=resolve;});
+  cfg.resetFixture=async({arm}:any)=>{
+    events.push('reset:'+arm);
+    await blocked;
+    return {initialStateDigest:initial};
+  };
+  try {
+    await assert.rejects(runPairedLaneC(cfg),/RESET_TIMEOUT_UNKNOWN_EFFECT/);
+    assert.deepEqual(events,['reset:mecord']);
+  }finally{release();}
+});
+
+test('C01 Lane C bounds stalled independent oracle and refuses the second arm',async()=>{
+  const {cfg,events}=setup();
+  cfg.deadlineMs=100;
+  let release!:()=>void;
+  const blocked=new Promise<void>(resolve=>{release=resolve;});
+  cfg.verifyIndependentOutcome=async({arm}:any)=>{
+    events.push('oracle:'+arm);
+    await blocked;
+    return {verifiedSuccess:true,independentOracleDigest:oracle,
+      resultEvidenceDigest:d('1'),unauthorizedEffects:0,failureStage:'none'};
+  };
+  try {
+    await assert.rejects(runPairedLaneC(cfg),/ORACLE_TIMEOUT_UNKNOWN_EFFECT/);
+    assert.deepEqual(events,[
+      'reset:mecord','run:mecord','oracle:mecord'
+    ]);
+  }finally{release();}
+});
+
+test('C01 Lane C rejects failed reset and failed independent oracle without continuing',async()=>{
+  const {cfg,events}=setup();
+  cfg.resetFixture=async({arm}:any)=>{
+    events.push('reset:'+arm);
+    throw new Error('raw sensitive fixture detail');
+  };
+  await assert.rejects(runPairedLaneC(cfg),/RESET_FAILED_UNKNOWN_EFFECT/);
+  assert.deepEqual(events,['reset:mecord']);
+
+  const other=setup();
+  other.cfg.verifyIndependentOutcome=async({arm}:any)=>{
+    other.events.push('oracle:'+arm);
+    throw new Error('raw sensitive oracle detail');
+  };
+  await assert.rejects(runPairedLaneC(other.cfg),/ORACLE_FAILED_UNKNOWN_EFFECT/);
+  assert.deepEqual(other.events,['reset:mecord','run:mecord','oracle:mecord']);
+});
