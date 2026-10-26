@@ -188,3 +188,125 @@ test('C06 plan boundaries refuse coerced SHA, edit range and trusted command ide
     { trustedCommandIds: [spoof] }), /invalid id/);
   assert.equal(conversions, 0, 'untrusted values may not invoke conversion callbacks');
 });
+
+test('C06 edit-plan construction rejects sparse target or operation arrays', () => {
+  const file = { path: 'src/counter.ts', expectedSha256: digest('before'),
+    edits: [{ start: 0, end: 1, replacement: 'B' }] };
+  const candidate = (files: any) => createMultiFileEditPlan({ files });
+  for (const files of [
+    new Array(1),
+    [file, , file],
+    Object.assign([file], { extra: 'hidden-authority' }),
+    Object.defineProperty([file], 'shadow', { value: 'other-file' })
+  ]) {
+    assert.throws(() => candidate(files),
+      (error: any) => error?.code === 'MULTI_FILE_EDIT_PLAN_INVALID');
+  }
+  for (const edits of [
+    new Array(1),
+    [{ start: 0, end: 1, replacement: 'B' }, , { start: 1, end: 2, replacement: 'X' }],
+    Object.assign([...file.edits], { hidden: true })
+  ]) {
+    assert.throws(() => candidate([{ ...file, edits }]),
+      (error: any) => error?.code === 'MULTI_FILE_EDIT_PLAN_INVALID');
+  }
+});
+
+test('C06 edit-plan request and file/edit records must contain inert own fields only', () => {
+  let callbackCount = 0;
+  const file = { path: 'src/guarded.ts', expectedSha256: digest('original'),
+    edits: [{ start: 0, end: 1, replacement: 'X' }] };
+  const top = Object.defineProperty({ files: [file] }, 'files', {
+    enumerable: true, get() { callbackCount++; return [file]; }
+  });
+  const accessorFile = Object.defineProperty({ ...file }, 'path', {
+    enumerable: true, get() { callbackCount++; return file.path; }
+  });
+  const accessorEdit = Object.defineProperty({ ...file.edits[0] }, 'replacement', {
+    enumerable: true, get() { callbackCount++; return 'forged edit'; }
+  });
+  const adversarial = [
+    top,
+    { files: [accessorFile] },
+    { files: [{ ...file, edits: [accessorEdit] }] },
+    { files: [Object.assign({ ...file }, { approvedBy: 'agent' })] },
+    { files: [{ ...file, edits: [Object.defineProperty({ ...file.edits[0] },
+      'token', { value: 'hidden' })] }] },
+    Object.assign(Object.create({ files: [file] }), { verification: {} })
+  ];
+  for (const input of adversarial) {
+    assert.throws(() => createMultiFileEditPlan(input as any),
+      (error: any) => error?.code === 'MULTI_FILE_EDIT_PLAN_INVALID');
+  }
+  assert.equal(callbackCount, 0);
+});
+
+test('C06 edit verification lists reject executable or sparse command IDs and paths', () => {
+  const file = { path: 'src/main.ts', expectedSha256: digest('text'),
+    edits: [{ start: 0, end: 1, replacement: 'T' }] };
+  let callbacks = 0;
+  const getterList = Object.defineProperty(['typecheck'], '0', {
+    enumerable: true, get() { callbacks++; return 'typecheck'; }
+  });
+  for (const verification of [
+    { trustedCommandIds: new Array(1) },
+    { requiredTestPaths: new Array(1) },
+    { trustedCommandIds: getterList },
+    { requiredTestPaths: Object.assign(['test/a.test.ts'], { hidden: true }) },
+    Object.defineProperty({ trustedCommandIds: [] }, 'requiredTestPaths', {
+      enumerable: true, get() { callbacks++; return []; }
+    })
+  ]) {
+    assert.throws(() => createMultiFileEditPlan({ files: [file], verification: verification as any }),
+      (error: any) => error?.code === 'MULTI_FILE_EDIT_PLAN_INVALID');
+  }
+  assert.equal(callbacks, 0);
+});
+
+test('C06 current content must be literal own data, never inherited or getter-backed', () => {
+  const original = 'trusted';
+  const plan = createMultiFileEditPlan({ files: [{
+    path: 'src/data.txt', expectedSha256: digest(original),
+    edits: [{ start: 0, end: 1, replacement: 'T' }]
+  }] });
+  let callbacks = 0;
+  const getter = Object.defineProperty({}, 'src/data.txt', {
+    enumerable: true, get() { callbacks++; return original; }
+  });
+  const inherited = Object.create({ 'src/data.txt': original });
+  for (const source of [getter, inherited, {}]) {
+    assert.throws(() => applyMultiFileEditPlan(plan, source as any),
+      (error: any) => ['EDIT_PLAN_TARGET_MISSING','MULTI_FILE_EDIT_PLAN_INVALID'].includes(error?.code));
+  }
+  assert.equal(callbacks, 0);
+  const next = applyMultiFileEditPlan(plan, { 'src/data.txt': original });
+  assert.equal(next.contentByPath['src/data.txt'], 'Trusted');
+});
+
+test('C06 reserved JavaScript property names are ordinary literal file targets', () => {
+  const original = 'true';
+  const plan = createMultiFileEditPlan({ files: [{
+    path: '__proto__', expectedSha256: digest(original),
+    edits: [{ start: 0, end: 1, replacement: 'T' }]
+  }] });
+  const content = Object.create(null);
+  content['__proto__'] = original;
+  const result = applyMultiFileEditPlan(plan, content);
+  assert.equal(Object.getPrototypeOf(result.contentByPath), null);
+  assert.equal(Object.hasOwn(result.contentByPath, '__proto__'), true);
+  assert.equal(result.contentByPath['__proto__'], 'True');
+});
+
+test('C06 immutable plan validation rejects an executable plan identity getter', () => {
+  const p = createMultiFileEditPlan({ files: [{
+    path: 'test.ts', expectedSha256: digest('code'),
+    edits: [{ start: 0, end: 1, replacement: 'C' }]
+  }] });
+  let callbacks = 0;
+  const forged = Object.defineProperty({ ...p }, 'id', {
+    enumerable: true, get() { callbacks++; return p.id; }
+  });
+  assert.throws(() => validateMultiFileEditPlan(forged),
+    (error: any) => error?.code === 'MULTI_FILE_EDIT_PLAN_INVALID');
+  assert.equal(callbacks, 0);
+});

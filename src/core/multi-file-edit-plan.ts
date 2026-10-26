@@ -58,6 +58,48 @@ const MAX_REPLACEMENT_BYTES_PER_FILE = 8 * 1024 * 1024;
 const MAX_CONTENT_BYTES_PER_FILE = 16 * 1024 * 1024;
 const MAX_VERIFICATION_ITEMS = 5000;
 
+/**
+ * A plan is a candidate for filesystem writes, so proof-bearing arrays and
+ * objects must consist only of enumerable own data. Native Array.map skips
+ * holes, allowing a malformed plan to silently omit a requested target/edit.
+ */
+function inertArray(input: unknown, min: number, max: number, label: string): unknown[] {
+  if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype ||
+      input.length < min || input.length > max ||
+      Reflect.ownKeys(input).length !== input.length + 1) {
+    throw invalid(`${label} must be a dense bounded array.`);
+  }
+  const values: unknown[] = [];
+  for (let i = 0; i < input.length; i += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(input, String(i));
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+      throw invalid(`${label} contains an absent or executable entry.`);
+    }
+    values.push(descriptor.value);
+  }
+  return values;
+}
+
+function inertRecord(input: unknown, required: readonly string[], allowed: readonly string[], label: string): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      (Object.getPrototypeOf(input) !== Object.prototype && Object.getPrototypeOf(input) !== null)) {
+    throw invalid(`${label} must be an inert plain record.`);
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(input);
+  if (Reflect.ownKeys(input).some(key => typeof key !== 'string' || !allowed.includes(key)) ||
+      required.some(key => !Object.hasOwn(descriptors, key))) {
+    throw invalid(`${label} has missing or unsupported fields.`);
+  }
+  const record: Record<string, unknown> = Object.create(null);
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (!descriptor.enumerable || !('value' in descriptor)) {
+      throw invalid(`${label} contains an accessor or hidden field.`);
+    }
+    record[key] = descriptor.value;
+  }
+  return record;
+}
+
 export function createMultiFileEditPlan(input: {
   files: Array<{
     path: string;
@@ -66,12 +108,13 @@ export function createMultiFileEditPlan(input: {
   }>;
   verification?: Partial<EditVerificationContract>;
 }): MultiFileEditPlan {
-  if (!Array.isArray(input.files) || input.files.length < 1 || input.files.length > MAX_FILES) {
-    throw invalid(`Edit plan must contain 1-${MAX_FILES} files.`);
-  }
+  const envelope = inertRecord(input, ['files'], ['files', 'verification'], 'Edit plan request');
+  const sourceFiles = inertArray(envelope.files, 1, MAX_FILES, 'Edit plan files');
 
   const seen = new Set<string>();
-  const files = input.files.map((file) => {
+  const files = sourceFiles.map((raw) => {
+    const file = inertRecord(raw, ['path', 'expectedSha256', 'edits'],
+      ['path', 'expectedSha256', 'edits'], 'Edit plan file');
     const relativePath = normalizeRelativePath(file.path);
     if (seen.has(relativePath)) throw invalid(`Duplicate edit target: ${relativePath}`);
     seen.add(relativePath);
@@ -80,9 +123,12 @@ export function createMultiFileEditPlan(input: {
     return { path: relativePath, expectedSha256, edits };
   }).sort((a, b) => a.path.localeCompare(b.path));
 
+  const sourceVerification = envelope.verification === undefined
+    ? {} : inertRecord(envelope.verification, [],
+      ['trustedCommandIds', 'requiredTestPaths'], 'Edit plan verification');
   const verification: EditVerificationContract = {
-    trustedCommandIds: uniqueBoundedIds(input.verification?.trustedCommandIds ?? [], 'trustedCommandIds'),
-    requiredTestPaths: uniquePaths(input.verification?.requiredTestPaths ?? [], 'requiredTestPaths')
+    trustedCommandIds: uniqueBoundedIds(sourceVerification.trustedCommandIds ?? [], 'trustedCommandIds'),
+    requiredTestPaths: uniquePaths(sourceVerification.requiredTestPaths ?? [], 'requiredTestPaths')
   };
 
   const identity = { schemaVersion: 1 as const, files, verification };
@@ -97,20 +143,23 @@ export function applyMultiFileEditPlan(
   currentContentByPath: Readonly<Record<string, string>>
 ): AppliedEditPlan {
   const plan = validateMultiFileEditPlan(planInput);
-  if (!currentContentByPath || typeof currentContentByPath !== 'object' || Array.isArray(currentContentByPath)) {
-    throw invalid('Current content map is invalid.');
+  if (!currentContentByPath || typeof currentContentByPath !== 'object' || Array.isArray(currentContentByPath) ||
+      (Object.getPrototypeOf(currentContentByPath) !== Object.prototype &&
+       Object.getPrototypeOf(currentContentByPath) !== null)) {
+    throw invalid('Current content map must be a plain data record.');
   }
 
-  const output: Record<string, string> = {};
+  const output: Record<string, string> = Object.create(null);
   const previews: EditFilePreview[] = [];
   let totalBeforeBytes = 0;
   let totalAfterBytes = 0;
 
   for (const file of plan.files) {
-    const current = currentContentByPath[file.path];
-    if (typeof current !== 'string') {
-      throw new OperatorError('EDIT_PLAN_TARGET_MISSING', `Current content is missing for ${file.path}.`);
+    const entry = Object.getOwnPropertyDescriptor(currentContentByPath, file.path);
+    if (!entry || !entry.enumerable || !('value' in entry) || typeof entry.value !== 'string') {
+      throw new OperatorError('EDIT_PLAN_TARGET_MISSING', `Inert current content is missing for ${file.path}.`);
     }
+    const current = entry.value;
     const beforeBytes = Buffer.byteLength(current, 'utf8');
     if (beforeBytes > MAX_CONTENT_BYTES_PER_FILE) {
       throw invalid(`Current content exceeds byte budget for ${file.path}.`);
@@ -147,29 +196,27 @@ export function applyMultiFileEditPlan(
 }
 
 export function validateMultiFileEditPlan(input: MultiFileEditPlan): MultiFileEditPlan {
-  if (!input || input.schemaVersion !== 1 || typeof input.id !== 'string') {
+  const raw = inertRecord(input, ['schemaVersion', 'id', 'files', 'verification'],
+    ['schemaVersion', 'id', 'files', 'verification'], 'Edit plan');
+  if (raw.schemaVersion !== 1 || typeof raw.id !== 'string') {
     throw invalid('Edit plan shape is invalid.');
   }
   const normalized = createMultiFileEditPlan({
-    files: input.files,
-    verification: input.verification
+    files: raw.files as MultiFileEditEntry[],
+    verification: raw.verification as EditVerificationContract
   });
-  if (normalized.id !== input.id) {
+  if (normalized.id !== raw.id) {
     throw invalid('Edit plan id does not match its immutable content.');
   }
   return normalized;
 }
 
 function normalizeEdits(input: unknown, target: string): TextEditOperation[] {
-  if (!Array.isArray(input) || input.length < 1 || input.length > MAX_EDITS_PER_FILE) {
-    throw invalid(`Edits for ${target} are invalid.`);
-  }
+  const sourceEdits = inertArray(input, 1, MAX_EDITS_PER_FILE, `Edits for ${target}`);
   let replacementBytes = 0;
-  const edits = input.map((item, index) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      throw invalid(`Edit ${index} for ${target} is invalid.`);
-    }
-    const raw = item as Record<string, unknown>;
+  const edits = sourceEdits.map((item, index) => {
+    const raw = inertRecord(item, ['start', 'end', 'replacement'],
+      ['start', 'end', 'replacement'], `Edit ${index} for ${target}`);
     const start = integer(raw.start, 0, Number.MAX_SAFE_INTEGER, 'start');
     const end = integer(raw.end, start, Number.MAX_SAFE_INTEGER, 'end');
     // An edit replacement is source bytes, not a coercion surface. Arrays
@@ -270,13 +317,11 @@ function normalizeRelativePath(input: unknown): string {
 }
 
 function uniquePaths(input: unknown, label: string): string[] {
-  if (!Array.isArray(input) || input.length > MAX_VERIFICATION_ITEMS) throw invalid(`${label} is invalid.`);
-  return [...new Set(input.map(normalizeRelativePath))].sort();
+  return [...new Set(inertArray(input, 0, MAX_VERIFICATION_ITEMS, label).map(normalizeRelativePath))].sort();
 }
 
 function uniqueBoundedIds(input: unknown, label: string): string[] {
-  if (!Array.isArray(input) || input.length > MAX_VERIFICATION_ITEMS) throw invalid(`${label} is invalid.`);
-  const values = input.map((item) => {
+  const values = inertArray(input, 0, MAX_VERIFICATION_ITEMS, label).map((item) => {
     if (typeof item !== 'string') throw invalid(`${label} contains an invalid id.`);
     const value = item;
     if (!/^[A-Za-z0-9._:@/+\-=]{1,256}$/.test(value)) throw invalid(`${label} contains an invalid id.`);
