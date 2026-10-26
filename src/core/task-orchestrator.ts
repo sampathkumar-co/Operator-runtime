@@ -1179,6 +1179,24 @@ export class TaskOrchestrator {
         continue;
       }
       if (failureDecision.strategy === 'replan') {
+        // A no-progress observation after a potentially dispatched mutation does
+        // NOT prove the effect was absent. Replanning cannot be a backdoor for
+        // replaying the same side effect under a fresh action identity.
+        if (!retrySafe) {
+          latestRecord.state = 'BLOCKED';
+          setNodeState(task, latestNode.id, 'BLOCKED');
+          task.state = 'BLOCKED';
+          task.evidence.push(evidence('strategy_reconcile', 'info', 'Blocked no-progress replanning because the prior write has known or uncertain effects; independent reconciliation is required.', {
+            code: failureDecision.code,
+            class: failureDecision.class,
+            strategy: failureDecision.strategy,
+            actionId: latestRecord.actionId,
+            risk,
+            sideEffectState: latestRecord.sideEffectState ?? 'uncertain'
+          }));
+          await this.#persistRunState(task, assertLease);
+          return task;
+        }
         setNodeState(task, latestNode.id, 'SKIPPED');
         task.evidence.push(evidence('strategy_replan', 'info', 'Returned control to the planner after a completed action produced no meaningful progress; the same mutation is not blindly retried.', {
           code: failureDecision.code,
