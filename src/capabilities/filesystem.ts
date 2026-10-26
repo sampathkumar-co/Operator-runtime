@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import type { ActionRequest, ActionResult, ActionRisk, CapabilityProvider, CapabilityScore, ProviderReconciliationResult } from '../core/types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { PathScope } from './path-scope.ts';
@@ -130,20 +130,25 @@ export class FilesystemProvider implements CapabilityProvider {
 
   score(): CapabilityScore { return SCORE; }
 
-  async execute(action: ActionRequest): Promise<ActionResult> {
+  async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
-      if (action.capability === 'file.read') return await this.#read(action, started);
-      if (action.capability === 'file.list') return await this.#list(action, started);
-      if (action.capability === 'file.info') return await this.#info(action, started);
-      if (action.capability === 'file.search') return await this.#search(action, started);
+      assertFilesystemNotCancelled(context.signal);
+      if (action.capability === 'file.read') return await this.#read(action, started, context.signal);
+      if (action.capability === 'file.list') return await this.#list(action, started, context.signal);
+      if (action.capability === 'file.info') return await this.#info(action, started, context.signal);
+      if (action.capability === 'file.search') return await this.#search(action, started, context.signal);
       if (action.capability === 'file.manage') return await this.#manage(action, started);
       if (['file.write', 'file.create', 'file.replace'].includes(action.capability)) return await this.#write(action, started);
       throw new OperatorError('UNSUPPORTED_ACTION', action.capability);
     } catch (error) {
       const op = error instanceof OperatorError
         ? error
-        : new OperatorError('FILESYSTEM_ERROR', error instanceof Error ? error.message : String(error));
+        : new OperatorError('FILESYSTEM_ERROR', 'Filesystem operation failed.');
+      // PathScope keeps its realpath diagnostics locally. Returning them to
+      // a caller would disclose a path outside the authorized root even
+      // though the operation was correctly denied.
+      const visibleDetails = op.code === 'PATH_OUTSIDE_SCOPE' ? undefined : op.details;
       return {
         ok: false,
         capability: action.capability,
@@ -151,9 +156,9 @@ export class FilesystemProvider implements CapabilityProvider {
         evidence: [evidence('filesystem', 'fail', op.message, { code: op.code })],
         error: {
           code: op.code, message: op.message, retryable: op.retryable,
-          ...(op.details && ['none', 'known', 'uncertain'].includes(String(op.details.sideEffectState)) ? { sideEffectState: op.details.sideEffectState as 'none' | 'known' | 'uncertain' } : {}),
-          ...(op.details && ['pre_dispatch', 'dispatched', 'effect_observed', 'reconciled'].includes(String(op.details.executionPhase)) ? { executionPhase: op.details.executionPhase as 'pre_dispatch' | 'dispatched' | 'effect_observed' | 'reconciled' } : {}),
-          ...(op.details ? { details: structuredClone(op.details) } : {})
+          ...(visibleDetails && ['none', 'known', 'uncertain'].includes(String(visibleDetails.sideEffectState)) ? { sideEffectState: visibleDetails.sideEffectState as 'none' | 'known' | 'uncertain' } : {}),
+          ...(visibleDetails && ['pre_dispatch', 'dispatched', 'effect_observed', 'reconciled'].includes(String(visibleDetails.executionPhase)) ? { executionPhase: visibleDetails.executionPhase as 'pre_dispatch' | 'dispatched' | 'effect_observed' | 'reconciled' } : {}),
+          ...(visibleDetails ? { details: structuredClone(visibleDetails) } : {})
         },
         durationMs: Math.round(performance.now() - started)
       };
@@ -242,11 +247,14 @@ export class FilesystemProvider implements CapabilityProvider {
     return reconciliation('uncertain', 'Filesystem provider has no reconciliation contract for this action.');
   }
 
-  async #read(action: ActionRequest, started: number): Promise<ActionResult> {
+  async #read(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
+    assertFilesystemNotCancelled(signal);
     const requested = requiredString(action.input.path, 'path');
     return await this.#scope.withExisting(requested, async (filePath) => {
       await this.#pathLeaseHook?.(action.capability, filePath);
+      assertFilesystemNotCancelled(signal);
       const snapshot = await stableFileObservation(filePath, this.#maxReadBytes, this.#observationHook);
+      assertFilesystemNotCancelled(signal);
       const { stat, bytes: fullBytes, identity } = snapshot;
       const size = typeof stat.size === 'bigint' ? Number(stat.size) : stat.size;
       if (!Number.isSafeInteger(size) || size < 0) throw new OperatorError('FILE_SIZE_INVALID', 'Observed file size exceeds the safe numeric range.');
@@ -272,16 +280,20 @@ export class FilesystemProvider implements CapabilityProvider {
     });
   }
 
-  async #list(action: ActionRequest, started: number): Promise<ActionResult> {
+  async #list(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
+    assertFilesystemNotCancelled(signal);
     const requested = requiredString(action.input.path, 'path');
     return await this.#scope.withExisting(requested, async (dirPath) => {
       await this.#pathLeaseHook?.(action.capability, dirPath);
+      assertFilesystemNotCancelled(signal);
       const stat = await fs.stat(dirPath);
+      assertFilesystemNotCancelled(signal);
       if (!stat.isDirectory()) throw new OperatorError('NOT_A_DIRECTORY', 'Requested path is not a directory.');
       const offset = boundedInteger(action.input.offset, 0, 0, 1_000_000);
       const limit = boundedInteger(action.input.limit, 500, 1, 500);
       const entries = (await fs.readdir(dirPath, { withFileTypes: true }))
         .sort((left, right) => left.name.localeCompare(right.name));
+      assertFilesystemNotCancelled(signal);
       const bounded = entries.slice(offset, offset + limit).map((entry) => ({
         name: entry.name,
         type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : entry.isSymbolicLink() ? 'symlink' : 'other'
@@ -299,15 +311,19 @@ export class FilesystemProvider implements CapabilityProvider {
     });
   }
 
-  async #info(action: ActionRequest, started: number): Promise<ActionResult> {
+  async #info(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
+    assertFilesystemNotCancelled(signal);
     const requested = requiredString(action.input.path, 'path');
     return await this.#scope.withExisting(requested, async (resolved) => {
       await this.#pathLeaseHook?.(action.capability, resolved);
+      assertFilesystemNotCancelled(signal);
       const lstat = await fs.lstat(resolved);
+      assertFilesystemNotCancelled(signal);
       if (lstat.isSymbolicLink()) throw new OperatorError('FILE_OBSERVATION_SYMLINK_DENIED', 'Stable file observation refuses symbolic links.');
       const stable = lstat.isFile() && lstat.size <= this.#maxReadBytes
         ? await stableFileObservation(resolved, this.#maxReadBytes, this.#observationHook)
         : undefined;
+      assertFilesystemNotCancelled(signal);
       const stat = stable?.stat ?? lstat;
       const output: Record<string, unknown> = {
         path: resolved,
@@ -327,7 +343,8 @@ export class FilesystemProvider implements CapabilityProvider {
     });
   }
 
-  async #search(action: ActionRequest, started: number): Promise<ActionResult> {
+  async #search(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
+    assertFilesystemNotCancelled(signal);
     const requested = requiredString(action.input.path, 'path');
     const query = requiredString(action.input.query, 'query').toLowerCase();
     if (query.length > 512) throw new OperatorError('FILESYSTEM_INPUT_INVALID', 'Search query exceeds 512 characters.');
@@ -340,16 +357,45 @@ export class FilesystemProvider implements CapabilityProvider {
     const kind = requestedKind;
     return await this.#scope.withExisting(requested, async (root) => {
       await this.#pathLeaseHook?.(action.capability, root);
+      assertFilesystemNotCancelled(signal);
       const stat = await fs.stat(root);
+      assertFilesystemNotCancelled(signal);
       if (!stat.isDirectory()) throw new OperatorError('NOT_A_DIRECTORY', 'Search root is not a directory.');
       const results: Array<{ path: string; name: string; type: 'file' | 'directory'; size?: number }> = [];
       const queue: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
       let visited = 0;
       let truncated = false;
       while (queue.length > 0 && results.length < maxResults && visited < MAX_SEARCH_VISITS) {
+        assertFilesystemNotCancelled(signal);
         const current = queue.shift()!;
-        const entries = await fs.readdir(current.dir, { withFileTypes: true });
+        // Recheck the caller-owned descendant just before re-entering its
+        // path lease. This is also the deterministic test seam for races.
+        if (current.dir !== root) await this.#pathLeaseHook?.(action.capability, current.dir);
+        assertFilesystemNotCancelled(signal);
+        // Directory entries are untrusted after enumeration: a child directory
+        // can be exchanged for a symlink/junction between queueing and use.
+        // Re-establish the path-lease for each descended directory, not only
+        // for the original search root.
+        const entries = await this.#scope.withExisting(current.dir, async (scopedDir) => {
+          assertFilesystemNotCancelled(signal);
+          // A child replaced by a symlink to ANOTHER authorized directory is
+          // still the wrong observed resource, even though it stays in scope.
+          const observed = process.platform === 'win32' ? path.normalize(current.dir).toLowerCase() : path.normalize(current.dir);
+          const resolved = process.platform === 'win32' ? path.normalize(scopedDir).toLowerCase() : path.normalize(scopedDir);
+          if (resolved !== observed) {
+            throw new OperatorError('FILE_SEARCH_DIRECTORY_CHANGED',
+              'Recursive search target changed its observed directory identity.');
+          }
+          const stat = await fs.lstat(scopedDir);
+          if (!stat.isDirectory() || stat.isSymbolicLink()) {
+            throw new OperatorError('FILE_SEARCH_DIRECTORY_CHANGED',
+              'Recursive directory changed identity during scoped search.');
+          }
+          return await fs.readdir(scopedDir, { withFileTypes: true });
+        });
+        assertFilesystemNotCancelled(signal);
         for (const entry of entries) {
+          assertFilesystemNotCancelled(signal);
           visited += 1;
           if (visited >= MAX_SEARCH_VISITS) { truncated = true; break; }
           if (entry.isSymbolicLink()) continue;
@@ -358,13 +404,26 @@ export class FilesystemProvider implements CapabilityProvider {
           const full = path.join(current.dir, entry.name);
           if (entry.name.toLowerCase().includes(query) && (kind === 'all' || kind === type)) {
             const item: { path: string; name: string; type: 'file' | 'directory'; size?: number } = { path: full, name: entry.name, type };
-            if (type === 'file') item.size = (await fs.stat(full)).size;
+            if (type === 'file') {
+              await this.#pathLeaseHook?.(action.capability, full);
+              assertFilesystemNotCancelled(signal);
+              // lstat does not dereference a symlink swapped into the name
+              // after readdir. Never read metadata from the new target.
+              const fileStat = await fs.lstat(full);
+              if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
+                throw new OperatorError('FILE_SEARCH_ENTRY_CHANGED',
+                  'File identity changed between search enumeration and inspection.');
+              }
+              item.size = fileStat.size;
+            }
+            assertFilesystemNotCancelled(signal);
             results.push(item);
             if (results.length >= maxResults) { truncated = true; break; }
           }
           if (entry.isDirectory() && current.depth < maxDepth) queue.push({ dir: full, depth: current.depth + 1 });
         }
       }
+      assertFilesystemNotCancelled(signal);
       if (queue.length > 0 || visited >= MAX_SEARCH_VISITS) truncated = true;
       return {
         ok: true, capability: action.capability, provider: this.name,
@@ -761,5 +820,14 @@ async function assertMissing(target: string, message: string, expectMissing = fa
   } catch (error) {
     if (error instanceof OperatorError) throw error;
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+function assertFilesystemNotCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new OperatorError('EXECUTION_ABORTED', 'Filesystem observation was cancelled.', {
+      retryable: false,
+      details: { sideEffectState: 'none', executionPhase: 'pre_dispatch' }
+    });
   }
 }
