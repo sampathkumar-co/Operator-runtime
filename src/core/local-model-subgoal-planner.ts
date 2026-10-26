@@ -416,6 +416,14 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
     catch { return invalid('Local model reply was not valid JSON.'); }
     if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) ||
       typeof (envelope as { response?: unknown }).response !== 'string') invalid('Local model envelope is invalid.');
+    const meta = envelope as Record<string, unknown>;
+    // A syntactically valid JSON prefix is not a settled decision if the
+    // inference provider declares truncation or a tool-call handoff.
+    if ((Object.hasOwn(meta, 'done') && meta.done !== true) ||
+        (Object.hasOwn(meta, 'done_reason') && meta.done_reason !== 'stop') ||
+        Object.hasOwn(meta, 'tool_calls') || Object.hasOwn(meta, 'function_call')) {
+      invalid('Local model decision was incomplete or requested a tool call.');
+    }
     const text = (envelope as { response: string }).response;
     if (text.length > 1024) invalid('Local model response is too large.');
     return text;
