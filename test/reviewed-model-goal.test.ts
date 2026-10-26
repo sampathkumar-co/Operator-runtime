@@ -98,3 +98,65 @@ test('C05 nested confirmation callback is unable to consume the same reviewed in
     return request;
   }).goal, modelOutput.goal);
 });
+
+test('C05 proposal issue rejects changing getters instead of binding mismatched scope', () => {
+  const bridge = new ReviewedModelGoalBridge();
+  let invoked = 0;
+  const scopeWithGetter = Object.defineProperty({
+    objective: request.objective,
+    approvedRoots: [...request.approvedRoots]
+  }, 'approvedBrowserOrigins', {
+    enumerable: true,
+    get() {
+      invoked++;
+      return invoked === 1 ? [origin] : [origin, 'https://unapproved.example'];
+    }
+  });
+  assert.throws(() => bridge.propose({
+    principal: 'user:a', request: scopeWithGetter, modelOutput
+  }), (err: any) => err?.code === 'TASK_PROPOSAL_SCOPE_DENIED');
+  assert.equal(invoked, 0, 'untrusted authority getters must never run');
+});
+
+test('C05 issued review remains bound to its consent-time authority after caller mutation', () => {
+  const bridge = new ReviewedModelGoalBridge();
+  const callerOwned = {
+    objective: request.objective,
+    approvedBrowserOrigins: [...request.approvedBrowserOrigins],
+    approvedRoots: [...request.approvedRoots]
+  };
+  const review = bridge.propose({ principal: 'user:a', request: callerOwned, modelOutput });
+  callerOwned.objective = 'Perform a different task';
+  callerOwned.approvedBrowserOrigins.push('https://unapproved.example');
+  callerOwned.approvedRoots.push(path.join(root, 'another-root'));
+  assert.throws(() => bridge.confirm({
+    principal: 'user:a', proposalId: review.proposalId,
+    proposalDigest: review.proposalDigest, currentApprovedScopeFor: () => callerOwned
+  }), (err: any) => err?.code === 'TASK_PROPOSAL_SCOPE_DENIED');
+  const another = bridge.propose({ principal: 'user:a', request, modelOutput });
+  const verified = bridge.confirm({
+    principal: 'user:a', proposalId: another.proposalId,
+    proposalDigest: another.proposalDigest, currentApprovedScopeFor: () => request
+  });
+  assert.equal(verified.objective, request.objective);
+  assert.deepEqual(verified.authorizedScope, ['browser:' + origin, 'project:' + root].sort());
+});
+
+test('C05 no hidden or sparse permission fields can enter reviewed proposal binding', () => {
+  const bridge = new ReviewedModelGoalBridge();
+  const sparse: string[] = new Array(2);
+  sparse[1] = origin;
+  const hidden = Object.defineProperty({ ...request }, 'extraAuthority', {
+    value: 'system', enumerable: false
+  });
+  const symbol = { ...request, [Symbol('policy')]: 'external' };
+  for (const invalidRequest of [
+    { ...request, approvedBrowserOrigins: sparse },
+    hidden, symbol,
+    { ...request, approvedRoots: Object.assign([...request.approvedRoots], { hidden: root }) }
+  ]) {
+    assert.throws(() => bridge.propose({
+      principal: 'user:a', request: invalidRequest as typeof request, modelOutput
+    }), (err: any) => err?.code === 'TASK_PROPOSAL_SCOPE_DENIED');
+  }
+});
