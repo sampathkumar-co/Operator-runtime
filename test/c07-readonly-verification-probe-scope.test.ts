@@ -31,3 +31,45 @@ test('C07 mixed verification probe lists reject a hidden mutation instead of par
   assert.throws(()=>normalizeCanonicalVerificationRequest(mixed),
     (err:any)=>err?.code==='CANONICAL_VERIFICATION_INVALID');
 });
+
+test('C07 verifier strictly checks probe shape and inert JSON without dispatch', () => {
+  const valid = request('file.read');
+  for (const hostile of [
+    { ...valid, approvals: ['all'] },
+    { probes: [{ ...valid.probes[0], risk: 'write' }] },
+    { probes: [{ ...valid.probes[0], input: null }] },
+    { probes: [{ ...valid.probes[0], input: { fn: () => 'execute' } }] },
+    { probes: [{ ...valid.probes[0], input: { bytes: Number.NaN } }] },
+    { probes: [{ ...valid.probes[0], input: { input: new Date() } }] },
+    { probes: [{ ...valid.probes[0], input: { unsafe: undefined } }] },
+    { probes: [{ ...valid.probes[0], input: { deep: 'x'.repeat(270 * 1024) } }] }
+  ]) {
+    assert.throws(
+      () => normalizeCanonicalVerificationRequest(hostile),
+      (error: any) => error?.code === 'CANONICAL_VERIFICATION_INVALID'
+    );
+  }
+  const cyclic: any = {}; cyclic.self = cyclic;
+  const getter = Object.defineProperty({}, 'password', {
+    enumerable: true, get() { throw new Error('must never evaluate accessor'); }
+  });
+  const hidden = Object.defineProperty({}, 'unlisted', { value: 'hidden' });
+  for (const input of [cyclic, getter, hidden]) {
+    assert.throws(
+      () => normalizeCanonicalVerificationRequest({
+        probes: [{ ...valid.probes[0], input }]
+      }),
+      (error: any) => error?.code === 'CANONICAL_VERIFICATION_INVALID'
+    );
+  }
+});
+
+test('C07 read-only probe supports bounded nested JSON arrays and preserves exact data', () => {
+  const valid = request('file.read');
+  const nested = { selectors: [{ path: ['files', 'name'], enabled: true, limit: 4 }] };
+  const normalized = normalizeCanonicalVerificationRequest({
+    probes: [{ ...valid.probes[0], input: nested }]
+  });
+  assert.deepEqual(normalized.probes[0]?.input, nested);
+  assert.notEqual(normalized.probes[0]?.input, nested);
+});
