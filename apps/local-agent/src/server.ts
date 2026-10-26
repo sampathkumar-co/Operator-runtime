@@ -34,6 +34,7 @@ import type { LocalDeviceResetResult } from './device-reset.ts';
 import { renderControlCenter } from './control-center.ts';
 import { buildRedactedControlCenterDiagnostics } from '../../../src/core/control-center-diagnostic-export.ts';
 import { buildControlCenterRuntimeStatus } from '../../../src/core/control-center-runtime-status.ts';
+import { buildControlCenterTaskTimeline } from '../../../src/core/control-center-task-timeline.ts';
 import { projectDoctorOnboardingEvidence, type DoctorObservation } from '../../../src/core/control-center-doctor-evidence.ts';
 import { ControlCenterSessions, browserUiRouteAllowed, controlCenterBrowserRequestAllowed } from './control-center-session.ts';
 import { resourceKeysForAction } from '../../../src/core/resource-identity.ts';
@@ -803,6 +804,30 @@ export function createLocalAgentServer(options: {
         projections: tasks.map((task) => projectTaskRuntime(task, { journal, approvals })),
         configured: Boolean(options.tasks)
       });
+      return;
+    }
+
+    const taskTimelineRoute = /^\/v1\/control-center\/tasks\/([0-9a-f-]{36})\/timeline$/i.exec(pathname);
+    if (taskTimelineRoute && req.method === 'GET') {
+      if (!options.tasks) {
+        send(res, 503, { ok: false, error: { code: 'TASK_STORE_NOT_CONFIGURED', message: 'Task state is not configured.' } });
+        return;
+      }
+      try {
+        const task = await options.tasks.get(taskTimelineRoute[1]!);
+        const [journal, approvals] = await Promise.all([
+          options.agentKernel ? options.agentKernel.journal.list(1000) : [],
+          options.approvals ? options.approvals.list() : []
+        ]);
+        const projection = projectTaskRuntime(task, { journal, approvals });
+        send(res, 200, { ok: true, timeline: buildControlCenterTaskTimeline(task, projection) });
+      } catch (error) {
+        const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'TASK_TIMELINE_READ_FAILED';
+        send(res, code === 'TASK_NOT_FOUND' ? 404 : 409, {
+          ok: false,
+          error: { code, message: error instanceof Error ? error.message : String(error) }
+        });
+      }
       return;
     }
 

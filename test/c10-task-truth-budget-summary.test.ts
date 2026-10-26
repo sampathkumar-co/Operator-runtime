@@ -14,18 +14,20 @@ test('C10 task details separate goal verification and pre-call model reservation
     'Cost ceiling reserved', 'Budget values are pre-call reservations',
     'An earlier side effect remains uncertain'];
   for(const label of expected) assert.ok(script.includes(label),label);
-  assert.ok(script.includes('wrap.append(actions,taskProgressSummary(task,projection),'),
+  assert.ok(script.includes('wrap.append(actions,taskProgressSummary(task,projection))'),
     'Task summary must be wired into real selected task UI');
+  assert.ok(script.includes('window.MecordTaskTimeline.render(timelineData.timeline)'),
+    'Only the separate approved timeline presentation renders model projection');
   assert.equal(script.includes('innerHTML'), false, 'Task objective must never be interpolated as unescaped HTML');
 });
 
 test('C10 generated Control Center exactly matches maintained source files', async () => {
-  const [shell,style,script,runtimeStatus] = await Promise.all(['shell.html','styles.css','app.js','runtime-status.js']
+  const [shell,style,timeline,script,runtimeStatus] = await Promise.all(['shell.html','styles.css','task-timeline.js','app.js','runtime-status.js']
     .map(file=>fs.readFile(path.join(source,file),'utf8')));
   const norm = (value:string)=>value.replace(/\r\n?/g,'\n');
   const expected=norm(shell)
     .replace('__MECORD_STYLE__',norm(style).trim())
-    .replace('__MECORD_SCRIPT__',norm(script).trim() + '\n' + norm(runtimeStatus).trim())
+    .replace('__MECORD_SCRIPT__',norm(timeline).trim() + '\n' + norm(script).trim() + '\n' + norm(runtimeStatus).trim())
     .replaceAll('__MECORD_NONCE__','safe_nonce');
   const rendered=renderControlCenter('safe_nonce');
   assert.equal(rendered,expected);

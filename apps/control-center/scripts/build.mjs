@@ -4,13 +4,14 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
-const [shell, style, appScript, runtimeStatusScript] = await Promise.all([
+const [shell, style, timelineScript, appScript, runtimeStatusScript] = await Promise.all([
   fs.readFile(path.join(root, 'src', 'shell.html'), 'utf8'),
   fs.readFile(path.join(root, 'src', 'styles.css'), 'utf8'),
+  fs.readFile(path.join(root, 'src', 'task-timeline.js'), 'utf8'),
   fs.readFile(path.join(root, 'src', 'app.js'), 'utf8'),
   fs.readFile(path.join(root, 'src', 'runtime-status.js'), 'utf8')
 ]);
-const script = `${appScript.trim()}\n${runtimeStatusScript.trim()}`;
+const script = `${timelineScript.trim()}\n${appScript.trim()}\n${runtimeStatusScript.trim()}`;
 
 for (const marker of ['__MECORD_NONCE__','__MECORD_STYLE__','__MECORD_SCRIPT__']) {
   if (!shell.includes(marker)) throw new Error(`Control Center shell is missing ${marker}.`);
@@ -21,7 +22,7 @@ if (!shell.includes('role="tablist"') || !shell.includes('aria-live="polite"')) 
 }
 if (!script.includes('/v1/control-center/approvals') || !script.includes('/v1/control-center/recovery')
   || !script.includes('/v1/control-center/onboarding') || !script.includes('/v1/control-center/diagnostics')
-  || !script.includes('/v1/control-center/status')) {
+  || !script.includes('/v1/control-center/status') || !script.includes('/v1/control-center/tasks/')) {
   throw new Error('Control Center is missing an R4 runtime-backed product surface.');
 }
 
