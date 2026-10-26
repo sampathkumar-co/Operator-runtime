@@ -60,3 +60,35 @@ test('duplicate checks and malformed evidence fail closed', () => {
     checks: [{ name: 'evidence', ok: true, detail: 'bad digest', evidenceDigests: ['not-a-digest'] }]
   }), (error: any) => error?.code === 'VERIFICATION_INPUT_INVALID');
 });
+
+test('malformed verification envelopes and forged truth values fail with a typed error', () => {
+  const kernel = new VerificationKernel();
+  const base = { subjectKind: 'task', subjectId: 'task-1', contract: { version: 1 } };
+  for (const malformed of [null, undefined, [], 'ok', 1]) {
+    assert.throws(
+      () => kernel.verify(malformed as any),
+      (error: any) => error?.code === 'VERIFICATION_INPUT_INVALID'
+    );
+  }
+  const invalidChecks: unknown[] = [
+    null,
+    undefined,
+    [],
+    'success',
+    { name: 'probe', detail: 'caller says yes', ok: 'true' },
+    { name: 'probe', detail: 'caller says yes', ok: 1 },
+    { name: 'probe', detail: 'caller says yes', ok: new Boolean(true) },
+    { name: 'probe', detail: 'caller says yes' }
+  ];
+  for (const check of invalidChecks) {
+    assert.throws(
+      () => kernel.verify({ ...base, checks: [check as any] }),
+      (error: any) => error?.code === 'VERIFICATION_INPUT_INVALID'
+    );
+  }
+  const genuinelyFailed = kernel.verify({
+    ...base,
+    checks: [{ name: 'probe', detail: 'failed postcondition', ok: false }]
+  });
+  assert.equal(genuinelyFailed.verified, false);
+});

@@ -49,6 +49,9 @@ export class VerificationKernel {
     contract: unknown;
     checks: VerificationCheck[];
   }): VerificationReceipt {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new OperatorError('VERIFICATION_INPUT_INVALID', 'Verification request is invalid.');
+    }
     const subjectKind = bounded(input.subjectKind, 128, 'subjectKind');
     const subjectId = bounded(input.subjectId, 512, 'subjectId');
     if (!Array.isArray(input.checks) || input.checks.length < 1 || input.checks.length > 10_000) {
@@ -57,6 +60,11 @@ export class VerificationKernel {
 
     const names = new Set<string>();
     const checks = input.checks.map((check, index) => {
+      // A malformed or forged boolean must not silently become a failed check.
+      // Preserve the typed proof contract even for callers bypassing TypeScript.
+      if (!check || typeof check !== 'object' || Array.isArray(check) || typeof check.ok !== 'boolean') {
+        throw new OperatorError('VERIFICATION_INPUT_INVALID', `checks[${index}] must be a typed verification check.`);
+      }
       const name = bounded(check.name, 256, `checks[${index}].name`);
       if (names.has(name)) throw new OperatorError('VERIFICATION_INPUT_INVALID', `Duplicate verification check ${name}.`);
       names.add(name);
