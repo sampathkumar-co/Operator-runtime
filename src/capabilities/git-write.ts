@@ -59,6 +59,8 @@ export class GitWriteProvider implements CapabilityProvider {
 
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
+    let checkpointStarted = false;
+    let mutationStarted = false;
     try {
       assertGitWriteNotStopped(context.signal, false);
       if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Git write provider does not support this capability.');
@@ -112,6 +114,7 @@ export class GitWriteProvider implements CapabilityProvider {
       }
 
       assertGitWriteNotStopped(context.signal, false);
+      checkpointStarted = true;
       const checkpointResult = await this.#checkpoint.execute({
         id: `${action.id}:checkpoint`,
         capability: 'git.checkpoint.create',
@@ -128,6 +131,7 @@ export class GitWriteProvider implements CapabilityProvider {
       // mutation; preserve uncertainty rather than pretending zero effects.
       assertGitWriteNotStopped(context.signal, true);
 
+      mutationStarted = true;
       if (operation === 'stage') return await this.#stage(action, started, before, checkpoint.id);
       if (operation === 'unstage') return await this.#unstage(action, started, before, checkpoint.id);
       return await this.#commit(action, started, before, checkpoint.id);
@@ -135,17 +139,25 @@ export class GitWriteProvider implements CapabilityProvider {
       const op = error instanceof OperatorError
         ? error
         : new OperatorError('GIT_WRITE_ERROR', error instanceof Error ? error.message : String(error));
+      // The checkpoint may have changed owned Git refs, and the command may
+      // have changed the index/HEAD before failing. Never authorize an
+      // automatic replay merely because a child process returned an error.
+      const afterDispatch = checkpointStarted || mutationStarted;
+      const sideEffectState = op.details && ['none','known','uncertain'].includes(String(op.details.sideEffectState))
+        ? op.details.sideEffectState as 'none' | 'known' | 'uncertain'
+        : afterDispatch ? 'uncertain' : 'none';
+      const executionPhase = op.details && ['pre_dispatch','dispatched','effect_observed','reconciled'].includes(String(op.details.executionPhase))
+        ? op.details.executionPhase as 'pre_dispatch' | 'dispatched' | 'effect_observed' | 'reconciled'
+        : afterDispatch ? 'dispatched' : 'pre_dispatch';
       return {
         ok: false,
         capability: action.capability,
         provider: this.name,
-        evidence: [evidence('git_write', 'fail', op.message, { code: op.code })],
+        evidence: [evidence('git_write', 'fail', op.message, { code: op.code, afterDispatch })],
         error: {
-          code: op.code, message: op.message, retryable: op.retryable,
-          ...(op.details && ['none','known','uncertain'].includes(String(op.details.sideEffectState))
-            ? { sideEffectState: op.details.sideEffectState as 'none' | 'known' | 'uncertain' } : {}),
-          ...(op.details && ['pre_dispatch','dispatched','effect_observed','reconciled'].includes(String(op.details.executionPhase))
-            ? { executionPhase: op.details.executionPhase as 'pre_dispatch' | 'dispatched' | 'effect_observed' | 'reconciled' } : {})
+          code: op.code, message: op.message,
+          retryable: afterDispatch ? false : op.retryable,
+          sideEffectState, executionPhase
         },
         durationMs: Math.round(performance.now() - started)
       };
