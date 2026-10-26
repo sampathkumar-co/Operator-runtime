@@ -172,7 +172,10 @@ function normalizeEdits(input: unknown, target: string): TextEditOperation[] {
     const raw = item as Record<string, unknown>;
     const start = integer(raw.start, 0, Number.MAX_SAFE_INTEGER, 'start');
     const end = integer(raw.end, start, Number.MAX_SAFE_INTEGER, 'end');
-    const replacement = String(raw.replacement ?? '');
+    // An edit replacement is source bytes, not a coercion surface. Arrays
+    // and objects (including attacker-owned toString hooks) must be refused.
+    if (typeof raw.replacement !== 'string') throw invalid('Edit replacement must be literal text.');
+    const replacement = raw.replacement;
     if (replacement.includes('\0')) throw invalid('Edit replacement may not contain NUL.');
     replacementBytes += Buffer.byteLength(replacement, 'utf8');
     if (replacementBytes > MAX_REPLACEMENT_BYTES_PER_FILE) {
