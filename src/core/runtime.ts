@@ -100,6 +100,7 @@ export class OperatorRuntime {
         durationMs: Math.round(performance.now() - start)
       };
     }
+    if (context.signal?.aborted) return abortedResult(canonicalAction, start);
     if (ranked.length === 0) {
       return {
         ok: false,
@@ -113,19 +114,27 @@ export class OperatorRuntime {
 
     const failures = [];
     for (const { provider, score, baseScore, learnedAdjustment } of ranked) {
+      // A trusted dispatch callback may veto before the journal moves to
+      // DISPATCHED. Never confuse that exact pre-dispatch veto with an abort
+      // thrown later by a provider whose effects may already have occurred.
+      let trustedPreDispatchAbort = false;
       try {
         if (context.signal?.aborted) return abortedResult(canonicalAction, start);
         if (!await provider.supports(canonicalAction)) {
           failures.push({ code: 'PROVIDER_SUPPORT_CHANGED', message: `${provider.name} no longer supports the canonical action.`, retryable: true, sideEffectState: 'none' as const, executionPhase: 'pre_dispatch' as const });
           continue;
         }
+        if (context.signal?.aborted) return abortedResult(canonicalAction, start);
         try {
           const dispatchDecision = await this.authority.authorize(
             canonicalAction,
             permissions,
             async (candidate) => {
+              throwIfCancelledBeforeDispatch(context.signal);
               if (!provider.resolveRisk) throw new OperatorError('CAPABILITY_RISK_UNRESOLVED', `Selected provider ${provider.name} has no dynamic-risk contract.`);
-              return await provider.resolveRisk(candidate);
+              const risk = await provider.resolveRisk(candidate);
+              throwIfCancelledBeforeDispatch(context.signal);
+              return risk;
             },
             context.authorityToken
           );
@@ -133,7 +142,21 @@ export class OperatorRuntime {
         } catch (error) {
           return policyDeniedBeforeDispatch(canonicalAction, error, start);
         }
-        await context.onProviderDispatch?.(provider.name);
+        if (context.signal?.aborted) return abortedResult(canonicalAction, start);
+        try {
+          await context.onProviderDispatch?.(provider.name);
+        } catch (error) {
+          if (error instanceof OperatorError && error.code === 'EXECUTION_ABORTED'
+              && error.details?.executionPhase === 'pre_dispatch'
+              && error.details?.sideEffectState === 'none') {
+            trustedPreDispatchAbort = true;
+          }
+          throw error;
+        }
+        // The callback is the durable dispatch linearization point for AgentKernel.
+        // Cancellation after it cannot prove that no provider effect began, even
+        // when this runtime has not yet invoked provider.execute.
+        if (context.signal?.aborted) return abortedResult(canonicalAction, start, true);
         const result = assertProviderResultContract(
           await provider.execute(canonicalAction, context), canonicalAction, provider.name
         );
@@ -153,7 +176,9 @@ export class OperatorRuntime {
           return { ...result, error: failure };
         }
       } catch (error) {
-        if (context.signal?.aborted || isAbortError(error)) return abortedResult(canonicalAction, start, true);
+        if (context.signal?.aborted || isAbortError(error)) {
+          return abortedResult(canonicalAction, start, !trustedPreDispatchAbort);
+        }
         const op = error instanceof OperatorError
           ? error
           : new OperatorError('PROVIDER_EXCEPTION', error instanceof Error ? error.message : String(error), { retryable: true });
@@ -194,8 +219,19 @@ export class OperatorRuntime {
     priorResult?: ActionResult,
     context: CapabilityExecutionContext = {}
   ): Promise<ProviderReconciliationResult> {
+    if (context.signal?.aborted) return cancelledReconciliation(providerName, 'before provider selection');
     const provider = await this.router.provider(providerName);
-    if (!provider || !await provider.supports(action)) {
+    let supported = false;
+    try {
+      supported = provider ? await provider.supports(action) : false;
+    } catch (error) {
+      if (context.signal?.aborted || isAbortError(error)) {
+        return cancelledReconciliation(providerName, 'while provider support was being revalidated');
+      }
+      throw error;
+    }
+    if (context.signal?.aborted) return cancelledReconciliation(providerName, 'after provider support revalidation');
+    if (!provider || !supported) {
       throw new OperatorError('PROVIDER_RECONCILIATION_UNAVAILABLE', `Provider ${providerName} is not available for reconciliation.`);
     }
     if (!provider.reconcile) {
@@ -203,7 +239,16 @@ export class OperatorRuntime {
       if (policy?.mode === 'side_effect_free') return reconcileFromDurableResult(providerName, action.capability, priorResult);
       throw new OperatorError('PROVIDER_RECONCILIATION_CONTRACT_MISSING', `Provider ${providerName} has no reconciliation contract for mutable capability ${action.capability}.`);
     }
-    return await provider.reconcile({ action, ...(priorResult ? { priorResult } : {}) }, context);
+    try {
+      const outcome = await provider.reconcile({ action, ...(priorResult ? { priorResult } : {}) }, context);
+      if (context.signal?.aborted) return cancelledReconciliation(providerName, 'while provider reconciliation was in progress');
+      return outcome;
+    } catch (error) {
+      if (context.signal?.aborted || isAbortError(error)) {
+        return cancelledReconciliation(providerName, 'while provider reconciliation was in progress');
+      }
+      throw error;
+    }
   }
 
   async close(): Promise<void> {
@@ -225,6 +270,26 @@ function policyDeniedBeforeDispatch(action: ActionRequest, error: unknown, start
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && (error.name === 'AbortError' || error.message === 'The operation was aborted');
+}
+
+function throwIfCancelledBeforeDispatch(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw new OperatorError('EXECUTION_ABORTED', 'Execution authority was cancelled before provider dispatch.', {
+    retryable: false,
+    details: { sideEffectState: 'none', executionPhase: 'pre_dispatch' }
+  });
+}
+
+function cancelledReconciliation(providerName: string, boundary: string): ProviderReconciliationResult {
+  return {
+    status: 'uncertain',
+    evidence: [evidence(
+      'reconciliation_cancelled',
+      'fail',
+      'Provider reconciliation was cancelled; the prior side effect remains uncertain.',
+      { code: 'EXECUTION_ABORTED', provider: providerName, boundary }
+    )]
+  };
 }
 
 function thrownExecutionPhase(error: OperatorError): ExecutionPhase {

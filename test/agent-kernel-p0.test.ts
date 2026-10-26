@@ -1092,3 +1092,50 @@ test('C08 superseded user intent during pre-dispatch hook cannot dispatch a muta
   assert.equal(provider.calls,0);
   assert.equal((await journal.inspect(action.id)).state,'DEFERRED');
 });
+
+test('C08 owner cancellation inside final dispatch callback prevents provider execution', async (t) => {
+  const stateDir = await temp(t);
+  const provider = new StateProvider();
+  const { kernel, journal } = kernelAt(stateDir, provider);
+  const stop = new AbortController();
+  const action: ActionRequest = {
+    id: 'c08-abort-final-dispatch',
+    capability: 'file.write', risk: 'write',
+    input: { path: path.join(stateDir, 'fixture.txt'), key: 'x', value: 'never-applied' },
+    provenance: { kind: 'trusted_policy' }
+  };
+  let callbacks = 0;
+  const result = await kernel.execute(action, permissions(['file.write']), {
+    signal: stop.signal,
+    onProviderDispatch() {
+      callbacks++;
+      stop.abort('owner-stop-before-dispatch');
+    }
+  });
+  assert.equal(callbacks, 1);
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.executionPhase, 'pre_dispatch');
+  assert.equal(result.error?.sideEffectState, 'none');
+  assert.equal(provider.calls, 0);
+  assert.equal((await journal.inspect(action.id)).state, 'DEFERRED');
+});
+
+test('C08 cancellation during reconciliation cannot convert an uncertain write into completed truth', async () => {
+  const provider = new StateProvider();
+  const stop = new AbortController();
+  provider.reconcile = async (request) => {
+    provider.reconciliations++;
+    stop.abort('owner-stop-during-reconciliation');
+    return { status: 'completed', result: success(request.action, provider.name, { completed: true }), evidence: [] };
+  };
+  const runtime = new OperatorRuntime().register(provider);
+  const action: ActionRequest = {
+    id: 'c08-reconcile-stop', capability: 'file.write', risk: 'write',
+    input: { key: 'x', value: 1 }, provenance: { kind: 'trusted_policy' }
+  };
+  const outcome = await runtime.reconcile(action, provider.name, undefined, { signal: stop.signal });
+  assert.equal(provider.reconciliations, 1);
+  assert.equal(outcome.status, 'uncertain');
+  assert.equal(outcome.result, undefined);
+  assert.equal(outcome.evidence.some(item => item.kind === 'reconciliation_cancelled'), true);
+});
