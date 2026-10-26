@@ -23,7 +23,10 @@ export async function providerSupports(provider: CapabilityProvider, action: Act
   const supported = await provider.supports(action);
   if (typeof supported !== 'boolean') {
     throw new OperatorError('PROVIDER_SUPPORT_CONTRACT_INVALID',
-      `Provider ${provider.name} returned a non-boolean supports() declaration.`);
+      `Provider ${provider.name} returned a non-boolean supports() declaration.`, {
+        retryable: false,
+        details: { executionPhase: 'pre_dispatch', sideEffectState: 'none' }
+      });
   }
   return supported;
 }
