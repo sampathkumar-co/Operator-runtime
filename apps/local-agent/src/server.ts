@@ -819,13 +819,33 @@ export function createLocalAgentServer(options: {
           options.agentKernel ? options.agentKernel.journal.list(1000) : [],
           options.approvals ? options.approvals.list() : []
         ]);
+        const rawBefore = requestUrl.searchParams.get('before');
+        const rawLimit = requestUrl.searchParams.get('limit');
+        const validCursor = (value: string) => /^[1-9][0-9]{0,8}$/.test(value) && Number.isSafeInteger(Number(value));
+        if ((rawBefore !== null && !validCursor(rawBefore)) ||
+            (rawLimit !== null && (!validCursor(rawLimit) || Number(rawLimit) > 500))) {
+          send(res, 400, { ok: false, error: {
+            code: 'TASK_TIMELINE_CURSOR_INVALID', message: 'Timeline cursor and limit must be bounded positive integers.'
+          } });
+          return;
+        }
         const projection = projectTaskRuntime(task, { journal, approvals });
-        send(res, 200, { ok: true, timeline: buildControlCenterTaskTimeline(task, projection) });
+        const timeline = buildControlCenterTaskTimeline(task, projection, {
+          ...(rawBefore !== null ? { before: Number(rawBefore) } : {}),
+          ...(rawLimit !== null ? { limit: Number(rawLimit) } : {})
+        });
+        send(res, 200, { ok: true, timeline });
       } catch (error) {
         const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'TASK_TIMELINE_READ_FAILED';
-        send(res, code === 'TASK_NOT_FOUND' ? 404 : 409, {
+        const cursorInvalid = code === 'TASK_TIMELINE_CURSOR_INVALID'
+          || (error instanceof Error && error.message === 'TASK_TIMELINE_CURSOR_INVALID');
+        send(res, cursorInvalid ? 400 : code === 'TASK_NOT_FOUND' ? 404 : 409, {
           ok: false,
-          error: { code, message: error instanceof Error ? error.message : String(error) }
+          error: {
+            code: cursorInvalid ? 'TASK_TIMELINE_CURSOR_INVALID' : code,
+            message: cursorInvalid ? 'Timeline cursor is outside the current task history.' :
+              error instanceof Error ? error.message : String(error)
+          }
         });
       }
       return;
