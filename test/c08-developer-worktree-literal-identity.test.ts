@@ -77,16 +77,16 @@ test('C08 forged persisted worktree status, timestamp and paths must not be coer
     updatedAt: '2026-10-26T00:00:00.000Z'
   };
   const destination = developerWorktreeRecordPath(fx.stateDir, sessionId);
-  for (const changed of [
-    { phase: ['CREATING'] },
-    { baseCommit: ['a'.repeat(40)] },
-    { createdAt: ['2026-10-26T00:00:00.000Z'] },
-    { updatedAt: ['2026-10-26T00:00:00.000Z'] },
-    { worktreePath: [ownedPath] },
-    { repositoryRoot: [fx.repo] }
-  ]) {
+  for (const [changed, code] of [
+    [{ phase: ['CREATING'] }, 'DEVELOPER_WORKTREE_STATE_CORRUPT'],
+    [{ baseCommit: ['a'.repeat(40)] }, 'DEVELOPER_WORKTREE_COMMIT_INVALID'],
+    [{ createdAt: ['2026-10-26T00:00:00.000Z'] }, 'DEVELOPER_WORKTREE_STATE_CORRUPT'],
+    [{ updatedAt: ['2026-10-26T00:00:00.000Z'] }, 'DEVELOPER_WORKTREE_STATE_CORRUPT'],
+    [{ worktreePath: [ownedPath] }, 'DEVELOPER_WORKTREE_STATE_CORRUPT'],
+    [{ repositoryRoot: [fx.repo] }, 'DEVELOPER_WORKTREE_STATE_CORRUPT']
+  ] as const) {
     await writeDurableStateText(destination, JSON.stringify({ ...normal, ...changed }), STATE_OPTIONS);
     await assert.rejects(fx.mgr.inspect(sessionId),
-      (e: any) => e?.code === 'DEVELOPER_WORKTREE_STATE_CORRUPT');
+      (e: any) => e?.code === code, `Expected ${code} for forged persisted record field`);
   }
 });
