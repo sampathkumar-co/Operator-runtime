@@ -163,7 +163,7 @@ export function normalizeCdpTargets(input: unknown): CdpTarget[] {
     const field = (key: 'type' | 'title' | 'url' | 'webSocketDebuggerUrl', max: number) => {
       const entry = tab[key];
       if (entry === undefined) return undefined;
-      if (typeof entry !== 'string' || entry.length > max || entry.includes('\\0')) {
+      if (typeof entry !== 'string' || entry.length > max || entry.includes(String.fromCharCode(0))) {
         throw new OperatorError('CDP_DISCOVERY_INVALID',
           'CDP target inventory returned a malformed optional identity field.');
       }
