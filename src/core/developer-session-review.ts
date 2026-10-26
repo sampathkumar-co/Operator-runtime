@@ -103,7 +103,7 @@ export class DeveloperSessionReviewCoordinator {
       status: 'PAUSED',
       artifactIds: [...new Set([...staged.artifactIds, artifact.id])].sort()
     }, now);
-    await this.#sessions.put(paused);
+    await this.#sessions.put(paused, current);
     return { session: paused, manifest, artifactId: artifact.id };
   }
 
@@ -158,7 +158,7 @@ export class DeveloperSessionReviewCoordinator {
         'Resumed from immutable manifest ' + manifest.id +
         '; re-observe active resources before the next mutation.'
     }, now);
-    await this.#sessions.put(resumed);
+    await this.#sessions.put(resumed, session);
     return { session: resumed, manifest };
   }
 
@@ -240,7 +240,7 @@ export class DeveloperSessionReviewCoordinator {
     const updated = updateDeveloperSession(session, {
       artifactIds: [...new Set([...session.artifactIds, artifact.id])].sort()
     }, now);
-    await this.#sessions.put(updated);
+    await this.#sessions.put(updated, session);
     return { summary, artifactId: artifact.id };
   }
 }
