@@ -2916,6 +2916,15 @@ function taskAuthorizedScope(goal: SemanticTaskGoal, roots: string[]): string[] 
     } catch { return ['browser:invalid']; }
   }
   if (goal.kind === 'app-operation') return ['application:uia'];
+  if (goal.kind === 'browser-download') {
+    try {
+      if (typeof goal.origin !== 'string') return null;
+      const approved = new URL(goal.origin);
+      if (!['http:', 'https:'].includes(approved.protocol) || approved.origin !== goal.origin ||
+          approved.username || approved.password) return null;
+      return [`browser:${approved.origin}`];
+    } catch { return null; }
+  }
   if (typeof goal.root !== 'string' || !withinAuthorizedRoots(goal.root, roots)) return null;
   return [path.resolve(goal.root)];
 }
