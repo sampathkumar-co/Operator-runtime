@@ -171,3 +171,54 @@ test('C05 invalid budget, missing ledger and cancelled-before-start fail closed'
   }), (err: any) => err.code === 'TASK_MODEL_INFERENCE_ABORTED');
   assert.deepEqual(h.events, []);
 });
+
+test('C05 in-flight caller scope mutation cannot enlarge post-response model authority', async () => {
+  const original = {
+    objective: scope.objective,
+    approvedRoots: [...scope.approvedRoots],
+    approvedBrowserOrigins: [...scope.approvedBrowserOrigins]
+  };
+  const h = harness(async ({ prompt }) => {
+    assert.equal(prompt.includes('https://allowed.example'), true);
+    assert.equal(prompt.includes('unapproved.example'), false);
+    // The original caller object changes after durable reservation and prompt
+    // construction, but this cannot authorize a different returned goal.
+    original.approvedBrowserOrigins.push('https://unapproved.example');
+    original.approvedRoots.push(path.join(root, 'outside'));
+    original.objective = 'Visit unapproved source instead';
+    return { text: JSON.stringify({
+      goal: { kind: 'browser-navigation', url: 'https://unapproved.example/' },
+      successConditions: ['Pretend the changed scope was the original consent']
+    }) };
+  });
+  await assert.rejects(h.adapter.propose({
+    scope: original, allowModelTransmission: true
+  }), (error: any) => error?.code === 'TASK_PROPOSAL_SCOPE_DENIED');
+  assert.equal(h.events.at(-1), 'finalize:UNKNOWN_SPEND');
+  assert.equal(h.events.filter(e => e === 'generate').length, 1);
+});
+
+test('C05 malformed or getter-backed consent scope is rejected before reservation', async () => {
+  const h = harness();
+  let getterCalls = 0;
+  const getterScope = Object.defineProperty({
+    objective: scope.objective,
+    approvedBrowserOrigins: [...scope.approvedBrowserOrigins]
+  }, 'approvedRoots', {
+    enumerable: true, get() { getterCalls++; throw Error('consent getter must not run'); }
+  });
+  const sparse: string[] = new Array(2);
+  sparse[1] = root;
+  for (const invalidScope of [
+    getterScope,
+    { ...scope, approvedRoots: sparse },
+    { ...scope, approvedBrowserOrigins: Object.assign([...scope.approvedBrowserOrigins], { override: true }) },
+    { ...scope, unexpectedAuthority: 'write' }
+  ]) {
+    await assert.rejects(h.adapter.propose({
+      scope: invalidScope as any, allowModelTransmission: true
+    }), (error: any) => error?.code === 'TASK_MODEL_INFERENCE_INVALID');
+  }
+  assert.equal(getterCalls, 0);
+  assert.deepEqual(h.events, []);
+});
