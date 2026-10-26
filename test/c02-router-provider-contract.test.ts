@@ -122,3 +122,30 @@ test('C02 incomplete provider registration is rejected before any dispatch', () 
     error?.code === 'PROVIDER_REGISTRY_INVALID');
   assert.equal(router.providers().length, 0);
 });
+
+test('C02 capability schema collection must be literal, unique and bounded before presentation', async () => {
+  const schema = {
+    capability: 'git.status', risk: 'read' as const,
+    inputSchemaVersion: 1 as const, inputMaxBytes: 1024,
+    cancellation: 'required' as const, resourceKinds: ['git-repository']
+  };
+  for (const supplied of [
+    { filter: () => [schema] },
+    [null],
+    Array.from({ length: 257 }, () => schema),
+    [schema, schema],
+    [{ ...schema, capability: ['git.status'] }],
+    [{ ...schema, resourceKinds: [true] }]
+  ]) {
+    const router = new CapabilityRouter();
+    router.register({
+      ...provider(() => true),
+      capabilitySchemas: () => supplied as unknown as any
+    });
+    await assert.rejects(router.capabilitySchemas(action),
+      (error: any) => error?.code === 'CAPABILITY_SCHEMA_INVALID');
+  }
+  const router = new CapabilityRouter();
+  router.register({ ...provider(() => true), capabilitySchemas: () => [schema] });
+  assert.deepEqual(await router.capabilitySchemas(action), [{ ...schema, provider: 'c02-fixture' }]);
+});
