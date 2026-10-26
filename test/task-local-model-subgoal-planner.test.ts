@@ -415,7 +415,7 @@ test('C05 local model composer remains disabled unless separately opted in', asy
 function composerContext(): TaskPlannerContext {
   const ctx = context();
   const state = ctx.task.execution!.plannerState;
-  for (const item of state.durablePlan.subgoals) item.resourceScope = ['/SECRET_PROJECT_PATH'];
+  for (const item of (state.durablePlan as ReturnType<typeof createDurableTaskPlan>).subgoals) item.resourceScope = ['/SECRET_PROJECT_PATH'];
   ctx.task.execution!.records[0]!.observation!.stateVersion = 'a'.repeat(64);
   ctx.capabilitySchemas = [{
     provider: 'project', stepKey: 'setup', action: 'verify',
@@ -450,7 +450,7 @@ test('C05 injected composer cannot execute getters, symbols, or hidden authority
       error?.code === 'TASK_MODEL_SUBGOAL_INVALID');
     assert.equal(reservations, 1);
     assert.equal(ctx.task.execution!.plannerState.activeSubgoalId, undefined);
-    assert.equal(ctx.task.execution!.plannerState.durablePlan.revision, 1);
+    assert.equal((ctx.task.execution!.plannerState.durablePlan as ReturnType<typeof createDurableTaskPlan>).revision, 1);
   }
   assert.equal(accessorCalls, 0);
 });
@@ -469,7 +469,7 @@ test('C05 injected composer rejects wrong observed-state ref and fabricated scop
     });
     await assert.rejects(() => planner.next(ctx), (error: any) =>
       error?.code === 'TASK_MODEL_SUBGOAL_INVALID');
-    assert.equal(ctx.task.execution!.plannerState.durablePlan.revision, 1);
+    assert.equal((ctx.task.execution!.plannerState.durablePlan as ReturnType<typeof createDurableTaskPlan>).revision, 1);
     assert.equal(ctx.task.execution!.plannerState.activeSubgoalId, undefined);
   }
 });
@@ -487,7 +487,7 @@ test('C05 injected composer cannot be invoked for an unauthorized write schema',
   assert.equal(result.type, 'step');
   assert.equal(composeCalls, 0);
   assert.equal(rankCalls, 1);
-  assert.equal(ctx.task.execution!.plannerState.durablePlan.revision, 1);
+  assert.equal((ctx.task.execution!.plannerState.durablePlan as ReturnType<typeof createDurableTaskPlan>).revision, 1);
 });
 
 test('C05 Stop rejects composer ignoring cancellation without mutating the durable plan', async () => {
@@ -510,6 +510,6 @@ test('C05 Stop rejects composer ignoring cancellation without mutating the durab
   await assert.rejects(() => pending, (error: any) => error?.code === 'TASK_PLANNER_ABORTED');
   release();
   await Promise.resolve();
-  assert.equal(ctx.task.execution!.plannerState.durablePlan.revision, 1);
+  assert.equal((ctx.task.execution!.plannerState.durablePlan as ReturnType<typeof createDurableTaskPlan>).revision, 1);
   assert.equal(ctx.task.execution!.plannerState.activeSubgoalId, undefined);
 });
