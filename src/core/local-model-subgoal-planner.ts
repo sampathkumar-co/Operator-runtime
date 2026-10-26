@@ -181,6 +181,12 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
     actionId: string,
     stateVersion: string
   ): Promise<DurableTaskPlan> {
+    // Opt-in dynamic composition must not affect the existing deterministic
+    // or injected-ranker planner when no composer was configured.
+    if (!this.#composer) return plan;
+    if (typeof stateVersion !== 'string' || !/^[0-9a-f]{64}$/i.test(stateVersion)) {
+      return plan;
+    }
     const state = context.task.execution!.plannerState;
     const observationRef = crypto.createHash('sha256')
       .update(context.task.id).update('\0').update(actionId).update('\0')
