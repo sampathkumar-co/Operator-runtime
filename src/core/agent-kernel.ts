@@ -240,35 +240,52 @@ export class AgentKernel {
             { retryable: false, details: { executionPhase: 'pre_dispatch', sideEffectState: 'none' } });
         }
       };
+      const assertDispatchActive = () => {
+        if (!executionSignal?.aborted) return;
+        throw new OperatorError('EXECUTION_ABORTED',
+          'Execution authority was cancelled before provider dispatch.',
+          { retryable: false, details: { executionPhase: 'pre_dispatch', sideEffectState: 'none' } });
+      };
       let dispatched = false;
       let result = await this.#runtime.execute(action, permissions, {
         ...context,
         ...(executionSignal ? { signal: executionSignal } : {}),
         onProviderDispatch: async (providerName) => {
+          assertDispatchActive();
           await assertDispatchLease();
+          assertDispatchActive();
           const changedIntent = await this.#intentFailure(action, context.recoveryMode);
           if (changedIntent) {
             throw new OperatorError(changedIntent.error?.code ?? 'INTENT_STALE',
               'Task intent changed before provider dispatch; re-observe under current authority.',
               { retryable: false, details: { executionPhase: 'pre_dispatch', sideEffectState: 'none' } });
           }
+          assertDispatchActive();
           await this.#beforeProviderDispatch?.(action, providerName, permissions);
+          assertDispatchActive();
           await assertDispatchLease();
+          assertDispatchActive();
           const afterHookIntent = await this.#intentFailure(action, context.recoveryMode);
           if (afterHookIntent) {
             throw new OperatorError(afterHookIntent.error?.code ?? 'INTENT_STALE',
               'Task intent changed during the dispatch-authorization hook.',
               { retryable: false, details: { executionPhase: 'pre_dispatch', sideEffectState: 'none' } });
           }
+          // Let a caller synchronously revoke/cancel at the final notification
+          // boundary before the durable DISPATCHED transition is committed.
+          await context.onProviderDispatch?.(providerName);
+          assertDispatchActive();
           if (action.risk !== 'read') {
             await this.#leases.quarantine(action.id, resourceKeys);
             quarantineArmed = true;
             retainQuarantine = true;
           }
+          assertDispatchActive();
           await this.#journal.markDispatched(action.id, providerName);
-          await this.#trace(action, 'DISPATCH', 'OK', { provider: providerName, capability: action.capability });
           dispatched = true;
-          await context.onProviderDispatch?.(providerName);
+          // Cancellation after this durable linearization point is uncertain,
+          // even if it arrives while bounded observability is being recorded.
+          await this.#trace(action, 'DISPATCH', 'OK', { provider: providerName, capability: action.capability });
         }
       });
       let journalEntry = !dispatched && result.error?.executionPhase === 'pre_dispatch'
