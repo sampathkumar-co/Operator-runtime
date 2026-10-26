@@ -146,3 +146,22 @@ test('preview identifies bounded changed line range', () => {
   assert.ok((preview.lastChangedLineBefore ?? 0) >= 2);
   assert.ok((preview.lastChangedLineAfter ?? 0) >= 2);
 });
+
+test('C06 replacement bytes cannot come from arrays, numbers or attacker-owned coercion hooks', () => {
+  let coercions = 0;
+  const poison = { toString() { coercions++; return 'silently injected'; } };
+  for (const replacement of [null, undefined, 17, ['safe'], poison]) {
+    assert.throws(() => createMultiFileEditPlan({
+      files: [{
+        path: 'src/guarded.ts', expectedSha256: digest('original'),
+        edits: [{ start: 0, end: 1, replacement } as any]
+      }]
+    }), /replacement must be literal text/);
+  }
+  assert.equal(coercions, 0, 'editing malformed input may not execute toString hooks');
+  const empty = createMultiFileEditPlan({
+    files: [{ path: 'src/guarded.ts', expectedSha256: digest('original'),
+      edits: [{ start: 0, end: 1, replacement: '' }] }]
+  });
+  assert.equal(applyMultiFileEditPlan(empty, { 'src/guarded.ts': 'original' }).contentByPath['src/guarded.ts'], 'riginal');
+});
