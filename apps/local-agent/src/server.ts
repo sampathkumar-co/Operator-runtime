@@ -34,6 +34,7 @@ import type { LocalDeviceResetResult } from './device-reset.ts';
 import { renderControlCenter } from './control-center.ts';
 import { buildRedactedControlCenterDiagnostics } from '../../../src/core/control-center-diagnostic-export.ts';
 import { buildControlCenterRuntimeStatus } from '../../../src/core/control-center-runtime-status.ts';
+import { projectDoctorOnboardingEvidence, type DoctorObservation } from '../../../src/core/control-center-doctor-evidence.ts';
 import { ControlCenterSessions, browserUiRouteAllowed, controlCenterBrowserRequestAllowed } from './control-center-session.ts';
 import { resourceKeysForAction } from '../../../src/core/resource-identity.ts';
 import { capabilityRiskRule } from '../../../src/core/capability-policy.ts';
@@ -145,6 +146,8 @@ export function createLocalAgentServer(options: {
   deviceRegistry?: DeviceRegistryStore;
   settings?: CompanionSettings;
   getRuntimeStatus?: () => Record<string, unknown> | Promise<Record<string, unknown>>;
+  /** Trusted local CLI doctor observation; never derived from a browser/header or live /health endpoint. */
+  getDoctorObservation?: () => DoctorObservation | Promise<DoctorObservation>;
   privacy?: LocalPrivacyDataStore;
   deviceReset?: () => Promise<LocalDeviceResetResult>;
   inlineApprovalWaitMs?: number;
@@ -866,11 +869,17 @@ export function createLocalAgentServer(options: {
     }
 
     if (pathname === '/v1/control-center/onboarding' && req.method === 'GET') {
-      const [local, summaries, approvals] = await Promise.all([
+      // Running a web server is not a doctor PASS. Require fresh proof from
+      // the trusted local doctor runner (when installed) before completion.
+      const [local, summaries, approvals, doctorRaw] = await Promise.all([
         options.deviceIdentity ? options.deviceIdentity.loadExisting() : Promise.resolve(null),
         options.tasks ? options.tasks.list(200) : Promise.resolve([]),
-        options.approvals ? options.approvals.list() : Promise.resolve([])
+        options.approvals ? options.approvals.list() : Promise.resolve([]),
+        options.getDoctorObservation
+          ? Promise.resolve().then(() => options.getDoctorObservation!()).catch(() => null)
+          : Promise.resolve(null)
       ]);
+      const doctor = projectDoctorOnboardingEvidence(doctorRaw, PRODUCT_VERSION);
       const tasks = options.tasks
         ? await Promise.all(summaries.map((summary) => options.tasks!.get(summary.id)))
         : [];
@@ -882,7 +891,7 @@ export function createLocalAgentServer(options: {
         ok: true,
         model: buildGuidedOnboardingModel({
           runtimeInstalled: true,
-          doctorHealthy: true,
+          doctorHealthy: doctor.healthy,
           authenticated: true,
           devicePaired: Boolean(local),
           rootsConfigured: options.permissions.allowedRoots.length > 0,
@@ -892,7 +901,8 @@ export function createLocalAgentServer(options: {
         }),
         evidence: {
           runtimeInstalled: 'local-agent-serving',
-          doctorHealthy: 'authenticated-health-boundary',
+          doctorHealthy: doctor.status,
+          doctorEvidenceSource: doctor.source,
           authenticated: 'bearer-token-accepted',
           devicePaired: Boolean(local),
           configuredRootCount: options.permissions.allowedRoots.length,
