@@ -1586,6 +1586,10 @@ test('C05/C08 no-progress after a potentially dispatched write blocks without re
   assert.ok(stopped.evidence.some(item => item.kind === 'strategy_reconcile' && item.data?.strategy === 'replan'));
   const persisted = await new TaskStore(state).get(task.id);
   assert.equal(persisted.state, 'BLOCKED');
+  await assert.rejects(() => orchestrator.resume(task.id),
+    (error: any) => error?.code === 'TASK_RECONCILIATION_REQUIRED');
+  assert.equal(dispatched, 1, 'resume may not redispatch an uncertain blocked mutation');
+  assert.equal((await new TaskStore(state).get(task.id)).state, 'BLOCKED');
 });
 
 
