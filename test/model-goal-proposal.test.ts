@@ -91,3 +91,67 @@ test('C05 model input cannot supply permissions, claimed evidence or malformed s
     ...request, approvedRoots: ['../relative']
   }), (error: any) => error?.code === 'TASK_PROPOSAL_INVALID');
 });
+
+test('C05 model workflow and success contracts reject sparse or executable array slots', () => {
+  const sparseSteps: unknown[] = new Array(2);
+  sparseSteps[1] = navigation;
+  const sparseConditions: unknown[] = new Array(2);
+  sparseConditions[1] = 'Only one actual success condition';
+  const extraSteps = Object.assign([navigation, command], { ignoredStep: navigation });
+  const symbolConditions = ['Observe independent proof'] as unknown[] & Record<symbol, unknown>;
+  symbolConditions[Symbol('hidden')] = 'bypass';
+  const getterChecks = ['test', 'lint'];
+  let accessorCalls = 0;
+  Object.defineProperty(getterChecks, '1', {
+    enumerable: true, get() { accessorCalls++; throw Error('must not run'); }
+  });
+  const customSteps = [navigation, command];
+  Object.setPrototypeOf(customSteps, Object.create(Array.prototype));
+
+  const attempts = [
+    proposed({ kind: 'semantic-workflow', steps: sparseSteps }),
+    proposed({ kind: 'semantic-workflow', steps: extraSteps }),
+    proposed({ kind: 'semantic-workflow', steps: customSteps }),
+    { goal: navigation, successConditions: sparseConditions },
+    { goal: navigation, successConditions: symbolConditions },
+    proposed({ kind: 'project-quality-gate', root, checks: getterChecks, requireAll: true })
+  ];
+  for (const malformed of attempts) {
+    assert.throws(() => validateModelGoalProposal(malformed, request),
+      (error: any) => error?.code === 'TASK_PROPOSAL_INVALID');
+  }
+  assert.equal(accessorCalls, 0);
+  assert.deepEqual(validateModelGoalProposal(proposed({
+    kind: 'semantic-workflow', steps: [navigation, command]
+  }), request).goal, { kind: 'semantic-workflow', steps: [navigation, command] });
+});
+
+test('C05 model envelopes cannot run accessors or hide extra authority fields', () => {
+  let invoked = 0;
+  const getterResponse = Object.defineProperty({ successConditions: ['check'] }, 'goal', {
+    enumerable: true,
+    get() { invoked++; throw Error('untrusted model getter'); }
+  });
+  const getterGoal = Object.defineProperty({ url: navigation.url }, 'kind', {
+    enumerable: true,
+    get() { invoked++; throw Error('untrusted goal getter'); }
+  });
+  const hidden = Object.defineProperty({ ...navigation }, 'authorization', {
+    enumerable: false, value: true
+  });
+  for (const malformed of [
+    getterResponse,
+    proposed(getterGoal),
+    proposed(hidden),
+    proposed({ ...navigation, [Symbol('approval')]: 'all' })
+  ]) {
+    assert.throws(() => validateModelGoalProposal(malformed, request),
+      (error: any) => error?.code === 'TASK_PROPOSAL_INVALID');
+  }
+  const rootsWithHole: string[] = new Array(2);
+  rootsWithHole[1] = root;
+  assert.throws(() => validateModelGoalProposal(proposed(navigation), {
+    ...request, approvedRoots: rootsWithHole
+  }), (error: any) => error?.code === 'TASK_PROPOSAL_INVALID');
+  assert.equal(invoked, 0);
+});
