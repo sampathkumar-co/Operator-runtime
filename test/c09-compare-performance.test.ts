@@ -192,3 +192,24 @@ test('C09 tail latency gains cannot mask the median becoming slower', () => {
   assert.deepEqual(result.regressionDiagnostics.reasons, ['P50_LATENCY_REGRESSION']);
   assert.equal(result.observedCandidateNotWorse, false);
 });
+
+test('C09 refuses per-journey model cost increases hidden by equal aggregate spend', () => {
+  const baselineRows = [
+    sample(100, { scenarioId: 'budget_a', costMicros: 10 }),
+    sample(100, { scenarioId: 'budget_b', costMicros: 30 })
+  ];
+  const candidateRows = [
+    sample(80, { scenarioId: 'budget_a', costMicros: 15 }),
+    sample(80, { scenarioId: 'budget_b', costMicros: 25 })
+  ];
+  const comparison = compareMatchedPerformance({
+    baseline: make(100, { records: baselineRows }),
+    candidate: make(80, { sourceCommit: '9'.repeat(40), records: candidateRows })
+  });
+  assert.equal(comparison.baseline.costMicros, comparison.candidate.costMicros);
+  assert.equal(comparison.candidate.p95Ms < comparison.baseline.p95Ms, true);
+  assert.equal(comparison.regressionDiagnostics.increasedCostJourneys, 1);
+  assert.deepEqual(comparison.regressionDiagnostics.reasons, ['MATCHED_JOURNEY_COST_INCREASE']);
+  assert.equal(comparison.observedCandidateNotWorse, false);
+  assert.equal(comparison.releaseAcceptance, 'NOT_ACCEPTED');
+});
