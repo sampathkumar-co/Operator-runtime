@@ -72,6 +72,35 @@ export function strictUiaSidecarOutcome(value: unknown): boolean {
   return value;
 }
 
+const REQUIRED_UIA_SIDECAR_CAPABILITIES = [
+  'inspect', 'visual_capture', 'physical_input'
+] as const;
+
+/** Validate the native helper identity and protocol before dispatching work. */
+export function strictUiaSidecarHealth(value: unknown): void {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new OperatorError('UIA_SIDECAR_PROTOCOL_INVALID',
+      'Native UIA health response was not an object.', { retryable: false });
+  }
+  const health = value as Record<string, unknown>;
+  const capabilities = health.capabilities;
+  const validCapabilities = Array.isArray(capabilities)
+    && capabilities.length >= REQUIRED_UIA_SIDECAR_CAPABILITIES.length
+    && capabilities.length <= 64
+    && capabilities.every((item) => typeof item === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(item))
+    && new Set(capabilities).size === capabilities.length
+    && REQUIRED_UIA_SIDECAR_CAPABILITIES.every((item) => capabilities.includes(item));
+  if (health.service !== 'operator-windows-uia'
+      || health.protocol !== 1
+      || typeof health.version !== 'string'
+      || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(health.version)
+      || typeof health.uia_available !== 'boolean'
+      || !validCapabilities) {
+    throw new OperatorError('UIA_SIDECAR_PROTOCOL_INVALID',
+      'Native UIA helper identity, protocol, or capability declaration was invalid.', { retryable: false });
+  }
+}
+
 type CaptureLease = {
   captureId: string;
   sha256: string;
@@ -277,7 +306,7 @@ class WindowsUiaSidecarClient {
     });
 
     try {
-      await this.call('health', {});
+      strictUiaSidecarHealth(await this.call('health', {}));
     } catch (error) {
       await this.close();
       throw error;
