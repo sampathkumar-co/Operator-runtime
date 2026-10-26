@@ -50,6 +50,14 @@ export function classifyTaskFailure(error: ActionError | undefined): TaskFailure
     return { class: 'policy', strategy: 'fail', retryable: false, code };
   }
   if (/NO_PROGRESS/i.test(code)) {
+    // A no-progress report never proves that a mutation did not happen.
+    // The verified-known case can propose a different strategy, but an
+    // uncertain prior effect must be reconciled before ANY further dispatch.
+    if (error?.sideEffectState === 'uncertain' ||
+        (error?.executionPhase === 'dispatched' && error?.sideEffectState !== 'known' &&
+         error?.sideEffectState !== 'none')) {
+      return { class: 'postcondition', strategy: 'reconcile', retryable: false, code };
+    }
     return { class: 'postcondition', strategy: 'replan', retryable: false, code };
   }
   if (epistemic === 'AMBIGUOUS') {
