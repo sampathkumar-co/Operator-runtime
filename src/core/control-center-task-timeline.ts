@@ -20,6 +20,7 @@ export interface ControlCenterTaskTimeline {
   evidence: { total: number; classified: number; pass: number; fail: number; info: number; truncated: boolean };
   timeline: ControlCenterTaskTimelineEvent[];
   truncated: boolean;
+  page: { nextBefore: number | null; totalEvents: number; limit: number };
 }
 
 export interface ControlCenterTaskTimelineEvent {
@@ -43,23 +44,44 @@ const MAX_CLASSIFIED_EVIDENCE = 100_000;
 
 export function buildControlCenterTaskTimeline(
   task: TaskCapsule,
-  projection: RuntimeControlProjection
+  projection: RuntimeControlProjection,
+  options: { before?: number; limit?: number } = {}
 ): ControlCenterTaskTimeline {
   const execution = task.execution;
   const records = execution?.records ?? [];
-  const events = [
-    ...records.map(actionEvent),
-    ...task.failures.map((failure, index): ControlCenterTaskTimelineEvent => ({
-      id: `failure:${index}:${bounded(failure.code, 256)}`,
+  const limit = options.limit ?? MAX_EVENTS;
+  const totalEvents = records.length + task.failures.length;
+  const before = options.before ?? totalEvents;
+  // A cursor is a position within a stable, chronological snapshot. Do not
+  // quietly clamp stale/fractional caller cursors to a different history page.
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_EVENTS ||
+      !Number.isSafeInteger(before) || before < 0 || before > totalEvents ||
+      (options.before !== undefined && before === 0)) {
+    throw new Error('TASK_TIMELINE_CURSOR_INVALID');
+  }
+  // Sort lightweight keys, not fully projected actions with up to 50 pieces
+  // of evidence each. Only the requested page becomes user-visible objects.
+  const refs: Array<{ kind: 'action' | 'failure'; index: number; at: string; order: number }> = [
+    ...records.map((record, index) => ({ kind: 'action' as const, index, at: record.startedAt, order: index })),
+    ...task.failures.map((failure, index) => ({
+      kind: 'failure' as const, index, at: failure.at, order: records.length + index
+    }))
+  ];
+  refs.sort((a, b) => a.at.localeCompare(b.at) || a.order - b.order);
+  const start = Math.max(0, before - limit);
+  const visibleEvents = refs.slice(start, before).map((ref): ControlCenterTaskTimelineEvent => {
+    if (ref.kind === 'action') return actionEvent(records[ref.index]!);
+    const failure = task.failures[ref.index]!;
+    return {
+      id: `failure:${ref.index}:${bounded(failure.code, 256)}`,
       kind: 'TASK_FAILURE',
       at: failure.at,
       title: 'Task failure',
       state: 'FAILED',
       error: { code: bounded(failure.code, 256), message: bounded(failure.message, 1024) },
       evidence: []
-    }))
-  ].sort((left, right) => left.at.localeCompare(right.at));
-  const visibleEvents = events.slice(-MAX_EVENTS);
+    };
+  });
   const taskEvidence = evidenceSummary(task.evidence, records);
   const recovery = recoveryProjection(task, projection, records);
 
@@ -96,8 +118,11 @@ export function buildControlCenterTaskTimeline(
     verification: projection.verification,
     recovery,
     evidence: taskEvidence,
-    timeline: [createdEvent(task), ...visibleEvents],
-    truncated: events.length > visibleEvents.length
+    // The initial task-created marker is already present in the active view;
+    // older pages only contribute the requested historical events.
+    timeline: options.before === undefined ? [createdEvent(task), ...visibleEvents] : visibleEvents,
+    truncated: start > 0,
+    page: { nextBefore: start > 0 ? start : null, totalEvents, limit }
   };
 }
 
@@ -171,7 +196,11 @@ function recoveryProjection(
 function evidenceSummary(taskEvidence: Evidence[], records: TaskActionRecord[]): ControlCenterTaskTimeline['evidence'] {
   const total = taskEvidence.length + records.reduce((count, record) => count + record.evidence.length, 0);
   const summary = { total, classified: 0, pass: 0, fail: 0, info: 0, truncated: total > MAX_CLASSIFIED_EVIDENCE };
-  for (const items of [taskEvidence, ...records.map((record) => record.evidence)]) {
+  const groups: Iterable<Evidence[]> = (function* () {
+    yield taskEvidence;
+    for (const record of records) yield record.evidence;
+  })();
+  for (const items of groups) {
     for (const item of items) {
       if (summary.classified >= MAX_CLASSIFIED_EVIDENCE) return summary;
       summary.classified += 1;
