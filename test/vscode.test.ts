@@ -242,3 +242,112 @@ setTimeout(() => process.exit(0), 60000);
   assert.equal(result.error?.sideEffectState, 'uncertain');
   assert.equal(result.error?.executionPhase, 'dispatched');
 });
+
+test('C06 read-only VS Code inspection does not create a previously absent editor profile parent', async (t) => {
+  const project = await tempDir(t, 'operator-vscode-readonly-project-');
+  const parent = await tempDir(t, 'operator-vscode-readonly-authority-');
+  const fake = await makeFakeCode(t);
+  const absentParent = path.join(parent, 'not-yet-created', 'nested');
+  const dataDir = path.join(absentParent, 'vscode-profile');
+  const provider = new VsCodeProvider({
+    allowedRoots: [project], codeExecutable: fake.executable,
+    codeArgsPrefix: fake.prefix, dataDir
+  });
+  const result = await provider.execute({
+    id: 'no-mkdir-inspection', capability: 'vscode.inspect', risk: 'read',
+    input: { operation: 'version' }, provenance: { kind: 'runtime' }
+  });
+  assert.equal(result.ok, true, result.error?.message);
+  await assert.rejects(fs.lstat(path.join(parent, 'not-yet-created')), { code: 'ENOENT' });
+});
+
+test('C06 VS Code CLI exit is not falsely reported as observed editor-window completion', async (t) => {
+  const project = await tempDir(t, 'operator-vscode-ack-project-');
+  const data = await tempDir(t, 'operator-vscode-ack-profile-');
+  const fake = await makeFakeCode(t);
+  const provider = new VsCodeProvider({
+    allowedRoots: [project], codeExecutable: fake.executable,
+    codeArgsPrefix: fake.prefix, dataDir: path.join(data, 'profile')
+  });
+  const result = await provider.execute({
+    id: 'unverified-editor', capability: 'vscode.open', risk: 'system',
+    input: { mode: 'folder', path: project }, provenance: { kind: 'runtime' }
+  });
+  assert.equal(result.ok, true);
+  const output = result.output as Record<string, unknown>;
+  assert.equal(output.acceptedByCli, true);
+  assert.equal(output.windowVerified, false);
+  assert.equal(output.targetVerifiedInEditor, false);
+  assert.equal(output.completionEvidence, 'CLI_EXIT_ONLY');
+  assert.equal(result.evidence.find(item => item.kind === 'vscode_isolation')?.status, 'info');
+  assert.equal(result.evidence.find(item => item.kind === 'vscode_cli')?.status, 'pass');
+});
+
+test('C06 VS Code inspection refuses a preexisting symlinked editor profile', async (t) => {
+  if (process.platform === 'win32') return t.skip('Windows junction race covered by native profile verification');
+  const project = await tempDir(t, 'operator-vscode-symlink-project-');
+  const parent = await tempDir(t, 'operator-vscode-symlink-parent-');
+  const fake = await makeFakeCode(t);
+  const dataDir = path.join(parent, 'editor-profile');
+  await fs.symlink(project, dataDir, 'dir');
+  const provider = new VsCodeProvider({
+    allowedRoots: [project], codeExecutable: fake.executable,
+    codeArgsPrefix: fake.prefix, dataDir
+  });
+  const result = await provider.execute({
+    id: 'symlinked-editor-profile', capability: 'vscode.inspect', risk: 'read',
+    input: { operation: 'version' }, provenance: { kind: 'runtime' }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'VSCODE_DATA_DIR_INVALID');
+  assert.equal((await calls(fake.logPath)).length, 0);
+});
+
+test('C06 truncated extension inventory fails instead of parsing partial extension names', async (t) => {
+  const project = await tempDir(t, 'operator-vscode-ext-project-');
+  const profile = await tempDir(t, 'operator-vscode-ext-profile-');
+  const fake = await makeFakeCode(t);
+  await fs.writeFile(fake.prefix[0]!, [
+    "if (process.argv.includes('--list-extensions')) {",
+    " process.stdout.write('ms-vscode.ext@1.0.0\\n'.repeat(45000), () => process.exit(0));",
+    " return;",
+    "}",
+    "process.stdout.write('1.106.0\\n');"
+  ].join('\n'));
+  const provider = new VsCodeProvider({
+    allowedRoots: [project], codeExecutable: fake.executable,
+    codeArgsPrefix: fake.prefix, dataDir: path.join(profile, 'safe')
+  });
+  const result = await provider.execute({
+    id: 'truncated-extension-inventory', capability: 'vscode.inspect', risk: 'read',
+    input: { operation: 'extensions' }, provenance: { kind: 'runtime' }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'VSCODE_CLI_OUTPUT_INCOMPLETE');
+});
+
+test('C06 extension pagination bound reports truncation only when entries really remain', async (t) => {
+  const project = await tempDir(t, 'operator-vscode-list-project-');
+  const profile = await tempDir(t, 'operator-vscode-list-profile-');
+  const fake = await makeFakeCode(t);
+  await fs.writeFile(fake.prefix[0]!, [
+    "if (process.argv.includes('--list-extensions')) {",
+    " process.stdout.write(Array.from({length:1001},(_,i)=>'ms-vscode.ext'+i+'@1.0.0').join('\\n')+'\\n');",
+    " process.exit(0);",
+    "}",
+    "process.stdout.write('1.106.0\\n');"
+  ].join('\n'));
+  const provider = new VsCodeProvider({
+    allowedRoots: [project], codeExecutable: fake.executable,
+    codeArgsPrefix: fake.prefix, dataDir: path.join(profile, 'safe')
+  });
+  const result = await provider.execute({
+    id: 'bounded-extension-list', capability: 'vscode.inspect', risk: 'read',
+    input: { operation: 'extensions' }, provenance: { kind: 'runtime' }
+  });
+  assert.equal(result.ok, true, result.error?.message);
+  const output = result.output as Record<string, unknown>;
+  assert.equal((output.extensions as unknown[]).length, 1000);
+  assert.equal(output.observed, 1001);
+  assert.equal(output.truncated, true);
+});

@@ -61,18 +61,38 @@ export class VsCodeProvider implements CapabilityProvider {
         const operation = action.input.operation ?? 'status';
         if (operation === 'version') {
           const result = await this.#run(['--version'], process.cwd(), 10_000, context.signal, false);
-          return ok(action, started, { operation, version: result.stdout.trim().split(/\r?\n/)[0] ?? '' }, [
+          if (result.truncated) {
+            throw new OperatorError('VSCODE_CLI_OUTPUT_INCOMPLETE',
+              'VS Code version inspection returned truncated data, not a verifiable version.');
+          }
+          const version = result.stdout.trim().split(/\r?\n/)[0] ?? '';
+          if (!version || version.length > 128) {
+            throw new OperatorError('VSCODE_CLI_OUTPUT_INVALID', 'VS Code CLI returned an invalid version.');
+          }
+          return ok(action, started, { operation, version }, [
             evidence('vscode_cli', 'pass', 'Read VS Code CLI version without opening a workspace.')
           ]);
         }
         if (operation === 'extensions') {
           const result = await this.#run(['--list-extensions', '--show-versions'], process.cwd(), 15_000, context.signal, false);
-          const extensions = result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, MAX_EXTENSIONS).map((line) => {
+          if (result.truncated) {
+            throw new OperatorError('VSCODE_CLI_OUTPUT_INCOMPLETE',
+              'VS Code extension output was truncated mid-stream, so the enumeration cannot be trusted.');
+          }
+          const allLines = result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+          const extensions = allLines.slice(0, MAX_EXTENSIONS).map((line) => {
+            if (line.length > 512 || !/^[A-Za-z0-9][A-Za-z0-9._-]*(?:@[A-Za-z0-9][A-Za-z0-9._+\-]*)?$/.test(line)) {
+              throw new OperatorError('VSCODE_CLI_OUTPUT_INVALID',
+                'VS Code CLI returned an invalid extension identity.');
+            }
             const at = line.lastIndexOf('@');
             return at > 0 ? { id: line.slice(0, at), version: line.slice(at + 1) } : { id: line };
           });
-          return ok(action, started, { operation, extensions, truncated: extensions.length >= MAX_EXTENSIONS }, [
-            evidence('vscode_extensions', 'pass', 'Listed installed VS Code extension identifiers and versions without opening a project.', { count: extensions.length })
+          const truncated = allLines.length > MAX_EXTENSIONS;
+          return ok(action, started, { operation, extensions, truncated, returned: extensions.length, observed: allLines.length }, [
+            evidence('vscode_extensions', truncated ? 'info' : 'pass',
+              truncated ? 'VS Code CLI extension inventory exceeds the bounded response.' : 'Listed VS Code CLI extension identifiers and versions without opening a project.',
+              { count: extensions.length, truncated })
           ]);
         }
         if (operation === 'status') {
@@ -87,6 +107,9 @@ export class VsCodeProvider implements CapabilityProvider {
       const mode = action.input.mode ?? 'folder';
       const timeoutMs = boundedInteger(action.input.timeoutMs, 15_000, 1_000, 60_000);
       await fs.mkdir(this.#dataDir, { recursive: true, mode: 0o700 });
+      // A new symlink/junction could appear between the initial parent check
+      // and profile creation. Recheck resolved profile authority before launch.
+      await this.#assertDataDirOutsideProjects();
       throwIfAborted(context.signal, false);
       const args = ['--new-window', '--disable-extensions', `--user-data-dir=${this.#dataDir}`];
       let targetSummary: Record<string, unknown>;
@@ -132,14 +155,21 @@ export class VsCodeProvider implements CapabilityProvider {
         isolated: true,
         extensionsDisabled: true,
         accepted: true,
+        acceptedByCli: true,
+        windowVerified: false,
+        targetVerifiedInEditor: false,
+        completionEvidence: 'CLI_EXIT_ONLY',
         stdout: result.stdout.slice(0, 32_000),
         stderr: result.stderr.slice(0, 32_000)
       }, [
-        evidence('vscode_isolation', 'pass', 'Opened target in a new Operator-isolated VS Code window with extensions disabled.', {
-          userDataDir: this.#dataDir,
-          reusedExistingWindow: false
-        }),
-        evidence('vscode_cli', 'pass', 'VS Code CLI accepted the bounded semantic open request.', { mode })
+        evidence('vscode_isolation', 'info',
+          'VS Code was asked to launch with an isolated profile and extensions disabled; actual editor-window state remains unobserved.', {
+            requestedNewWindow: true,
+            extensionsDisabledRequested: true,
+            windowVerified: false
+          }),
+        evidence('vscode_cli', 'pass',
+          'VS Code CLI exited successfully after the bounded semantic open request. This does not verify the target in the editor.', { mode })
       ]);
     } catch (error) {
       const op = error instanceof OperatorError
@@ -166,19 +196,56 @@ export class VsCodeProvider implements CapabilityProvider {
   async #assertDataDirOutsideProjects(): Promise<void> {
     const lexicalDataDir = path.resolve(this.#dataDir);
     for (const configuredRoot of this.#allowedRoots) {
-      const lexicalRoot = path.resolve(configuredRoot);
-      if (inside(lexicalDataDir, lexicalRoot)) {
-        throw new OperatorError('VSCODE_DATA_DIR_INSIDE_PROJECT_DENIED', 'Operator VS Code user-data directory must live outside all authorized project roots.');
+      if (inside(lexicalDataDir, path.resolve(configuredRoot))) {
+        throw new OperatorError('VSCODE_DATA_DIR_INSIDE_PROJECT_DENIED',
+          'Operator VS Code user-data directory must live outside all authorized project roots.');
       }
     }
-    await fs.mkdir(path.dirname(this.#dataDir), { recursive: true, mode: 0o700 });
-    const parent = await fs.realpath(path.dirname(this.#dataDir));
-    const resolvedDataDir = path.join(parent, path.basename(this.#dataDir));
+
+    // This check runs for read-only vscode.inspect as well as vscode.open.
+    // Never create an editor profile or an ancestor directory while checking
+    // scope: inspection is not permission to mutate filesystem state.
+    let ancestor = path.dirname(lexicalDataDir);
+    const suffix: string[] = [path.basename(lexicalDataDir)];
+    let resolved: string | undefined;
+    while (!resolved) {
+      try {
+        const stat = await fs.lstat(ancestor);
+        if (!stat.isDirectory() && !stat.isSymbolicLink()) {
+          throw new OperatorError('VSCODE_DATA_DIR_INVALID',
+            'VS Code profile parent is not a directory.');
+        }
+        const realAncestor = await fs.realpath(ancestor);
+        resolved = path.resolve(realAncestor, ...suffix);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        const parent = path.dirname(ancestor);
+        if (parent === ancestor) {
+          throw new OperatorError('VSCODE_DATA_DIR_INVALID',
+            'VS Code profile has no resolvable existing ancestor.');
+        }
+        suffix.unshift(path.basename(ancestor));
+        ancestor = parent;
+      }
+    }
+
+    try {
+      const stat = await fs.lstat(lexicalDataDir);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        throw new OperatorError('VSCODE_DATA_DIR_INVALID',
+          'VS Code profile must be a real directory, not a symlink or file.');
+      }
+      resolved = await fs.realpath(lexicalDataDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+
     for (const configuredRoot of this.#allowedRoots) {
       let root = configuredRoot;
       try { root = await fs.realpath(configuredRoot); } catch { /* lexical fallback */ }
-      if (inside(resolvedDataDir, root)) {
-        throw new OperatorError('VSCODE_DATA_DIR_INSIDE_PROJECT_DENIED', 'Operator VS Code user-data directory must live outside all authorized project roots.');
+      if (inside(resolved, root)) {
+        throw new OperatorError('VSCODE_DATA_DIR_INSIDE_PROJECT_DENIED',
+          'Operator VS Code user-data directory must live outside all authorized project roots.');
       }
     }
   }
