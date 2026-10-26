@@ -49,7 +49,8 @@ function fail(message: string): never {
 }
 
 function requireSemver(value: unknown, label: string): string {
-  const text = String(value ?? '').trim();
+  if (typeof value !== 'string') fail(`${label} must be valid SemVer.`);
+  const text = value;
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(text)) {
     fail(`${label} must be valid SemVer.`);
   }
@@ -57,13 +58,15 @@ function requireSemver(value: unknown, label: string): string {
 }
 
 function requireSha(value: unknown, label: string): string {
-  const text = String(value ?? '').trim().toLowerCase();
+  if (typeof value !== 'string') fail(`${label} must be a full 40-character Git SHA.`);
+  const text = value.toLowerCase();
   if (!/^[0-9a-f]{40}$/.test(text)) fail(`${label} must be a full 40-character Git SHA.`);
   return text;
 }
 
 function requireHttps(value: unknown, label: string): string {
-  const text = String(value ?? '').trim();
+  if (typeof value !== 'string') fail(`${label} must be an absolute HTTPS URL.`);
+  const text = value;
   let parsed: URL;
   try {
     parsed = new URL(text);
