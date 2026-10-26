@@ -40,7 +40,7 @@ export type AtomicSemanticTaskGoal =
   | { kind: 'trusted-project-command'; root: string; commandKind: 'build' | 'test' | 'lint' }
   | { kind: 'browser-navigation'; url: string; targetId?: string }
   | {
-      kind: 'browser-download'; targetId: string; target: BrowserDownloadTarget;
+      kind: 'browser-download'; targetId: string; origin: string; target: BrowserDownloadTarget;
       expectedSha256: string; expectedSuggestedFilename?: string; timeoutMs?: number;
     }
   | { kind: 'docker-lifecycle'; root: string; operation: 'start' | 'stop' | 'restart'; services: string[]; timeoutMs?: number }
