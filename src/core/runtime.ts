@@ -1,4 +1,4 @@
-import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, ExecutionPhase, PermissionProfile, ProviderReconciliationResult, SideEffectState } from './types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, ExecutionPhase, PermissionProfile, ProviderCapabilitySchema, ProviderReconciliationResult, SideEffectState } from './types.ts';
 import { AuthorityKernel } from './authority-kernel.ts';
 import { discoverBuiltInCapabilities, type CapabilityDiscoverySnapshot } from './capability-discovery.ts';
 import { CapabilityRouter } from './router.ts';
@@ -54,6 +54,10 @@ export class OperatorRuntime {
       if (await this.router.advertises(action)) supported.push(capability);
     }
     return supported;
+  }
+
+  async capabilitySchemas(action: ActionRequest): Promise<Array<ProviderCapabilitySchema & { provider: string }>> {
+    return await this.router.capabilitySchemas(action);
   }
 
   async execute(action: ActionRequest, permissions: PermissionProfile, context: CapabilityExecutionContext = {}): Promise<ActionResult> {

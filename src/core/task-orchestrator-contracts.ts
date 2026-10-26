@@ -1,4 +1,4 @@
-import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, IntentBinding, PermissionProfile } from './types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, IntentBinding, PermissionProfile, ProviderCapabilitySchema } from './types.ts';
 import type { TaskCapsule, TaskObservationDomain } from './task.ts';
 import type { TaskPlannerEvent } from './task-planner-event.ts';
 import type { TaskDecisionBudget } from './task-decision-budget.ts';
@@ -77,6 +77,13 @@ export interface TaskPlannerContext {
   signal?: AbortSignal;
   /** Reserve one local-model inference before sending any prompt; never refunded. */
   reserveModelBudget?: (maxTokens: number) => Promise<void>;
+  /** Current provider declarations matching the exact typed actions in this
+   * task. Descriptive only; never an authority or execution grant. */
+  capabilitySchemas?: Array<ProviderCapabilitySchema & {
+    provider: string;
+    action: 'observe' | 'action' | 'verify';
+    stepKey: string;
+  }>;
 }
 
 export interface TaskIntelligenceContext {

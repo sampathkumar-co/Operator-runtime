@@ -1,6 +1,8 @@
+import crypto from 'node:crypto';
+import { canonicalJson } from './action-identity.ts';
 import { OperatorError } from './errors.ts';
 import { AutonomousWorkflowPlanner } from './task-orchestrator.ts';
-import { createDurableTaskPlan, normalizeDurableTaskPlan } from './task-plan.ts';
+import { createDurableTaskPlan, normalizeDurableTaskPlan, reviseDurableTaskPlan, type DurableTaskPlan, type TaskPlanSubgoal } from './task-plan.ts';
 import type {
   PlannerDecision, SemanticTaskGoal, TaskObservation, TaskPlanner, TaskPlannerContext
 } from './task-orchestrator-contracts.ts';
@@ -35,6 +37,19 @@ export interface ReadySubgoalRanker {
   }): Promise<number>;
 }
 
+export type DynamicSubgoalProposal =
+  | { operation: 'none'; observationRef: string }
+  | { operation: 'insert_checkpoint'; observationRef: string; beforeIndex: number; schemaIndex: number };
+
+/** Provider-neutral inference boundary for bounded plan composition. The model
+ * chooses opaque indexes only; the runtime constructs the complete typed step. */
+export interface DynamicSubgoalComposer {
+  compose(input: {
+    modelId: string; prompt: string; targetCount: number; schemaCount: number;
+    observationRef: string; signal: AbortSignal; timeoutMs: number;
+  }): Promise<DynamicSubgoalProposal>;
+}
+
 /**
  * Selects the ordering of PREAUTHORIZED and DEPENDENCY-READY subgoals only.
  * All action inputs, verification assertions and permissions are established
@@ -49,8 +64,9 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
   readonly #fetch: typeof fetch;
   readonly #now: () => number;
   readonly #ranker?: ReadySubgoalRanker;
+  readonly #composer?: DynamicSubgoalComposer;
 
-  constructor(options: { model: string; fetchFn?: typeof fetch; now?: () => number; ranker?: ReadySubgoalRanker }) {
+  constructor(options: { model: string; fetchFn?: typeof fetch; now?: () => number; ranker?: ReadySubgoalRanker; composer?: DynamicSubgoalComposer }) {
     if (typeof options.model !== 'string' ||
       !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(options.model)) {
       invalid('Local planner model identifier is invalid.');
@@ -58,7 +74,11 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
     if (options.ranker !== undefined && typeof options.ranker?.select !== 'function') {
       invalid('Provider-neutral subgoal ranker must implement the bounded selection contract.');
     }
+    if (options.composer !== undefined && typeof options.composer?.compose !== 'function') {
+      invalid('Provider-neutral subgoal composer must implement the bounded composition contract.');
+    }
     this.#ranker = options.ranker;
+    this.#composer = options.composer;
     this.#model = options.model;
     this.#fetch = options.fetchFn ?? fetch;
     this.#now = options.now ?? Date.now;
@@ -85,7 +105,7 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
       return this.#builtin.next(context);
     }
 
-    const plan = state.durablePlan === undefined
+    let plan = state.durablePlan === undefined
       ? createDurableTaskPlan({
         taskId: context.task.id, objective: context.task.userObjective,
         constraints: [
@@ -102,6 +122,8 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
     if (!plan.subgoals.some(item => item.sourceIndex === verifiedSourceIndex && item.status === 'VERIFIED')) {
       return this.#builtin.next(context);
     }
+    plan = await this.#composeCheckpoint(context, plan, verifiedSourceIndex, last.actionId, observation.stateVersion);
+    state.durablePlan = plan;
     // normalizeDurableTaskPlan refreshes READY only when dependencies are already verified.
     const ready = plan.subgoals.filter(item => item.status === 'READY');
     if (ready.length < 2) return this.#builtin.next(context);
@@ -152,6 +174,155 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
     return this.#builtin.fallback(context, step, observation);
   }
 
+  async #composeCheckpoint(
+    context: TaskPlannerContext,
+    plan: DurableTaskPlan,
+    verifiedSourceIndex: number,
+    actionId: string,
+    stateVersion: string
+  ): Promise<DurableTaskPlan> {
+    const state = context.task.execution!.plannerState;
+    const observationRef = crypto.createHash('sha256')
+      .update(context.task.id).update('\0').update(actionId).update('\0')
+      .update(stateVersion).digest('hex');
+    if (state.dynamicCompositionObservationRef === observationRef) return plan;
+    if (context.signal?.aborted) throw new OperatorError('TASK_PLANNER_ABORTED', 'Dynamic composition was canceled.');
+    const priorCompositions = plan.revisions.filter((entry) => entry.reason.startsWith('dynamic-checkpoint:')).length;
+    if (priorCompositions >= 4 || context.budget.remainingSteps < 3 || plan.subgoals.length >= 100) {
+      state.dynamicCompositionObservationRef = observationRef;
+      return plan;
+    }
+    const source = plan.subgoals.find((item) => item.sourceIndex === verifiedSourceIndex && item.status === 'VERIFIED');
+    const sourceStep = context.goal.kind === 'autonomous-workflow'
+      ? context.goal.steps[verifiedSourceIndex]
+      : undefined;
+    if (!source || !sourceStep || sourceStep.key !== source.key || !this.#insideAuthority(context, source)) {
+      state.dynamicCompositionObservationRef = observationRef;
+      return plan;
+    }
+    const inputBytes = Buffer.byteLength(canonicalJson(source.successContract.input), 'utf8');
+    const schemas = (context.capabilitySchemas ?? [])
+      .filter((entry) => entry.stepKey === sourceStep.key && entry.action === 'verify'
+        && entry.capability === source.successContract.capability && entry.risk === 'read'
+        && entry.inputSchemaVersion === 1 && entry.cancellation === 'required'
+        && inputBytes <= entry.inputMaxBytes)
+      .slice(0, 20);
+    const targets = plan.subgoals
+      .filter((item) => item.status === 'READY' && this.#insideAuthority(context, item))
+      .slice(0, 20);
+    if (schemas.length === 0 || targets.length === 0) {
+      state.dynamicCompositionObservationRef = observationRef;
+      return plan;
+    }
+    const prompt = [
+      'Decide whether one fresh read-only verification checkpoint is required before a ready task subgoal.',
+      'Return ONLY JSON: {"operation":"none","observationRef":"..."} or',
+      '{"operation":"insert_checkpoint","observationRef":"...","beforeIndex":0,"schemaIndex":0}.',
+      'Indexes select runtime-owned typed contracts. You cannot create actions, inputs, targets, scopes, or authority.',
+      'Fresh observation reference: ' + observationRef,
+      'Remaining execution actions: ' + Math.max(0, Math.floor(context.budget.remainingSteps)),
+      'Targets: ' + JSON.stringify(targets.map((item, index) => ({
+        index,
+        observe: family(item.execution.observe.capability),
+        action: family(item.execution.action.capability),
+        verify: family(item.successContract.capability)
+      }))),
+      'Provider schemas: ' + JSON.stringify(schemas.map((entry, index) => ({
+        index, capability: entry.capability, risk: entry.risk,
+        inputSchemaVersion: entry.inputSchemaVersion, inputMaxBytes: entry.inputMaxBytes,
+        cancellation: entry.cancellation, resourceKinds: entry.resourceKinds.slice(0, 16)
+      })))
+    ].join('\n');
+    if (!context.reserveModelBudget) {
+      throw new OperatorError('TASK_MODEL_BUDGET_UNAVAILABLE',
+        'Dynamic composition requires the canonical durable pre-call reservation authority.');
+    }
+    await context.reserveModelBudget(Buffer.byteLength(prompt, 'utf8') + 128);
+    const proposal = await this.#requestComposition(
+      prompt, targets.length, schemas.length, observationRef, context.signal,
+      Math.min(8_000, Math.max(1, Math.floor(context.budget.activeDeadlineMsRemaining)))
+    );
+    if (context.signal?.aborted) {
+      throw new OperatorError('TASK_PLANNER_ABORTED', 'Canceled dynamic composition was discarded.');
+    }
+    state.dynamicCompositionObservationRef = observationRef;
+    if (proposal.operation === 'none') return plan;
+    const target = targets[proposal.beforeIndex]!;
+    const selected = schemas[proposal.schemaIndex]!;
+    // Re-check the exact provider declaration selected by the model before
+    // constructing a runtime-owned step. No model-supplied field is copied.
+    if (selected.capability !== source.successContract.capability || selected.risk !== 'read'
+      || inputBytes > selected.inputMaxBytes) invalid('Selected provider schema no longer matches the checkpoint contract.');
+    const key = `dynamic-checkpoint:${plan.revision + 1}:${observationRef.slice(0, 16)}:${proposal.schemaIndex}:${proposal.beforeIndex}`;
+    return reviseDurableTaskPlan(plan, [{
+      kind: 'insert_prerequisite',
+      beforeKey: target.key,
+      step: {
+        key,
+        title: 'Fresh provider-backed verification checkpoint',
+        resourceScope: [...source.resourceScope],
+        observe: structuredClone(source.successContract),
+        action: structuredClone(source.successContract),
+        verify: structuredClone(source.successContract)
+      }
+    }], `dynamic-checkpoint:${observationRef}`);
+  }
+
+  #insideAuthority(context: TaskPlannerContext, subgoal: TaskPlanSubgoal): boolean {
+    if (subgoal.resourceScope.length < 1) return false;
+    if (!subgoal.resourceScope.every((scope) => context.task.authorizedScope.includes(scope))) return false;
+    if (subgoal.resourceScope.some((scope) => context.task.prohibitedScope.includes(scope))) return false;
+    const target = subgoal.successContract.target;
+    return target === undefined || (context.task.authorizedScope.includes(target)
+      && !context.task.prohibitedScope.includes(target));
+  }
+
+  async #requestComposition(
+    prompt: string,
+    targetCount: number,
+    schemaCount: number,
+    observationRef: string,
+    parent: AbortSignal | undefined,
+    timeoutMs: number
+  ): Promise<DynamicSubgoalProposal> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    try {
+      const signal = parent ? AbortSignal.any([parent, controller.signal]) : controller.signal;
+      const cancelled = new Promise<never>((_, reject) => {
+        onAbort = () => reject(new OperatorError('TASK_PLANNER_ABORTED', 'Dynamic composition was canceled before dispatch.'));
+        if (parent?.aborted) onAbort();
+        else parent?.addEventListener('abort', onAbort, { once: true });
+      });
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new OperatorError('TASK_MODEL_SUBGOAL_TIMEOUT', 'Dynamic composition exceeded its deadline.'));
+        }, timeoutMs);
+      });
+      const inference = this.#composer
+        ? Promise.resolve().then(() => this.#composer!.compose({
+            modelId: this.#model, prompt, targetCount, schemaCount, observationRef, signal, timeoutMs
+          }))
+        : this.#readComposition(prompt, signal);
+      const proposal = await Promise.race([inference, deadline, cancelled]);
+      return validateCompositionProposal(proposal, targetCount, schemaCount, observationRef);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (parent && onAbort) parent.removeEventListener('abort', onAbort);
+      controller.abort();
+    }
+  }
+
+  async #readComposition(prompt: string, signal: AbortSignal): Promise<DynamicSubgoalProposal> {
+    const text = await this.#readLocalJson(prompt, signal, 128);
+    let proposal: unknown;
+    try { proposal = JSON.parse(text); }
+    catch { return invalid('Local model composition was not valid JSON.'); }
+    return proposal as DynamicSubgoalProposal;
+  }
+
   async #select(prompt: string, count: number, parent: AbortSignal | undefined, timeoutMs: number): Promise<number> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -187,13 +358,24 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
   }
 
   async #readChoice(prompt: string, count: number, signal: AbortSignal): Promise<number> {
+    const text = await this.#readLocalJson(prompt, signal, 64);
+    let choice: unknown;
+    try { choice = JSON.parse(text); } catch { return invalid('Local model selection was not valid JSON.'); }
+    if (!choice || typeof choice !== 'object' || Array.isArray(choice)) invalid('Local model selection must be a JSON object.');
+    const raw = choice as Record<string, unknown>;
+    if (Object.keys(raw).length !== 1 || !Number.isSafeInteger(raw.index) ||
+      (raw.index as number) < 0 || (raw.index as number) >= count) invalid('Local model selected a nonexistent or unauthorized subgoal.');
+    return raw.index as number;
+  }
+
+  async #readLocalJson(prompt: string, signal: AbortSignal, numPredict: number): Promise<string> {
     let response: Response;
     try {
       response = await this.#fetch('http://127.0.0.1:11434/api/generate', {
         method: 'POST', redirect: 'error', signal,
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model: this.#model, prompt, stream: false, format: 'json',
-          options: { temperature: 0, num_predict: 64 } })
+          options: { temperature: 0, num_predict: numPredict } })
       });
     } catch {
       throw new OperatorError('TASK_MODEL_SUBGOAL_UNAVAILABLE', 'Local subgoal model was unavailable.');
@@ -222,12 +404,33 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
       typeof (envelope as { response?: unknown }).response !== 'string') invalid('Local model envelope is invalid.');
     const text = (envelope as { response: string }).response;
     if (text.length > 1024) invalid('Local model response is too large.');
-    let choice: unknown;
-    try { choice = JSON.parse(text); } catch { return invalid('Local model selection was not valid JSON.'); }
-    if (!choice || typeof choice !== 'object' || Array.isArray(choice)) invalid('Local model selection must be a JSON object.');
-    const raw = choice as Record<string, unknown>;
-    if (Object.keys(raw).length !== 1 || !Number.isSafeInteger(raw.index) ||
-      (raw.index as number) < 0 || (raw.index as number) >= count) invalid('Local model selected a nonexistent or unauthorized subgoal.');
-    return raw.index as number;
+    return text;
   }
+}
+
+function validateCompositionProposal(
+  proposal: unknown,
+  targetCount: number,
+  schemaCount: number,
+  observationRef: string
+): DynamicSubgoalProposal {
+  if (!proposal || typeof proposal !== 'object' || Array.isArray(proposal)) invalid('Dynamic composition proposal must be an object.');
+  const raw = proposal as Record<string, unknown>;
+  if (raw.operation === 'none') {
+    if (Object.keys(raw).length !== 2 || raw.observationRef !== observationRef) {
+      invalid('Dynamic composition refusal is not bound to the fresh observation.');
+    }
+    return { operation: 'none', observationRef };
+  }
+  if (raw.operation !== 'insert_checkpoint' || Object.keys(raw).length !== 4
+    || raw.observationRef !== observationRef || !Number.isSafeInteger(raw.beforeIndex)
+    || !Number.isSafeInteger(raw.schemaIndex) || (raw.beforeIndex as number) < 0
+    || (raw.beforeIndex as number) >= targetCount || (raw.schemaIndex as number) < 0
+    || (raw.schemaIndex as number) >= schemaCount) {
+    invalid('Dynamic composition selected an unauthorized target, schema, or observation.');
+  }
+  return {
+    operation: 'insert_checkpoint', observationRef,
+    beforeIndex: raw.beforeIndex as number, schemaIndex: raw.schemaIndex as number
+  };
 }

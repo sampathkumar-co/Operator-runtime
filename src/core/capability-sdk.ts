@@ -3,7 +3,7 @@ import { canonicalJson } from './action-identity.ts';
 import { CAPABILITY_RISK_RULES, isBuiltInCapability, type CapabilityRiskRule } from './capability-policy.ts';
 import { OperatorError } from './errors.ts';
 import { normalizeVerifiedModuleGraph, verifiedModuleGraphDigest, type VerifiedModuleGraph } from './verified-module-graph.ts';
-import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from './types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderCapabilitySchema, ProviderReconciliationRequest, ProviderReconciliationResult } from './types.ts';
 
 export interface CapabilityManifestEntry {
   capability: string;
@@ -79,6 +79,17 @@ class ManifestBoundProvider implements CapabilityProvider {
     this.name = `extension:${manifest.id}:${provider.name}`;
     this.#allowed = new Set(manifest.capabilities.map((entry) => entry.capability));
     this.#entries = new Map(manifest.capabilities.map((entry) => [entry.capability, entry]));
+  }
+
+  capabilitySchemas(): readonly ProviderCapabilitySchema[] {
+    return this.#manifest.capabilities.map((entry) => ({
+      capability: entry.capability,
+      risk: entry.risk,
+      inputSchemaVersion: entry.inputSchemaVersion,
+      inputMaxBytes: entry.inputMaxBytes,
+      cancellation: entry.cancellation,
+      resourceKinds: [...entry.resourceKinds]
+    }));
   }
 
   supports(action: ActionRequest): boolean | Promise<boolean> {

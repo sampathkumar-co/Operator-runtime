@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from './types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderCapabilitySchema, ProviderReconciliationRequest, ProviderReconciliationResult } from './types.ts';
 import type { SignedCapabilityPackage } from './capability-package-registry.ts';
 import { CapabilityGovernanceRegistry } from './capability-governance.ts';
 import { OperatorError } from './errors.ts';
@@ -98,6 +98,7 @@ class RiskPolicyBoundProvider implements CapabilityProvider {
     this.#graphRelease = graphRelease;
     this.name = provider.name;
   }
+  capabilitySchemas(): readonly ProviderCapabilitySchema[] { return this.#provider.capabilitySchemas?.() ?? []; }
   supports(action: ActionRequest): boolean | Promise<boolean> { return this.#provider.supports(action); }
   advertises(action: ActionRequest): boolean | Promise<boolean> { return this.#provider.advertises ? this.#provider.advertises(action) : this.#provider.supports(action); }
   score(action: ActionRequest): CapabilityScore | Promise<CapabilityScore> { return this.#provider.score(action); }

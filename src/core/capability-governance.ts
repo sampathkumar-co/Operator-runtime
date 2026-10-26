@@ -1,4 +1,4 @@
-import type { CapabilityProvider, ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from './types.ts';
+import type { CapabilityProvider, ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityScore, ProviderCapabilitySchema, ProviderReconciliationRequest, ProviderReconciliationResult } from './types.ts';
 import { CapabilityExtensionRegistry } from './capability-sdk.ts';
 import {
   admitCapabilityPackage,
@@ -140,6 +140,11 @@ class LiveGovernedProvider implements CapabilityProvider {
         details: { reason: decision.reason }
       });
     }
+  }
+
+  capabilitySchemas(): readonly ProviderCapabilitySchema[] {
+    this.#assertAdmitted();
+    return this.#provider.capabilitySchemas?.() ?? [];
   }
 
   supports(action: ActionRequest): boolean | Promise<boolean> {
