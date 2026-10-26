@@ -719,19 +719,32 @@ export class BrowserCdpProvider implements CapabilityProvider {
     });
     if (!response.ok) throw new OperatorError('CDP_ACTIVATE_TAB_FAILED', `CDP returned HTTP ${response.status} while focusing a tab.`, { retryable: true });
     const session = this.#sessions.get(target);
-    const result = await session.send('Runtime.evaluate', { expression: 'document.visibilityState', returnByValue: true });
-    const visibilityState = unwrapRuntimeValue(result);
-    if (visibilityState !== 'visible') {
-      throw new OperatorError('BROWSER_POSTCONDITION_FAILED', 'Target did not become visible after activation.', { retryable: true, details: { targetId, visibilityState } });
+    const result = await session.send('Runtime.evaluate', {
+      expression: '({visible: document.visibilityState === "visible", focused: document.hasFocus() === true})',
+      returnByValue: true
+    });
+    const observedFocus = unwrapRuntimeValue(result);
+    throwIfAborted(signal);
+    if (!browserFocusActuallyProven(observedFocus)) {
+      throw new OperatorError('BROWSER_POSTCONDITION_FAILED',
+        'Tab activation was dispatched but document visibility and keyboard focus were not both proven.', {
+          retryable: false,
+          details: {
+            executionPhase: 'effect_observed',
+            sideEffectState: 'uncertain',
+            targetId,
+            remedy: 'reobserve_tab_focus_before_retry'
+          }
+        });
     }
     return {
       ok: true,
       capability: action.capability,
       provider: this.name,
-      output: { targetId, visibilityState },
+      output: { targetId, visibilityState: 'visible', focused: true },
       evidence: [
         evidence('browser_tab_focus', 'pass', 'Browser target activation command completed.', { targetId }),
-        evidence('postcondition', 'pass', 'Target document reports visible state after activation.', { targetId, visibilityState })
+        evidence('postcondition', 'pass', 'Target document was freshly observed both visible and keyboard-focused after activation.', { targetId, visible: true, focused: true })
       ],
       durationMs: Math.round(performance.now() - started)
     };
@@ -748,7 +761,11 @@ export class BrowserCdpProvider implements CapabilityProvider {
     this.#sessions.forget(targetId);
     const remaining = await this.#listTargets(signal);
     if (remaining.some((item) => item.id === targetId)) {
-      throw new OperatorError('BROWSER_POSTCONDITION_FAILED', 'Target still exists after close command.', { retryable: true, details: { targetId } });
+      throw new OperatorError('BROWSER_POSTCONDITION_FAILED',
+        'Tab close command completed but target is still present; a repeat close is not authorized without reconciliation.', {
+          retryable: false,
+          details: { targetId, sideEffectState: 'uncertain', executionPhase: 'effect_observed', remedy: 'reobserve_before_retry' }
+        });
     }
     return {
       ok: true,
