@@ -443,7 +443,7 @@ test('download tracking binds events to the initiating target frame and fails cl
       try {
         return await provider.execute({
           id: `download-${scenario}`, capability: 'browser.interact', risk: 'external',
-          input: { targetId: 'tab-1', operation: 'click', target: { role: 'textbox', name: 'Email' }, expectDownload: true, downloadTimeoutMs: 1000 },
+          input: { targetId: 'tab-1', operation: 'click', target: { role: 'textbox', name: 'Email' }, expectDownload: true, expectedOrigin: 'https://example.test', downloadTimeoutMs: 1000 },
           provenance: { kind: 'runtime' }
         });
       } finally { provider.close(); }
