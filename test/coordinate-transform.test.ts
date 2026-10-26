@@ -95,3 +95,36 @@ test('C04 transformed rectangle must keep its far corners within safe physical c
     { x: -1916, y: 56, width: 10, height: 14 }
   );
 });
+
+test('C04 composed transform rejects contradictory intermediate capture dimensions', () => {
+  const first = {
+    from: 'roi-local' as const, to: 'capture-image' as const,
+    originX: 10, originY: 20, scaleX: 1, scaleY: 1,
+    sourceWidth: 100, sourceHeight: 50,
+    targetWidth: 200, targetHeight: 100,
+    generation: 'capture-8', provenance: 'source-roi'
+  };
+  const second = {
+    from: 'capture-image' as const, to: 'native-screen' as const,
+    originX: -1920, originY: 0, scaleX: 2, scaleY: 2,
+    sourceWidth: 200, sourceHeight: 100,
+    targetWidth: 400, targetHeight: 200,
+    generation: 'capture-8', provenance: 'display'
+  };
+  const correct = composeCoordinateTransforms(first, second);
+  assert.deepEqual(mapCoordinatePoint({ x: 2, y: 3 }, correct, 'capture-8'),
+    { x: -1896, y: 46 });
+  for (const mismatched of [
+    { ...second, sourceWidth: 201 },
+    { ...second, sourceHeight: 101 }
+  ]) {
+    assert.throws(() => composeCoordinateTransforms(first, mismatched),
+      (error: any) => error?.code === 'COORDINATE_TRANSFORM_MISMATCH');
+  }
+  // Dimension declarations may be absent, but when both sides provide
+  // a measurement neither can silently override its counterpart.
+  assert.doesNotThrow(() => composeCoordinateTransforms(
+    { ...first, targetWidth: undefined, targetHeight: undefined },
+    second
+  ));
+});
