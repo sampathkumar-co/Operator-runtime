@@ -33,6 +33,9 @@ test('C08 newer timestamp cannot overwrite a session changed after its exact sna
     status:'VERIFYING',taskIds:['new-task']
   }, '2026-10-26T00:00:21.000Z');
   await a.put(next, newState);
+  // Same observation and identical payload can safely be replayed only as an
+  // idempotent no-op, never a second state transition.
+  await a.put(next, next);
   assert.deepEqual(await b.get(initial.id), next);
 });
 
