@@ -31,6 +31,22 @@ const source=el("div","callout");source.append(el("div","taskTitle",status.produ
 if(status.relay.freshness==="STALE"||status.product.compatibility==="MISMATCH"){const warning=el("div","callout warning");warning.append(el("div","taskTitle","Runtime attention required"),el("div","eventMeta",status.relay.freshness==="STALE"?"Relay status has not changed for more than five minutes; refresh or inspect connectivity before relying on it.":"Installed package and runtime versions do not match."));body.append(warning)}
 const details=el("details","runtimeCapabilities");const summary=el("summary","","Supported capabilities · "+status.capabilities.count);details.append(summary);const names=el("div","capabilityList");for(const name of status.capabilities.names)names.append(el("code","",name));details.append(names);body.append(details);
 const configured=(status.configuration.optionalFeatures||[]).filter(item=>item.configured).map(item=>item.name);body.append(el("div","eventMeta","Authorized roots: "+status.configuration.authorizedRootCount+" · Configured optional features: "+(configured.length?configured.join(", "):"none")))}
-async function refreshStatus(){try{const response=await fetch("/v1/control-center/status",{credentials:"same-origin",cache:"no-store"});if(response.status===401){body.textContent="Sign in to load source and capability status.";return}const payload=await response.json();if(!response.ok||!payload.status)throw new Error("status unavailable");render(payload.status)}catch{body.textContent="Runtime status is temporarily unavailable; other dashboard panels may be stale."}}
-void refreshStatus();const timer=setInterval(refreshStatus,2500);window.addEventListener("beforeunload",()=>clearInterval(timer));
+// Multiple network polls can settle out of order. A superseded successful
+// response must never redraw private runtime status after a newer 401/logout.
+let latestStatusRequest=0;
+async function refreshStatus(){
+const requestId=++latestStatusRequest;
+try{
+const response=await fetch("/v1/control-center/status",{credentials:"same-origin",cache:"no-store"});
+if(requestId!==latestStatusRequest)return;
+if(response.status===401){body.replaceChildren();body.textContent="Sign in to load source and capability status.";return}
+const payload=await response.json();
+if(requestId!==latestStatusRequest)return;
+if(!response.ok||!payload.status)throw new Error("status unavailable");
+render(payload.status)
+}catch{
+if(requestId===latestStatusRequest){body.replaceChildren();body.textContent="Runtime status is temporarily unavailable; other dashboard panels may be stale."}
+}
+}
+void refreshStatus();const timer=setInterval(refreshStatus,2500);window.addEventListener("beforeunload",()=>{latestStatusRequest++;clearInterval(timer)});
 })();
