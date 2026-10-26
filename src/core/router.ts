@@ -149,7 +149,19 @@ export class CapabilityRouter {
     const schemas: Array<ProviderCapabilitySchema & { provider: string }> = [];
     for (const provider of this.#providers) {
       if (!provider.capabilitySchemas || !await providerSupports(provider, action)) continue;
-      const declared = provider.capabilitySchemas().filter((entry) => entry.capability === action.capability);
+      const declarations = provider.capabilitySchemas();
+      if (!Array.isArray(declarations) || declarations.length > 256 ||
+          declarations.some((entry) => !entry || typeof entry !== 'object' || Array.isArray(entry) ||
+            typeof entry.capability !== 'string' ||
+            !/^[A-Za-z][A-Za-z0-9._:-]{0,255}$/.test(entry.capability))) {
+        throw new OperatorError('CAPABILITY_SCHEMA_INVALID',
+          `Provider ${provider.name} returned an invalid capability schema collection.`);
+      }
+      const declared = declarations.filter((entry) => entry.capability === action.capability);
+      if (declared.length > 1) {
+        throw new OperatorError('CAPABILITY_SCHEMA_INVALID',
+          `Provider ${provider.name} declared the same operation schema multiple times.`);
+      }
       for (const entry of declared) {
         if (!entry || entry.inputSchemaVersion !== 1 || entry.cancellation !== 'required'
           || !['read', 'write', 'external', 'system', 'destructive', 'dynamic'].includes(entry.risk)
