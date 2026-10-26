@@ -821,9 +821,12 @@ export function createLocalAgentServer(options: {
         ]);
         const rawBefore = requestUrl.searchParams.get('before');
         const rawLimit = requestUrl.searchParams.get('limit');
+        const rawSnapshot = requestUrl.searchParams.get('snapshot');
         const validCursor = (value: string) => /^[1-9][0-9]{0,8}$/.test(value) && Number.isSafeInteger(Number(value));
         if ((rawBefore !== null && !validCursor(rawBefore)) ||
-            (rawLimit !== null && (!validCursor(rawLimit) || Number(rawLimit) > 500))) {
+            (rawLimit !== null && (!validCursor(rawLimit) || Number(rawLimit) > 500)) ||
+            ((rawBefore === null) !== (rawSnapshot === null)) ||
+            (rawSnapshot !== null && !/^[0-9a-f]{64}$/.test(rawSnapshot))) {
           send(res, 400, { ok: false, error: {
             code: 'TASK_TIMELINE_CURSOR_INVALID', message: 'Timeline cursor and limit must be bounded positive integers.'
           } });
@@ -832,18 +835,22 @@ export function createLocalAgentServer(options: {
         const projection = projectTaskRuntime(task, { journal, approvals });
         const timeline = buildControlCenterTaskTimeline(task, projection, {
           ...(rawBefore !== null ? { before: Number(rawBefore) } : {}),
-          ...(rawLimit !== null ? { limit: Number(rawLimit) } : {})
+          ...(rawLimit !== null ? { limit: Number(rawLimit) } : {}),
+          ...(rawSnapshot !== null ? { snapshot: rawSnapshot } : {})
         });
         send(res, 200, { ok: true, timeline });
       } catch (error) {
         const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'TASK_TIMELINE_READ_FAILED';
         const cursorInvalid = code === 'TASK_TIMELINE_CURSOR_INVALID'
           || (error instanceof Error && error.message === 'TASK_TIMELINE_CURSOR_INVALID');
-        send(res, cursorInvalid ? 400 : code === 'TASK_NOT_FOUND' ? 404 : 409, {
+        const staleSnapshot = error instanceof Error && error.message === 'TASK_TIMELINE_SNAPSHOT_STALE';
+        send(res, cursorInvalid ? 400 : staleSnapshot ? 409 : code === 'TASK_NOT_FOUND' ? 404 : 409, {
           ok: false,
           error: {
-            code: cursorInvalid ? 'TASK_TIMELINE_CURSOR_INVALID' : code,
+            code: cursorInvalid ? 'TASK_TIMELINE_CURSOR_INVALID' :
+              staleSnapshot ? 'TASK_TIMELINE_SNAPSHOT_STALE' : code,
             message: cursorInvalid ? 'Timeline cursor is outside the current task history.' :
+              staleSnapshot ? 'Task history changed; refresh before loading earlier events.' :
               error instanceof Error ? error.message : String(error)
           }
         });
