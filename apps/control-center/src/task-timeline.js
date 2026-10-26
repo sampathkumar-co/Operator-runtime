@@ -24,8 +24,9 @@ if(model.page&&model.page.nextBefore!==null&&typeof loadEarlier==="function"){
     if(!Number.isSafeInteger(cursor)||cursor<1||button.disabled)return;
     button.disabled=true;message.textContent="Loading earlier history...";
     try{
-      const earlier=await loadEarlier(cursor);
-      if(!earlier||!earlier.page||!Array.isArray(earlier.timeline)||
+      const earlier=await loadEarlier(cursor,model.page.snapshot);
+      if(!earlier||!earlier.page||earlier.page.snapshot!==model.page.snapshot||
+        !Array.isArray(earlier.timeline)||
         (earlier.page.nextBefore!==null&&(!Number.isSafeInteger(earlier.page.nextBefore)||earlier.page.nextBefore>=cursor)))
         throw new Error("History cursor is stale; refresh this task to continue.");
       const fragment=document.createDocumentFragment();
