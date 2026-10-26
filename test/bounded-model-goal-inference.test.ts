@@ -222,3 +222,44 @@ test('C05 malformed or getter-backed consent scope is rejected before reservatio
   assert.equal(getterCalls, 0);
   assert.deepEqual(h.events, []);
 });
+
+test('C05 Stop during durable model-cost finalization fences the validated proposal', async () => {
+  const controller = new AbortController();
+  const steps: string[] = [];
+  const ledger: ModelCallBudgetLedger = {
+    async reserve({ callId }) {
+      steps.push('reserve');
+      assert.equal(typeof callId, 'string');
+      return { reservationId: 'durable-post-stop' };
+    },
+    async finalize({ outcome }) {
+      steps.push('finalize:' + outcome);
+      // A user may press Stop after inference produced valid JSON but while
+      // the durable ledger's async fsync is still pending.
+      controller.abort('owner-stop-during-fsync');
+    }
+  };
+  const adapter = new BoundedModelGoalInference({
+    modelId: 'test-model', maxOutputTokens: 256, maxCostMicros: 900, timeoutMs: 300,
+    ledger,
+    generator: {
+      async generate() {
+        steps.push('generate');
+        return { text: JSON.stringify(output) };
+      }
+    }
+  });
+  await assert.rejects(adapter.propose({
+    scope, signal: controller.signal, allowModelTransmission: true
+  }), (err: any) => err?.code === 'TASK_MODEL_INFERENCE_ABORTED');
+  assert.deepEqual(steps, ['reserve', 'generate', 'finalize:VALIDATED_PROPOSAL']);
+  assert.equal(controller.signal.aborted, true);
+  // Stop must not leak the previous approved proposal through a busy lock;
+  // a later separately authorized call is a new reservation.
+  const another = await adapter.propose({ scope, allowModelTransmission: true });
+  assert.equal(another.executionStarted, false);
+  assert.deepEqual(steps, [
+    'reserve', 'generate', 'finalize:VALIDATED_PROPOSAL',
+    'reserve', 'generate', 'finalize:VALIDATED_PROPOSAL'
+  ]);
+});
