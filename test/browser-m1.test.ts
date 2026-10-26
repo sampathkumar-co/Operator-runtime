@@ -9,6 +9,7 @@ type Listener = (event: any) => void;
 class FakeWebSocket {
   static readonly OPEN = 1;
   static downloadScenario: 'complete' | 'unrelated-first' | 'simultaneous' | 'canceled' | 'target-closed' = 'complete';
+  static focusObservation: { visible: boolean; focused: boolean } | null = null;
   static autoAttachDisabled = 0;
   static mutationNoise = false;
   static mutationVersion = 0;
@@ -79,7 +80,9 @@ class FakeWebSocket {
       if (message.params?.type === 'mouseReleased') FakeWebSocket.#emitDownload();
     } else if (message.method === 'Runtime.evaluate') {
       const expression = String(message.params?.expression ?? '');
-      if (FakeWebSocket.dateWidgetDelay && expression.includes('Calendar date postcondition failed')) {
+      if (FakeWebSocket.focusObservation && expression.includes('document.hasFocus()')) {
+        result = { result: { value: FakeWebSocket.focusObservation } };
+      } else if (FakeWebSocket.dateWidgetDelay && expression.includes('Calendar date postcondition failed')) {
         FakeWebSocket.dateSelectEvaluations += 1;
         result = FakeWebSocket.dateSelectEvaluations === 1
           ? { result: { value: { ok: false, recoverable: true, error: 'No supported visible calendar widget was associated with the observed input.' } } }
@@ -181,6 +184,16 @@ async function withCdpServer(t: any, fn: (endpoint: string) => Promise<void>, we
     if (req.url === '/json/list') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify([{ id: 'tab-1', type: 'page', title: 'Start', url: 'https://example.test/start', webSocketDebuggerUrl: `ws://127.0.0.1${websocketPath}` }]));
+      return;
+    }
+    if (req.url === '/json/activate/tab-1') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('activated');
+      return;
+    }
+    if (req.url === '/json/close/tab-1') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('Target is closing');
       return;
     }
     if (req.url === '/json/version') {
@@ -889,4 +902,48 @@ test('drag_between keeps source actionability strict when the source is occluded
     performSemanticInteraction(session as any, { operation: 'drag_between', target: { ref: 'b-source' }, toTarget: { ref: 'b-destination' }, value: null }),
     (error: any) => error?.code === 'BROWSER_TARGET_STALE' && error?.retryable === true
   );
+});
+
+test('C03 browser.tab.focus confirms actual keyboard focus as well as document visibility', async (t) => {
+  const original = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
+  FakeWebSocket.focusObservation = { visible: true, focused: true };
+  t.after(() => {
+    FakeWebSocket.focusObservation = null;
+    Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true });
+  });
+  await withCdpServer(t, async endpoint => {
+    const provider = new BrowserCdpProvider(endpoint);
+    t.after(() => provider.close());
+    const result = await provider.execute({
+      id: 'focus-confirmed', capability: 'browser.tab.focus', risk: 'external',
+      input: { targetId: 'tab-1' }, provenance: { kind: 'runtime' }
+    });
+    assert.equal(result.ok, true, result.error?.message);
+    assert.equal((result.output as any)?.focused, true);
+    assert.equal(result.evidence.find(x => x.kind === 'postcondition')?.status, 'pass');
+  });
+});
+
+test('C03 visible but not focused tab cannot produce a success receipt or automatic retry', async (t) => {
+  const original = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
+  FakeWebSocket.focusObservation = { visible: true, focused: false };
+  t.after(() => {
+    FakeWebSocket.focusObservation = null;
+    Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true });
+  });
+  await withCdpServer(t, async endpoint => {
+    const provider = new BrowserCdpProvider(endpoint);
+    t.after(() => provider.close());
+    const result = await provider.execute({
+      id: 'focus-unproven', capability: 'browser.tab.focus', risk: 'external',
+      input: { targetId: 'tab-1' }, provenance: { kind: 'runtime' }
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, 'BROWSER_POSTCONDITION_FAILED');
+    assert.equal(result.error?.retryable, false);
+    assert.equal(result.error?.sideEffectState, 'uncertain');
+    assert.equal(result.error?.executionPhase, 'effect_observed');
+  });
 });
