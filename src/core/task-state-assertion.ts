@@ -24,7 +24,8 @@ function normalizeAssertionValue(value: unknown, label: string): unknown {
     if (++visitedNodes > 4096 || depth > 16) fail();
     if (node === null || typeof node === 'boolean' || typeof node === 'string') return;
     if (typeof node === 'number' && Number.isFinite(node)) return;
-    if (!node || typeof node !== 'object' || ancestors.has(node)) fail();
+    if (node === null || typeof node !== 'object') return fail();
+    if (ancestors.has(node)) return fail();
     const array = Array.isArray(node);
     const prototype = Object.getPrototypeOf(node);
     if (!array && prototype !== Object.prototype && prototype !== null) fail();
@@ -42,7 +43,7 @@ function normalizeAssertionValue(value: unknown, label: string): unknown {
       if (array && (!/^(?:0|[1-9][0-9]*)$/.test(key as string) ||
           Number(key) >= (node as unknown[]).length)) fail();
       const descriptor = Object.getOwnPropertyDescriptor(node, key);
-      if (!descriptor || !('value' in descriptor) || !descriptor.enumerable) fail();
+      if (!descriptor || !('value' in descriptor) || !descriptor.enumerable) return fail();
       inspect(descriptor.value, depth + 1);
     }
     ancestors.delete(node);
