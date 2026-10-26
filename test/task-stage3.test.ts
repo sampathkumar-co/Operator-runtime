@@ -75,6 +75,25 @@ test('stage3 failure taxonomy selects bounded autonomous strategies', () => {
   assert.equal(classifyTaskFailure({ code: 'PROJECT_ARTIFACT_MISMATCH', message: 'unknown', sideEffectState: 'uncertain' }).strategy, 'fail');
 });
 
+test('C05/C08 no-progress with uncertain dispatched side effects requires reconciliation', () => {
+  assert.deepEqual(classifyTaskFailure({
+    code: 'BROWSER_NO_PROGRESS', message: 'Dispatched but the observed effect is unknown.',
+    retryable: true, sideEffectState: 'uncertain', executionPhase: 'dispatched'
+  }), { class: 'postcondition', strategy: 'reconcile', retryable: false, code: 'BROWSER_NO_PROGRESS' });
+  assert.equal(classifyTaskFailure({
+    code: 'BROWSER_NO_PROGRESS', message: 'Provider observed a known effect with no goal progress.',
+    sideEffectState: 'known', executionPhase: 'effect_observed'
+  }).strategy, 'replan');
+  assert.equal(classifyTaskFailure({
+    code: 'BROWSER_NO_PROGRESS', message: 'Proven before dispatch.',
+    sideEffectState: 'none', executionPhase: 'pre_dispatch'
+  }).strategy, 'replan');
+  assert.equal(classifyTaskFailure({
+    code: 'BROWSER_NO_PROGRESS', message: 'No reliable side effect receipt after dispatch.',
+    executionPhase: 'dispatched'
+  }).strategy, 'reconcile');
+});
+
 test('stage3 graph node identity is stable across reconstruction and dependencies remain explicit', () => {
   const task = createTask({
     userObjective: 'stable graph',
