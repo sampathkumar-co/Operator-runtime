@@ -428,16 +428,33 @@ function validateCompositionProposal(
   schemaCount: number,
   observationRef: string
 ): DynamicSubgoalProposal {
-  if (!proposal || typeof proposal !== 'object' || Array.isArray(proposal)) invalid('Dynamic composition proposal must be an object.');
-  const raw = proposal as Record<string, unknown>;
+  if (!proposal || typeof proposal !== 'object' || Array.isArray(proposal) ||
+      (Object.getPrototypeOf(proposal) !== Object.prototype &&
+       Object.getPrototypeOf(proposal) !== null)) {
+    invalid('Dynamic composition proposal must be a plain inert JSON object.');
+  }
+  // An injected provider is still untrusted model input. Object.keys() silently
+  // ignores symbol/non-enumerable fields and raw property access can execute
+  // getters. Take descriptors once and never touch provider-owned properties.
+  const descriptors = Object.getOwnPropertyDescriptors(proposal);
+  const keys = Reflect.ownKeys(proposal);
+  if (keys.some(key => typeof key !== 'string' ||
+      !Object.hasOwn(descriptors, key) ||
+      !descriptors[key]!.enumerable || !('value' in descriptors[key]!))) {
+    invalid('Dynamic composition proposal contains executable or hidden fields.');
+  }
+  const raw = Object.fromEntries(keys.map(key =>
+    [key, descriptors[key as string]!.value])) as Record<string, unknown>;
   if (raw.operation === 'none') {
-    if (Object.keys(raw).length !== 2 || raw.observationRef !== observationRef) {
+    if (keys.length !== 2 || !Object.hasOwn(raw, 'operation') ||
+        !Object.hasOwn(raw, 'observationRef') || raw.observationRef !== observationRef) {
       invalid('Dynamic composition refusal is not bound to the fresh observation.');
     }
     return { operation: 'none', observationRef };
   }
-  if (raw.operation !== 'insert_checkpoint' || Object.keys(raw).length !== 4
-    || raw.observationRef !== observationRef || !Number.isSafeInteger(raw.beforeIndex)
+  if (raw.operation !== 'insert_checkpoint' || keys.length !== 4 ||
+    !['operation', 'observationRef', 'beforeIndex', 'schemaIndex'].every(k => Object.hasOwn(raw, k)) ||
+    raw.observationRef !== observationRef || !Number.isSafeInteger(raw.beforeIndex)
     || !Number.isSafeInteger(raw.schemaIndex) || (raw.beforeIndex as number) < 0
     || (raw.beforeIndex as number) >= targetCount || (raw.schemaIndex as number) < 0
     || (raw.schemaIndex as number) >= schemaCount) {
