@@ -28,7 +28,10 @@ function normalizeAssertionValue(value: unknown, label: string): unknown {
     if (ancestors.has(node)) return fail();
     const array = Array.isArray(node);
     const prototype = Object.getPrototypeOf(node);
-    if (!array && prototype !== Object.prototype && prototype !== null) fail();
+    // A subclassed array or a replaced prototype can override .map, which
+    // the canonical encoder invokes. Proof JSON must not execute such code.
+    if (array ? prototype !== Array.prototype :
+        prototype !== Object.prototype && prototype !== null) fail();
     const keys = Reflect.ownKeys(node);
     if (keys.length > 4097 || keys.some(key => typeof key !== 'string')) fail();
     if (array) {
