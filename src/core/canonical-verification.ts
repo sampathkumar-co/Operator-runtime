@@ -21,11 +21,65 @@ export interface CanonicalVerificationRequest {
   probes: CanonicalVerificationProbe[];
 }
 
+
+function exactProbeFields(value: Record<string, unknown>, keys: readonly string[], label: string): void {
+  if (!keys.every(key => key === 'target' || Object.hasOwn(value, key)) ||
+      Object.keys(value).some(key => !keys.includes(key))) {
+    throw new OperatorError('CANONICAL_VERIFICATION_INVALID', label + ' has unsupported or missing fields.');
+  }
+}
+
+/**
+ * Accept only bounded inert JSON data as independently executed read-probe
+ * input. structuredClone alone accepts cyclic graphs and custom instances;
+ * canonicalJson on such graphs can overflow rather than fail with a typed
+ * verifier error. A read probe is never allowed to carry executable accessors.
+ */
+function normalizedProbeJson(value: unknown): Record<string, unknown> {
+  const visited = new Set<object>();
+  let nodes = 0;
+  function validate(node: unknown, depth: number): void {
+    if (++nodes > 8192 || depth > 16) {
+      throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe JSON exceeds bounded depth or nodes.');
+    }
+    if (node === null || typeof node === 'string' || typeof node === 'boolean') return;
+    if (typeof node === 'number' && Number.isFinite(node)) return;
+    if (!node || typeof node !== 'object') {
+      throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input must be finite JSON data.');
+    }
+    if (visited.has(node)) {
+      throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input contains a cycle.');
+    }
+    const proto = Object.getPrototypeOf(node);
+    if (!Array.isArray(node) && proto !== Object.prototype && proto !== null) {
+      throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input must contain plain objects.');
+    }
+    visited.add(node);
+    for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(node))) {
+      if (!('value' in descriptor) || !descriptor.enumerable) {
+        throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input contains hidden or executable properties.');
+      }
+      validate(descriptor.value, depth + 1);
+    }
+    visited.delete(node);
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input must be an object.');
+  }
+  validate(value, 0);
+  const json = canonicalJson(value);
+  if (Buffer.byteLength(json, 'utf8') > 256 * 1024) {
+    throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input exceeds byte limit.');
+  }
+  return JSON.parse(json) as Record<string, unknown>;
+}
+
 export function normalizeCanonicalVerificationRequest(input: unknown): CanonicalVerificationRequest {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification must be a typed read-only probe request.');
   }
   const raw = input as Record<string, unknown>;
+  exactProbeFields(raw, ['probes'], 'Verification request');
   if (!Array.isArray(raw.probes) || raw.probes.length < 1 || raw.probes.length > 20) {
     throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification requires 1-20 typed read-only probes.');
   }
@@ -35,6 +89,7 @@ export function normalizeCanonicalVerificationRequest(input: unknown): Canonical
       throw new OperatorError('CANONICAL_VERIFICATION_INVALID', `probes[${index}] is invalid.`);
     }
     const probe = item as Record<string, unknown>;
+    exactProbeFields(probe, ['name', 'capability', 'input', 'target', 'assertions'], `probes[${index}]`);
     const name = bounded(probe.name, 128, `probes[${index}].name`);
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(name) || names.has(name)) {
       throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Probe names must be unique bounded identifiers.');
@@ -47,12 +102,7 @@ export function normalizeCanonicalVerificationRequest(input: unknown): Canonical
     if (!Object.hasOwn(CAPABILITY_RISK_RULES, capability) || CAPABILITY_RISK_RULES[capability] !== 'read') {
       throw new OperatorError('CANONICAL_VERIFICATION_INVALID', `probes[${index}].capability is not a registered read-only verification probe.`);
     }
-    const probeInput = probe.input && typeof probe.input === 'object' && !Array.isArray(probe.input)
-      ? structuredClone(probe.input as Record<string, unknown>)
-      : undefined;
-    if (!probeInput || Buffer.byteLength(canonicalJson(probeInput)) > 256 * 1024) {
-      throw new OperatorError('CANONICAL_VERIFICATION_INVALID', `probes[${index}].input is invalid or too large.`);
-    }
+    const probeInput = normalizedProbeJson(probe.input);
     const target = probe.target === undefined ? undefined : bounded(probe.target, 4096, `probes[${index}].target`);
     const assertions = normalizeTaskStateAssertions(probe.assertions, `probes[${index}].assertions`);
     return { name, capability, input: probeInput, ...(target ? { target } : {}), assertions };
