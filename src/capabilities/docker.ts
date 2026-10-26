@@ -342,6 +342,14 @@ export class DockerProvider implements CapabilityProvider {
     const matched = containers
       .filter((container) => sameLocalPath(container.workingDir, root))
       .sort((a, b) => `${a.service}\0${a.id}`.localeCompare(`${b.service}\0${b.id}`));
+    // Two Compose projects can share a working directory (e.g. distinct
+    // --project-name flags). A bare project-root request does not authorize
+    // mutating both. Refuse to merge their container identities.
+    const projectNames = new Set(matched.map((container) => container.project));
+    if (projectNames.size > 1) {
+      throw new OperatorError('DOCKER_PROJECT_AMBIGUOUS',
+        'Multiple Compose project identities share this root; an exact unambiguous project scope is required.');
+    }
     return {
       root,
       context,
