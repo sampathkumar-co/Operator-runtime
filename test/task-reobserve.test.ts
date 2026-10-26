@@ -260,6 +260,7 @@ test('no-progress becomes a durable planner event and triggers bounded replannin
 
 class UncertainNoProgressBrowserProvider implements CapabilityProvider {
   readonly name = 'test.uncertain-no-progress';
+  constructor(readonly includeProviderEffectReceipt = true) {}
   calls = 0;
   supports(action: ActionRequest): boolean { return action.capability === 'browser.interact'; }
   score(): CapabilityScore { return SCORE; }
@@ -268,7 +269,9 @@ class UncertainNoProgressBrowserProvider implements CapabilityProvider {
     return {
       ok: false, capability: action.capability, provider: this.name, evidence: [], durationMs: 1,
       error: { code: 'BROWSER_NO_PROGRESS', message: 'Cannot establish whether prior click applied.',
-        retryable: true, sideEffectState: 'uncertain', executionPhase: 'dispatched' }
+        retryable: true,
+        ...(this.includeProviderEffectReceipt ? { sideEffectState: 'uncertain' as const, executionPhase: 'dispatched' as const } : {})
+      }
     };
   }
 }
@@ -299,3 +302,28 @@ test('C05/C08 uncertain no-progress writes block and never replan into another m
   assert.equal(persisted.execution?.records.length, 1);
 });
 
+
+test('C05/C08 missing provider effect receipt does not create permission to replan', async t => {
+  const root = await tempDir(t, 'operator-missing-no-progress-root-');
+  const state = await tempDir(t, 'operator-missing-no-progress-state-');
+  const provider = new UncertainNoProgressBrowserProvider(false);
+  const store = new TaskStore(state);
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store,
+    permissions: { allowedCapabilities: ['browser.interact'], allowedRoots: [root], allowExternalWrites: true },
+    planners: [new EventAwarePlanner()]
+  });
+  const task = await orchestrator.submit({
+    objective: 'Missing metadata cannot authorize a second browser mutation.',
+    authorizedScope: [root], successConditions: ['No speculative retry'],
+    goal: { kind: 'controlled-file-change', root, path: 'unused.txt', content: 'unused' },
+    maxSteps: 2, maxAttemptsPerStep: 1
+  });
+  const result = await orchestrator.run(task.id);
+  assert.equal(result.state, 'BLOCKED');
+  assert.equal(provider.calls, 1);
+  assert.ok(result.evidence.some(e => e.kind === 'strategy_reconcile'));
+  assert.ok(!result.evidence.some(e => e.kind === 'strategy_replan'));
+  assert.equal(result.execution?.records[0]?.sideEffectState, 'uncertain');
+  assert.equal(result.execution?.records[0]?.executionPhase, 'dispatched');
+});
