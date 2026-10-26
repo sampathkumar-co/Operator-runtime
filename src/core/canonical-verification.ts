@@ -23,9 +23,17 @@ export interface CanonicalVerificationRequest {
 
 
 function exactProbeFields(value: Record<string, unknown>, keys: readonly string[], label: string): void {
-  if (!keys.every(key => key === 'target' || Object.hasOwn(value, key)) ||
-      Object.keys(value).some(key => !keys.includes(key))) {
-    throw new OperatorError('CANONICAL_VERIFICATION_INVALID', label + ' has unsupported or missing fields.');
+  // Inspect descriptors before reading any property: accessors, symbols and
+  // non-enumerable fields must not silently affect a verifier contract.
+  const proto = Object.getPrototypeOf(value);
+  if ((proto !== Object.prototype && proto !== null) || Object.getOwnPropertySymbols(value).length) {
+    throw new OperatorError('CANONICAL_VERIFICATION_INVALID', label + ' must be an inert plain object.');
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (!keys.every(key => key === 'target' || Object.hasOwn(descriptors, key)) ||
+      Object.entries(descriptors).some(([key, desc]) =>
+        !keys.includes(key) || !('value' in desc) || !desc.enumerable)) {
+    throw new OperatorError('CANONICAL_VERIFICATION_INVALID', label + ' has unsupported, missing or executable fields.');
   }
 }
 
@@ -53,6 +61,21 @@ function normalizedProbeJson(value: unknown): Record<string, unknown> {
     const proto = Object.getPrototypeOf(node);
     if (!Array.isArray(node) && proto !== Object.prototype && proto !== null) {
       throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input must contain plain objects.');
+    }
+    if (Object.getOwnPropertySymbols(node).length) {
+      throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input cannot contain symbol fields.');
+    }
+    if (Array.isArray(node)) {
+      // JSON.stringify turns holes into null and silently drops array extras.
+      // Neither mutation may become a trusted read-probe input.
+      if (node.length > 8192 || Object.keys(node).length !== node.length) {
+        throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input must contain dense arrays.');
+      }
+      for (let i = 0; i < node.length; i += 1) {
+        if (!Object.hasOwn(node, i)) {
+          throw new OperatorError('CANONICAL_VERIFICATION_INVALID', 'Verification probe input must contain dense arrays.');
+        }
+      }
     }
     visited.add(node);
     for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(node))) {
