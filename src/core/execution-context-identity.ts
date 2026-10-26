@@ -42,9 +42,10 @@ function optionalId(value: unknown, label: string): string | undefined {
 
 function optionalPositiveInteger(value: unknown, label: string): number | undefined {
   if (value === undefined) return undefined;
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 1) throw invalid(`${label} is invalid.`);
-  return parsed;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    throw invalid(`${label} must be a literal positive integer.`);
+  }
+  return value;
 }
 
 export function normalizeExecutionContextIdentity(input: unknown): ExecutionContextIdentity {
@@ -58,8 +59,10 @@ export function normalizeExecutionContextIdentity(input: unknown): ExecutionCont
   const intentVersion = optionalPositiveInteger(raw.intentVersion, 'intentVersion');
   let intentDigest: string | undefined;
   if (raw.intentDigest !== undefined) {
-    intentDigest = String(raw.intentDigest).toLowerCase();
-    if (!HEX_64.test(intentDigest)) throw invalid('intentDigest is invalid.');
+    if (typeof raw.intentDigest !== 'string' || !HEX_64.test(raw.intentDigest.toLowerCase())) {
+      throw invalid('intentDigest must be a literal hexadecimal hash.');
+    }
+    intentDigest = raw.intentDigest.toLowerCase();
   }
   const intentParts = [conversationId, intentVersion, intentDigest].filter((value) => value !== undefined).length;
   if (intentParts !== 0 && intentParts !== 3) {
