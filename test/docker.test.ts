@@ -340,3 +340,20 @@ test('C06 distinct Compose project names sharing an authorized directory cannot 
   assert.equal(calls.some((call) => call.argv.includes('stop')), false,
     'no container in either Compose project may be touched');
 });
+
+test('C06 Docker daemon inspection rejects type-confused container rows instead of string coercion', async (t) => {
+  const projectRoot = await tempDir(t, 'operator-docker-coerced-daemon-');
+  const fake = await makeFakeDocker(t, {
+    host: 'unix:///var/run/docker.sock', version: '27.5.1',
+    containers: [{ ...container(projectRoot), id: ['a'.repeat(64)] as unknown as string }]
+  });
+  const provider = new DockerProvider({
+    allowedRoots: [projectRoot], dockerExecutable: fake.executable, dockerArgsPrefix: fake.prefix
+  });
+  const result = await provider.execute({
+    id: 'malformed-daemon-read', capability: 'docker.inspect', risk: 'read',
+    input: {}, provenance: { kind: 'runtime' }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'DOCKER_OUTPUT_INVALID');
+});
