@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { ArtifactStore } from '../src/core/artifact-store.ts';
 import { createEvidencePack, publishEvidencePack } from '../src/core/evidence-pack.ts';
+import { executionContextDigest } from '../src/core/execution-context-identity.ts';
 
 async function tempState(): Promise<string> {
   return await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-artifacts-'));
@@ -65,20 +66,18 @@ test('Evidence Pack can be published as a content-addressed artifact', async (t)
   const dir = await tempState();
   t.after(async () => fs.rm(dir, { recursive: true, force: true }));
   const store = new ArtifactStore(dir);
+  const context = {
+    schemaVersion: 1 as const, taskId: 'task-1', actionId: 'action-1', attempt: 1
+  };
   const source = await store.put({
     bytes: JSON.stringify({ passed: 42, failed: 0 }),
     kind: 'test-report',
     mediaType: 'application/json',
-    executionContextDigest: 'b'.repeat(64),
+    executionContextDigest: executionContextDigest(context),
     now: '2026-10-06T00:00:00.000Z'
   });
   const result = await publishEvidencePack(store, {
-    executionContext: {
-      schemaVersion: 1,
-      taskId: 'task-1',
-      actionId: 'action-1',
-      attempt: 1
-    },
+    executionContext: context,
     artifactIds: [source.id],
     claims: [{
       id: 'tests-pass',
@@ -159,4 +158,71 @@ test('artifact metadata owns and digests prototype-named JSON data fields withou
   assert.equal(Object.hasOwn(persisted.metadata, '__proto__'), true);
   assert.equal(persisted.metadata['__proto__'], 'principal-override');
   assert.equal((await store.read(special.id)).record.id, special.id);
+});
+
+test('C07 evidence publication rejects foreign and contextless artifacts despite valid hashes', async (t) => {
+  const state = await tempState();
+  t.after(async () => fs.rm(state, { recursive: true, force: true }));
+  const store = new ArtifactStore(state);
+  const taskA = { schemaVersion: 1 as const, taskId: 'task-A', actionId: 'save-A' };
+  const taskB = { schemaVersion: 1 as const, taskId: 'task-B', actionId: 'save-B' };
+  const foreign = await store.put({
+    bytes: 'successful foreign task', kind: 'test-report', mediaType: 'text/plain',
+    executionContextDigest: executionContextDigest(taskB)
+  });
+  const unbound = await store.put({
+    bytes: 'unbound legacy output', kind: 'test-report', mediaType: 'text/plain'
+  });
+  for (const artifactId of [foreign.id, unbound.id]) {
+    await assert.rejects(publishEvidencePack(store, {
+      executionContext: taskA,
+      artifactIds: [artifactId],
+      claims: [{ id: 'verified', statement: 'Task A independently verified.',
+        level: 'EMPIRICALLY_VERIFIED', artifactIds: [artifactId] }]
+    }), (err: any) => err?.code === 'EVIDENCE_PACK_CONTEXT_MISMATCH');
+  }
+  assert.deepEqual(await store.list(), [unbound, foreign].sort((a,b) =>
+    b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id)));
+});
+
+test('C07 published evidence privacy cannot downgrade referenced sensitive data', async (t) => {
+  const state = await tempState();
+  t.after(async () => fs.rm(state, { recursive: true, force: true }));
+  const store = new ArtifactStore(state);
+  const context = { schemaVersion: 1 as const, taskId: 'private-verified' };
+  const source = await store.put({
+    bytes: 'redacted sensitive fixture', kind: 'test-report', mediaType: 'text/plain',
+    privacy: 'sensitive', executionContextDigest: executionContextDigest(context)
+  });
+  const packInput = {
+    executionContext: context, artifactIds: [source.id],
+    claims: [{ id: 'proof', statement: 'Private task state observed.',
+      level: 'EMPIRICALLY_VERIFIED' as const, artifactIds: [source.id] }]
+  };
+  for (const privacy of ['public', 'internal'] as const) {
+    await assert.rejects(publishEvidencePack(store, packInput, privacy),
+      (err: any) => err?.code === 'EVIDENCE_PACK_PRIVACY_DOWNGRADE');
+  }
+  const result = await publishEvidencePack(store, packInput, 'sensitive');
+  assert.equal(result.artifact.privacy, 'sensitive');
+  assert.equal(result.pack.executionContextDigest, executionContextDigest(context));
+});
+
+test('C07 proof identifiers must be dense literal digests and never execute coercion', () => {
+  const digest = 'A'.repeat(64);
+  let conversions = 0;
+  const forged = { toString() { conversions++; return digest; } };
+  const base = {
+    executionContext: { schemaVersion: 1 as const, taskId: 'strict-proof' },
+    artifactIds: [digest],
+    claims: [{ id: 'claim', statement: 'A result is proven.',
+      level: 'PROVEN' as const, artifactIds: [digest] }]
+  };
+  for (const artifacts of [[forged], new Array(1), Object.assign([digest], { extra: 'hidden' })]) {
+    assert.throws(() => createEvidencePack({ ...base, artifactIds: artifacts as any }),
+      (err: any) => err?.code === 'EVIDENCE_PACK_INVALID');
+  }
+  assert.equal(conversions, 0);
+  const ordinary = createEvidencePack(base);
+  assert.deepEqual(ordinary.artifactIds, ['a'.repeat(64)]);
 });
