@@ -117,7 +117,10 @@ def normalize_decision(raw: Any, candidates: list[dict[str, str]]) -> Decision:
     return Decision(op, bid, value, key)
 
 def model_prompt(goal: str, candidates: list[dict[str,str]], history:list[dict], *, feedback:str="") -> str:
-    if type(goal) is not str or type(feedback) is not str or type(history) is not list:
+    if (type(goal) is not str or type(feedback) is not str or
+            type(history) is not list or type(candidates) is not list or
+            len(candidates) > 125 or len(history) > 10000):
+
         raise ControllerError("PROMPT_INVALID")
     if len(goal)>1300:goal=goal[:1300]
     return (
@@ -138,7 +141,9 @@ def model_prompt(goal: str, candidates: list[dict[str,str]], history:list[dict],
     )
 
 def classify_error(code: str) -> str:
-    code=str(code or "").upper()
+    if type(code) is not str or len(code) > 128:
+        return "fail"
+    code=code.upper()
     if "UNCERTAIN" in code or "RECONCIL" in code: return "stop_uncertain"
     if "APPROVAL" in code or "POLICY" in code or "AUTHORITY" in code: return "stop_authority"
     if "STALE" in code or "ELEMENT_NOT_FOUND" in code or "NO_PROGRESS" in code: return "reobserve"
@@ -169,7 +174,10 @@ def observed_candidates(observation: dict[str,Any], *, limit:int=125) -> list[di
     strings=snapshot.get("strings") or []
     if type(strings) is not list or len(strings) > 10000:return result
     def string_at(i):
-        return str(strings[i]) if isinstance(i,int) and 0<=i<len(strings) else ""
+        if type(i) is not int or not 0 <= i < len(strings):
+            return ""
+        value = strings[i]
+        return value if type(value) is str and len(value) <= 1024 else ""
     documents = snapshot.get("documents") or []
     if type(documents) is not list or len(documents) > 20:
         return result
