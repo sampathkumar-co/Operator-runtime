@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { OperatorError } from '../core/errors.ts';
 import { evidence } from '../core/evidence.ts';
 import { PathScope } from './path-scope.ts';
@@ -28,8 +28,9 @@ export class ProjectInspectProvider implements CapabilityProvider {
   supports(action: ActionRequest): boolean { return action.capability === 'project.inspect'; }
   score(): CapabilityScore { return SCORE; }
 
-  async execute(action: ActionRequest): Promise<ActionResult> {
+  async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
+    assertProjectInspectionRunning(context.signal);
     if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Project inspect provider does not support this capability.');
     const requested = action.input.path;
     if (typeof requested !== 'string' || !requested || requested.length > 4096 ||
@@ -37,13 +38,17 @@ export class ProjectInspectProvider implements CapabilityProvider {
       throw new OperatorError('PROJECT_SCOPE_INVALID', 'Project inspection requires an exact bounded authorized path.');
     }
     const root = await this.#scope.resolveExisting(requested);
+    assertProjectInspectionRunning(context.signal);
     const names = await fs.readdir(root);
+    assertProjectInspectionRunning(context.signal);
     const has = (name: string) => names.includes(name);
     // Resolve each manifest independently under the approved scope. Merely
     // validating the project directory cannot authorize symlinked children.
-    const packageText = await maybeScopedText(this.#scope, path.join(root, 'package.json'), 4 * 1024 * 1024);
+    const packageText = await maybeScopedText(this.#scope, path.join(root, 'package.json'), 4 * 1024 * 1024, false, context.signal);
+    assertProjectInspectionRunning(context.signal);
     const packageJson = parseOptionalJson(packageText);
-    const pyproject = await maybeScopedText(this.#scope, path.join(root, 'pyproject.toml'), 32 * 1024, true);
+    const pyproject = await maybeScopedText(this.#scope, path.join(root, 'pyproject.toml'), 32 * 1024, true, context.signal);
+    assertProjectInspectionRunning(context.signal);
 
     const completeOutput = {
       root,
@@ -64,6 +69,7 @@ export class ProjectInspectProvider implements CapabilityProvider {
     };
 
     const output = boundProjectMetadata(completeOutput, action.input);
+    assertProjectInspectionRunning(context.signal);
 
     return {
       ok: true,
@@ -73,6 +79,15 @@ export class ProjectInspectProvider implements CapabilityProvider {
       evidence: [evidence('project_model', 'pass', 'Project metadata derived from files in authorized scope.', { root })],
       durationMs: Math.round(performance.now() - started)
     };
+  }
+}
+
+function assertProjectInspectionRunning(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new OperatorError('EXECUTION_ABORTED', 'Project inspection was cancelled.', {
+      retryable: false,
+      details: { sideEffectState: 'none', executionPhase: 'pre_dispatch' }
+    });
   }
 }
 
@@ -86,8 +101,10 @@ function parseOptionalJson(content: string | null): unknown | null {
 
 /** Read a bounded manifest through the existing per-file path authority boundary. */
 async function maybeScopedText(
-  scope: PathScope, filePath: string, maxBytes: number, prefixOnly = false
+  scope: PathScope, filePath: string, maxBytes: number, prefixOnly = false,
+  signal?: AbortSignal
 ): Promise<string | null> {
+  assertProjectInspectionRunning(signal);
   try {
     await fs.lstat(filePath);
   } catch (error) {
@@ -97,6 +114,7 @@ async function maybeScopedText(
 
   try {
     return await scope.withExisting(filePath, async (resolved) => {
+      assertProjectInspectionRunning(signal);
       const handle = await fs.open(resolved, 'r');
       try {
         const stat = await handle.stat();
@@ -112,10 +130,12 @@ async function maybeScopedText(
         const buffer = Buffer.alloc(limit);
         let used = 0;
         while (used < limit) {
+          assertProjectInspectionRunning(signal);
           const { bytesRead } = await handle.read(buffer, used, limit - used, used);
           if (bytesRead === 0) break;
           used += bytesRead;
         }
+        assertProjectInspectionRunning(signal);
         if (!prefixOnly && used > maxBytes) {
           throw new OperatorError('PROJECT_MANIFEST_TOO_LARGE', 'Project manifest exceeds the safe inspection limit.');
         }
