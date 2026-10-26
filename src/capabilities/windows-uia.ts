@@ -28,6 +28,26 @@ const DEFAULT_MAX_WINDOWS = 50;
 const MAX_WINDOWS = 200;
 const UIA_OPERATIONS = ['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll', 'activate_window'] as const;
 const PHYSICAL_INPUT_OPERATIONS = ['move', 'click', 'double_click', 'drag', 'scroll', 'type_text', 'key_press', 'hotkey'] as const;
+
+/** Physical input operation identity cannot originate from JS string coercion. */
+export function strictPhysicalInputOperation(value: unknown): typeof PHYSICAL_INPUT_OPERATIONS[number] {
+  if (typeof value !== 'string' || !(PHYSICAL_INPUT_OPERATIONS as readonly string[]).includes(value)) {
+    throw new OperatorError('INPUT_OPERATION_INVALID', 'Physical input operation is outside the closed operation set.');
+  }
+  return value as typeof PHYSICAL_INPUT_OPERATIONS[number];
+}
+
+/** Native capture protocol fields are strings, not attacker-coercible arrays/objects. */
+export function strictNativeCaptureBase64(value: unknown, phase: 'initial' | 'before_input' | 'after_input'): string {
+  const code = phase === 'initial' ? 'VISUAL_CAPTURE_INVALID'
+    : phase === 'before_input' ? 'INPUT_CAPTURE_INVALID' : 'INPUT_AFTER_CAPTURE_INVALID';
+  // Native helper responses are bounded to 4 MiB; also bound this field
+  // independently in case an injected client bypasses the native transport.
+  if (typeof value !== 'string' || value.length < 24 || value.length > 4 * 1024 * 1024) {
+    throw new OperatorError(code, 'Native screenshot payload must be a bounded literal base64 string.');
+  }
+  return value;
+}
 // Only runtime-defined or vetted native protocol error codes may cross the
  // public boundary. A regex allows native/page-owned secret text in an error code.
 const PUBLIC_UIA_ERROR_CODES = new Set([
@@ -436,7 +456,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
     if (raw.source !== captureParams.source) {
       throw new OperatorError('VISUAL_CAPTURE_INVALID', 'Native capture source differs from the authorized source.');
     }
-    const pngBase64 = String(raw.png_base64 ?? '');
+    const pngBase64 = strictNativeCaptureBase64(raw.png_base64, 'initial');
     const png = Buffer.from(pngBase64, 'base64');
     if (png.length < 16 || png.length > 8 * 1024 * 1024) throw new OperatorError('VISUAL_CAPTURE_INVALID', 'Native capture returned an invalid PNG payload.');
     const sha256 = crypto.createHash('sha256').update(png).digest('hex');
@@ -531,8 +551,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
       throw new OperatorError('INPUT_CAPTURE_STALE', 'Visual capture lease expired; capture fresh state before physical input.', { retryable: true });
     }
     if (lease.sha256 !== expectedSha256) throw new OperatorError('INPUT_CAPTURE_MISMATCH', 'Physical input capture hash does not match the leased visual state.', { retryable: false });
-    const operation = String(action.input.operation ?? '');
-    if (!(PHYSICAL_INPUT_OPERATIONS as readonly string[]).includes(operation)) throw new OperatorError('INPUT_OPERATION_INVALID', 'Physical input operation is outside the closed operation set.');
+    const operation = strictPhysicalInputOperation(action.input.operation);
     const params: Record<string, unknown> = {
       operation,
       ...(lease.windowId ? { expected_window_id: lease.windowId } : {})
@@ -564,7 +583,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
       this.#captureLeases.delete(captureId);
       throw new OperatorError('INPUT_CAPTURE_REVALIDATION_FAILED', `Could not revalidate the visual capture before physical input: ${error instanceof Error ? error.message : String(error)}`, { retryable: true });
     }
-    const currentBase64 = String(currentRaw.png_base64 ?? '');
+    const currentBase64 = strictNativeCaptureBase64(currentRaw.png_base64, 'before_input');
     const currentPng = Buffer.from(currentBase64, 'base64');
     if (currentPng.length < 16 || currentPng.length > 8 * 1024 * 1024) {
       this.#captureLeases.delete(captureId);
@@ -613,7 +632,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
         { retryable: false }
       );
     }
-    const afterBase64 = String(afterRaw.png_base64 ?? '');
+    const afterBase64 = strictNativeCaptureBase64(afterRaw.png_base64, 'after_input');
     const afterPng = Buffer.from(afterBase64, 'base64');
     if (afterPng.length < 16 || afterPng.length > 8 * 1024 * 1024) {
       throw new OperatorError('INPUT_AFTER_CAPTURE_INVALID', 'Physical input was dispatched but AFTER capture returned an invalid PNG payload.', { retryable: false });
