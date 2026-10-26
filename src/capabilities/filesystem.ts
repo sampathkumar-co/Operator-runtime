@@ -144,7 +144,11 @@ export class FilesystemProvider implements CapabilityProvider {
     } catch (error) {
       const op = error instanceof OperatorError
         ? error
-        : new OperatorError('FILESYSTEM_ERROR', error instanceof Error ? error.message : String(error));
+        : new OperatorError('FILESYSTEM_ERROR', 'Filesystem operation failed.');
+      // PathScope keeps its realpath diagnostics locally. Returning them to
+      // a caller would disclose a path outside the authorized root even
+      // though the operation was correctly denied.
+      const visibleDetails = op.code === 'PATH_OUTSIDE_SCOPE' ? undefined : op.details;
       return {
         ok: false,
         capability: action.capability,
@@ -152,9 +156,9 @@ export class FilesystemProvider implements CapabilityProvider {
         evidence: [evidence('filesystem', 'fail', op.message, { code: op.code })],
         error: {
           code: op.code, message: op.message, retryable: op.retryable,
-          ...(op.details && ['none', 'known', 'uncertain'].includes(String(op.details.sideEffectState)) ? { sideEffectState: op.details.sideEffectState as 'none' | 'known' | 'uncertain' } : {}),
-          ...(op.details && ['pre_dispatch', 'dispatched', 'effect_observed', 'reconciled'].includes(String(op.details.executionPhase)) ? { executionPhase: op.details.executionPhase as 'pre_dispatch' | 'dispatched' | 'effect_observed' | 'reconciled' } : {}),
-          ...(op.details ? { details: structuredClone(op.details) } : {})
+          ...(visibleDetails && ['none', 'known', 'uncertain'].includes(String(visibleDetails.sideEffectState)) ? { sideEffectState: visibleDetails.sideEffectState as 'none' | 'known' | 'uncertain' } : {}),
+          ...(visibleDetails && ['pre_dispatch', 'dispatched', 'effect_observed', 'reconciled'].includes(String(visibleDetails.executionPhase)) ? { executionPhase: visibleDetails.executionPhase as 'pre_dispatch' | 'dispatched' | 'effect_observed' | 'reconciled' } : {}),
+          ...(visibleDetails ? { details: structuredClone(visibleDetails) } : {})
         },
         durationMs: Math.round(performance.now() - started)
       };
