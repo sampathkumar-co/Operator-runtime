@@ -36,7 +36,7 @@ test('C04 post-input native scope/window mismatch never persists foreign screens
       } as any,
       client: {
         async call(method: string) {
-          if (method === 'input') { inputCalls++; return { dispatched: true }; }
+          if (method === 'input') { inputCalls++; return { operation: 'click', postcondition: { dispatched: true, foreground: true } }; }
           assert.equal(method, 'capture');
           captureCalls++;
           return captureCalls <= 2
@@ -95,7 +95,7 @@ test('C04 unchanged pixels cannot authorize input after source, window or geomet
       platform: 'win32',
       client: {
         async call(method: string) {
-          if (method === 'input') { inputs++; return { dispatched: true }; }
+          if (method === 'input') { inputs++; return { operation: 'click', postcondition: { dispatched: true, foreground: true } }; }
           captures++;
           return {
             ...nativeCapture(bytes),

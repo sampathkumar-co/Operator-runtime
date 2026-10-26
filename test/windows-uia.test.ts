@@ -159,7 +159,7 @@ test('visual capture emits Observation V3 rendered evidence and target-local aft
     platform: 'win32',
     client: {
       async call(method) {
-        if (method === 'input') return { dispatched: true };
+        if (method === 'input') return { operation: 'click', postcondition: { dispatched: true, foreground: true } };
         assert.equal(method, 'capture');
         captureCalls += 1;
         return {
