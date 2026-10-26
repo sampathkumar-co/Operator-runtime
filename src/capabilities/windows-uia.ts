@@ -38,6 +38,25 @@ export function strictPhysicalInputOperation(value: unknown): typeof PHYSICAL_IN
 }
 
 /** Native capture protocol fields are strings, not attacker-coercible arrays/objects. */
+export function strictNativeInputResult(
+  value: unknown, operation: string, windowBound: boolean
+): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new OperatorError('INPUT_NATIVE_RESULT_INVALID',
+      'Native Windows input returned an invalid dispatched action receipt.');
+  }
+  const record = value as Record<string, unknown>;
+  const state = record.postcondition;
+  if (!state || typeof state !== 'object' || Array.isArray(state) ||
+      record.operation !== operation ||
+      (state as Record<string, unknown>).dispatched !== true ||
+      (state as Record<string, unknown>).foreground !== windowBound) {
+    throw new OperatorError('INPUT_NATIVE_RESULT_INVALID',
+      'Native Windows input did not confirm the exact dispatched operation and window scope.');
+  }
+  return record;
+}
+
 export function strictNativeCaptureBase64(value: unknown, phase: 'initial' | 'before_input' | 'after_input'): string {
   const code = phase === 'initial' ? 'VISUAL_CAPTURE_INVALID'
     : phase === 'before_input' ? 'INPUT_CAPTURE_INVALID' : 'INPUT_AFTER_CAPTURE_INVALID';
@@ -64,7 +83,8 @@ const PUBLIC_UIA_ERROR_CODES = new Set([
   'INPUT_CAPTURE_MISMATCH', 'INPUT_CAPTURE_REVALIDATION_FAILED',
   'INPUT_CAPTURE_STALE', 'INPUT_KEYS_INVALID',
   'INPUT_OPERATION_INVALID', 'INPUT_POINT_OUTSIDE_CAPTURE',
-  'VISUAL_CAPTURE_INVALID', 'VISUAL_CAPTURE_ARTIFACT_REQUIRED', 'VISUAL_INPUT_INVALID'
+  'VISUAL_CAPTURE_INVALID', 'VISUAL_CAPTURE_ARTIFACT_REQUIRED', 'VISUAL_INPUT_INVALID',
+  'INPUT_NATIVE_RESULT_INVALID'
 ]);
 const UNCERTAIN_UIA_MUTATION_ERRORS = new Set([
   'UIA_SIDECAR_TIMEOUT', 'UIA_SIDECAR_CLOSED', 'UIA_SIDECAR_EXITED',
@@ -72,7 +92,7 @@ const UNCERTAIN_UIA_MUTATION_ERRORS = new Set([
   'UIA_SIDECAR_PROTOCOL_INVALID',
   'INPUT_AFTER_CAPTURE_FAILED', 'INPUT_AFTER_CAPTURE_INVALID',
   'INPUT_AFTER_WINDOW_CHANGED', 'INPUT_AFTER_SOURCE_CHANGED',
-  'VISUAL_CAPTURE_ARTIFACT_REQUIRED', 'UIA_PROVIDER_FAILED'
+  'VISUAL_CAPTURE_ARTIFACT_REQUIRED', 'INPUT_NATIVE_RESULT_INVALID', 'UIA_PROVIDER_FAILED'
 ]);
 const CAPTURE_LEASE_MS = 90_000;
 const MAX_INLINE_VISUAL_BYTES = 96 * 1024;
@@ -617,9 +637,13 @@ export class WindowsUiaProvider implements CapabilityProvider {
       expiresAt: new Date(lease.expiresAt).toISOString(),
       ...(lease.windowId ? { windowId: lease.windowId } : {})
     };
-    const native = asRecord(await this.#client.call('input', params, signal));
-    // A physical action consumes its BEFORE lease regardless of verification outcome.
+    // Consume the capture lease BEFORE the native dispatch. If the response is
+    // lost after input reaches Windows, a second invocation must not be able
+    // to replay using the original screenshot/approval.
     this.#captureLeases.delete(captureId);
+    const native = strictNativeInputResult(
+      await this.#client.call('input', params, signal), operation, Boolean(lease.windowId)
+    );
     await waitForVisualSettle(AFTER_CAPTURE_SETTLE_MS, signal);
 
     let afterRaw: Record<string, unknown>;
