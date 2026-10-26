@@ -34,6 +34,10 @@ test('C02 action results require exact provider and capability identities, never
     {...valid(),durationMs:'1'},
     {...valid(),durationMs:Infinity},
     {...valid(),durationMs:-1},
+    {...valid(),durationMs:24 * 60 * 60_000 + 1},
+    {...valid(),evidence:[{...evidence('test','pass','noncanonical'),timestamp:'2026-10-25'}]},
+    {...valid(),evidence:[{...evidence('test','pass','timezone variant'),timestamp:'2026-10-25T00:00:00+00:00'}]},
+
     {...valid(),evidence:{}},
     {...valid(),evidence:Array(257).fill(evidence('test','info','overflow'))},
     {...valid(),evidence:[{...evidence('test','pass','ok'),status:['pass']}]},
@@ -86,4 +90,10 @@ test('C02 central runtime preserves genuine provider success with canonical iden
     assert.equal(result.provider,'probe');
     assert.ok(result.evidence.some(e=>e.kind==='routing'));
   }finally{await runtime.close();}
+});
+
+test('C02 provider receipts retain legitimate fractional time and canonical evidence timestamp', () => {
+  const canonical = valid();
+  canonical.durationMs = 0.125;
+  assert.equal(assertProviderResultContract(canonical, action, 'probe').durationMs, 0.125);
 });
