@@ -33,6 +33,7 @@ import type {
   AtomicSemanticTaskGoal,
   AutonomousTaskAction,
   AutonomousTaskStep,
+  BrowserDownloadTarget,
   PhysicalInputTaskOperation,
   PlannerDecision,
   PostgresTaskFilter,
@@ -71,6 +72,7 @@ export type {
   AtomicSemanticTaskGoal,
   AutonomousTaskAction,
   AutonomousTaskStep,
+  BrowserDownloadTarget,
   PhysicalInputTaskOperation,
   PlannerDecision,
   PostgresTaskFilter,
@@ -1576,7 +1578,7 @@ export class ProjectQualityGatePlanner implements TaskPlanner {
 
 export class SemanticTaskPlanner implements TaskPlanner {
   readonly id = 'operator.semantic.v1';
-  supports(goal: SemanticTaskGoal): boolean { return ['controlled-file-change', 'trusted-project-command', 'browser-navigation', 'docker-lifecycle', 'postgres-select', 'app-operation'].includes(goal.kind); }
+  supports(goal: SemanticTaskGoal): boolean { return ['controlled-file-change', 'trusted-project-command', 'browser-navigation', 'browser-download', 'docker-lifecycle', 'postgres-select', 'app-operation'].includes(goal.kind); }
 
   next({ task, goal }: TaskPlannerContext): PlannerDecision {
     if (goal.kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot execute a workflow envelope.');
@@ -1691,6 +1693,15 @@ export class SemanticTaskPlanner implements TaskPlanner {
           : 'Application operation satisfied semantic targeting and deterministic postcondition verification.'
       };
     }
+    if (goal.kind === 'browser-download') {
+      if (phase === 'start') return {
+        type: 'step', key: 'download-browser-artifact', title: 'Download and hash the requested browser artifact',
+        capability: 'browser.interact',
+        input: browserDownloadActionInput(goal),
+        target: goal.targetId
+      };
+      return { type: 'complete', message: 'Browser download satisfied the exact artifact hash and initiating action-target binding.' };
+    }
     if (phase === 'start') return { type: 'step', key: 'inspect-browser', title: 'Inspect semantic browser state', capability: 'browser.inspect', input: {} };
     if (phase === 'navigate') return { type: 'step', key: 'navigate-browser', title: 'Navigate the selected browser target', capability: 'browser.navigate', input: { targetId: state.targetId, url: goal.url }, target: goal.url };
     if (phase === 'verify') return { type: 'step', key: 'verify-browser', title: 'Verify semantic browser destination', capability: 'browser.inspect', input: { targetId: state.targetId }, target: goal.url };
@@ -1800,6 +1811,22 @@ export class SemanticTaskPlanner implements TaskPlanner {
         delete state.captureSha256;
         state.phase = 'physical-complete';
       }
+      return;
+    }
+    if (goal.kind === 'browser-download') {
+      if (step.key !== 'download-browser-artifact') throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Browser download decision does not match its durable phase.');
+      const output = asRecord(result.output);
+      const download = asRecord(output.download);
+      const expectedTargetDigest = browserDownloadTargetDigest(goal.targetId, goal.target);
+      if (output.targetId !== goal.targetId || output.operation !== 'click'
+        || download.state !== 'completed'
+        || download.initiatingTargetId !== goal.targetId
+        || download.actionTargetDigest !== expectedTargetDigest
+        || download.artifactSha256 !== goal.expectedSha256
+        || (goal.expectedSuggestedFilename !== undefined && download.suggestedFilename !== goal.expectedSuggestedFilename)) {
+        throw new OperatorError('TASK_BROWSER_DOWNLOAD_POSTCONDITION_FAILED', 'Browser download did not match the requested artifact hash, filename, and initiating action target.');
+      }
+      state.phase = 'complete';
       return;
     }
     if (step.key === 'inspect-browser') {
@@ -2307,6 +2334,44 @@ function taskWithPlannerState(task: TaskCapsule, plannerState: Record<string, un
   };
 }
 
+function normalizeBrowserDownloadTarget(input: unknown): BrowserDownloadTarget {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new OperatorError('TASK_GOAL_INVALID', 'Browser download target must be an exact semantic target object.');
+  }
+  const raw = input as Record<string, unknown>;
+  const allowed = ['ref', 'role', 'name', 'text', 'css'];
+  const maxLength: Record<keyof BrowserDownloadTarget, number> = { ref: 128, role: 500, name: 500, text: 500, css: 500 };
+  const keys = Object.keys(raw);
+  if (keys.length < 1 || keys.some((key) => !allowed.includes(key))) {
+    throw new OperatorError('TASK_GOAL_INVALID', 'Browser download target contains no identity or unsupported fields.');
+  }
+  const target: BrowserDownloadTarget = {};
+  for (const key of allowed as Array<keyof BrowserDownloadTarget>) {
+    const value = raw[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !value.trim() || value.trim().length > maxLength[key] || value.includes('\0')) {
+      throw new OperatorError('TASK_GOAL_INVALID', `Browser download target ${key} must be a non-empty bounded string.`);
+    }
+    target[key] = value.trim();
+  }
+  if (Object.keys(target).length < 1) throw new OperatorError('TASK_GOAL_INVALID', 'Browser download target requires at least one semantic identity field.');
+  return target;
+}
+
+function browserDownloadActionInput(goal: Extract<AtomicSemanticTaskGoal, { kind: 'browser-download' }>): Record<string, unknown> {
+  return {
+    targetId: goal.targetId,
+    operation: 'click',
+    target: goal.target,
+    expectDownload: true,
+    downloadTimeoutMs: goal.timeoutMs ?? 30_000
+  };
+}
+
+function browserDownloadTargetDigest(targetId: string, target: BrowserDownloadTarget): string {
+  return sha256(canonicalJson({ targetId, target }));
+}
+
 function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('TASK_GOAL_INVALID', 'Stored task goal is invalid.');
   const goal = structuredClone(input) as SemanticTaskGoal;
@@ -2356,6 +2421,17 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
     if (url.username || url.password) throw new OperatorError('TASK_GOAL_INVALID', 'Browser goal URL must not contain credentials.');
     goal.url = url.toString();
     if (goal.targetId !== undefined) goal.targetId = boundedText(goal.targetId, 256, 'browser targetId');
+  } else if (goal.kind === 'browser-download') {
+    goal.targetId = boundedText(goal.targetId, 256, 'browser download targetId');
+    if (!/^[A-Za-z0-9._:-]{1,256}$/.test(goal.targetId)) throw new OperatorError('TASK_GOAL_INVALID', 'Browser download targetId is invalid.');
+    goal.target = normalizeBrowserDownloadTarget(goal.target);
+    goal.expectedSha256 = boundedText(goal.expectedSha256, 64, 'browser download expectedSha256').toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(goal.expectedSha256)) throw new OperatorError('TASK_GOAL_INVALID', 'Browser download expectedSha256 must be an exact SHA-256 digest.');
+    if (goal.expectedSuggestedFilename !== undefined) {
+      goal.expectedSuggestedFilename = boundedText(goal.expectedSuggestedFilename, 500, 'browser download expectedSuggestedFilename');
+      if (goal.expectedSuggestedFilename.includes('\0')) throw new OperatorError('TASK_GOAL_INVALID', 'Browser download filename must not contain NUL.');
+    }
+    goal.timeoutMs = boundedInteger(goal.timeoutMs, 1_000, 600_000, 30_000);
   } else if (goal.kind === 'docker-lifecycle') {
     goal.root = path.resolve(boundedText(goal.root, 4096, 'docker root'));
     if (!['start', 'stop', 'restart'].includes(goal.operation)) throw new OperatorError('TASK_GOAL_INVALID', 'Docker lifecycle operation must be start, stop, or restart.');

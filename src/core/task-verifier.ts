@@ -305,6 +305,59 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
       ? 'A fresh browser observation proves the requested logical destination without trusting planner completion text.'
       : 'No fresh browser observation proves the requested destination and target identity.', versions(record));
   }
+  if (kind === 'browser-download') {
+    const record = lastSucceeded(records, `${prefix}download-browser-artifact`);
+    const observed = record?.observation;
+    const state = observationState(record);
+    const download = asRecord(state.download);
+    const target = asRecord(goal.target);
+    const targetKeys = Object.keys(target);
+    const allowedTargetKeys = new Set(['ref', 'role', 'name', 'text', 'css']);
+    const targetLimits: Record<string, number> = { ref: 128, role: 500, name: 500, text: 500, css: 500 };
+    const targetValid = targetKeys.length > 0 && targetKeys.every((key) => allowedTargetKeys.has(key)
+      && typeof target[key] === 'string' && (target[key] as string).length > 0
+      && (target[key] as string) === (target[key] as string).trim()
+      && (target[key] as string).length <= targetLimits[key]! && !(target[key] as string).includes('\0'));
+    const targetId = typeof goal.targetId === 'string' && /^[A-Za-z0-9._:-]{1,256}$/.test(goal.targetId) ? goal.targetId : undefined;
+    const expectedSha256 = typeof goal.expectedSha256 === 'string' && /^[0-9a-f]{64}$/.test(goal.expectedSha256)
+      ? goal.expectedSha256 : undefined;
+    const timeoutMs = goal.timeoutMs === undefined ? 30_000 : goal.timeoutMs;
+    const timeoutValid = typeof timeoutMs === 'number' && Number.isSafeInteger(timeoutMs) && timeoutMs >= 1_000 && timeoutMs <= 600_000;
+    const filenameValid = goal.expectedSuggestedFilename === undefined
+      || (typeof goal.expectedSuggestedFilename === 'string' && goal.expectedSuggestedFilename.length > 0
+        && goal.expectedSuggestedFilename.length <= 500 && !goal.expectedSuggestedFilename.includes('\0'));
+    if (!record || !targetValid || !targetId || !expectedSha256 || !timeoutValid || !filenameValid) {
+      return outcome(true, false, 'Browser download goal or its terminal action evidence is missing or malformed.', versions(record));
+    }
+    const expectedInput = { targetId, operation: 'click', target, expectDownload: true, downloadTimeoutMs: timeoutMs };
+    const expectedTargetDigest = sha256(canonicalJson({ targetId, target }));
+    const start = Date.parse(record.startedAt);
+    const finish = Date.parse(record.finishedAt ?? '');
+    const seen = observed?.schemaVersion === 2 ? Date.parse(observed.observedAt) : NaN;
+    const completed = typeof download.completedAt === 'string' ? Date.parse(download.completedAt) : NaN;
+    const expectedFilenameDigest = typeof goal.expectedSuggestedFilename === 'string' ? sha256(goal.expectedSuggestedFilename) : undefined;
+    const artifactBytes = download.artifactBytes;
+    const predicates = {
+      capability: record.capability === 'browser.interact',
+      inputHash: record.inputHash === sha256(canonicalJson(expectedInput)),
+      observation: observed?.schemaVersion === 2 && observed.capability === record.capability
+        && observed.epistemicStatus === 'KNOWN' && observed.ambiguous === false,
+      freshness: Number.isFinite(start) && Number.isFinite(finish) && Number.isFinite(seen)
+        && Number.isFinite(completed) && start <= completed && completed <= seen && seen <= finish,
+      state: download.state === 'completed',
+      artifactHash: download.artifactSha256 === expectedSha256,
+      artifactBytes: typeof artifactBytes === 'number' && Number.isSafeInteger(artifactBytes)
+        && artifactBytes >= 0 && artifactBytes <= 512 * 1024 * 1024,
+      initiatingTarget: download.initiatingTargetId === targetId,
+      actionTarget: download.actionTargetDigest === expectedTargetDigest,
+      suggestedFilename: expectedFilenameDigest === undefined || download.suggestedFilenameDigest === expectedFilenameDigest
+    };
+    const ok = Object.values(predicates).every(Boolean);
+    const failed = Object.entries(predicates).filter(([, pass]) => !pass).map(([name]) => name);
+    return outcome(true, ok, ok
+      ? 'Fresh downloaded bytes match the requested SHA-256 and are bound to the exact initiating browser action target.'
+      : `Browser download evidence does not satisfy the exact typed outcome contract: ${failed.join(', ')}.`, versions(record));
+  }
   if (kind === 'docker-lifecycle') {
     const record = lastSucceededAny(records, [`${prefix}verify-docker-project`, `${prefix}inspect-docker-project`]);
     const state = observationState(record);
