@@ -136,11 +136,33 @@ export function compareMatchedPerformance({ baseline, candidate }) {
     ...(b.uncertainReplays ? ['UNCERTAIN_REPLAY'] : [])
   ];
   const candidateNotWorse = reasons.length === 0;
+  // Render a bounded, operator-readable performance hint from aggregate stage
+  // metrics only. Never expose journey IDs or raw browser/provider records.
+  const observedStages = STAGES.filter(stage => b.stageMs[stage].observed > 0);
+  const orderedBottlenecks = observedStages.sort((left, right) =>
+    b.stageMs[right].p95 - b.stageMs[left].p95 ||
+    STAGES.indexOf(left) - STAGES.indexOf(right)
+  );
+  const slowestStage = orderedBottlenecks[0];
+  const bottleneck = slowestStage ? {
+    stage: slowestStage,
+    stageP95Ms: b.stageMs[slowestStage].p95,
+    stageObservedJourneys: b.stageMs[slowestStage].observed,
+    matchedJourneys: keys.length,
+    evidenceCoverage: STAGES.every(stage => b.stageMs[stage].missing === 0)
+      ? 'COMPLETE' : 'PARTIAL',
+    proof: 'SELF_REPORTED_STAGE_TIMINGS'
+  } : {
+    stage: null, stageP95Ms: null,
+    stageObservedJourneys: 0, matchedJourneys: keys.length,
+    evidenceCoverage: 'UNOBSERVED', proof: 'SELF_REPORTED_STAGE_TIMINGS'
+  };
   return {
     schemaVersion: 1,
     baselineSourceCommit: baseline.sourceCommit, candidateSourceCommit: candidate.sourceCommit,
     matchedRecordCount: keys.length, comparisonKeyDigest: digest(keys),
     baseline: a, candidate: b, observedCandidateNotWorse: candidateNotWorse,
+    bottleneck,
     regressionDiagnostics: {
       introducedFalseCompletionJourneys,
       introducedHumanInterventionJourneys,
