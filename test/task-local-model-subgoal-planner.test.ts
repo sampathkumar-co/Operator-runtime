@@ -385,7 +385,9 @@ test('C05 explicit loopback composer inserts only one source-bound read-only ver
   assert.equal((state.durablePlan as typeof plan).revision, 2);
   const inserted = (state.durablePlan as typeof plan).subgoals.filter(s => s.key.startsWith('dynamic-checkpoint:'));
   assert.equal(inserted.length, 1);
-  assert.deepEqual(inserted[0]!.execution.action, plan.subgoals[0]!.successContract);
+  assert.equal(inserted[0]!.execution.action.capability, 'project.inspect');
+  assert.deepEqual(inserted[0]!.execution.action.input, {});
+  assert.deepEqual(inserted[0]!.successContract.assertions, plan.subgoals[0]!.successContract.assertions);
   assert.equal(decision.type, 'step');
   if (decision.type === 'step') {
     assert.equal(decision.key, 'autonomous:3:observe');
