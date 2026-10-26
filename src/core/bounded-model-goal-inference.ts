@@ -57,6 +57,27 @@ function requiredText(value: unknown, limit: number, label: string): string {
   return value;
 }
 
+/**
+ * Consent is a source-time value, not a mutable object retained while a model
+ * call is in flight. Read exact, inert array slots once before spend reservation
+ * and bind both the outgoing prompt and returned proposal to the same copy.
+ */
+function exactScopeStrings(input: unknown, max: number, label: string): string[] {
+  if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype ||
+      input.length > max || Reflect.ownKeys(input).length !== input.length + 1) {
+    refused('TASK_MODEL_INFERENCE_INVALID', label + ' must be a bounded dense array.');
+  }
+  const copy: string[] = [];
+  for (let i = 0; i < input.length; i += 1) {
+    const desc = Object.getOwnPropertyDescriptor(input, String(i));
+    if (!desc || !desc.enumerable || !('value' in desc) || typeof desc.value !== 'string') {
+      refused('TASK_MODEL_INFERENCE_INVALID', label + ' contains an untrusted entry.');
+    }
+    copy.push(desc.value);
+  }
+  return copy;
+}
+
 export class BoundedModelGoalInference {
   readonly #generator: ModelGoalGenerator;
   readonly #ledger: ModelCallBudgetLedger;
@@ -104,14 +125,31 @@ export class BoundedModelGoalInference {
 
     // The privacy-scoped prompt contains only the stated objective and explicitly
     // authorized roots/origins. Never append secret-bearing observations or file data.
-    const scope = request.scope;
-    if (!scope || !Array.isArray(scope.approvedRoots) ||
-        !Array.isArray(scope.approvedBrowserOrigins) ||
-        scope.approvedRoots.length + scope.approvedBrowserOrigins.length === 0 ||
-        scope.approvedRoots.length > 12 || scope.approvedBrowserOrigins.length > 12) {
+    const suppliedScope = request.scope;
+    if (!suppliedScope || typeof suppliedScope !== 'object' || Array.isArray(suppliedScope)) {
       refused('TASK_MODEL_INFERENCE_INVALID', 'Explicit bounded approved resource scope required.');
     }
-    requiredText(scope.objective, 4096, 'objective');
+    const scopeDescriptors = Object.getOwnPropertyDescriptors(suppliedScope);
+    for (const key of ['objective', 'approvedRoots', 'approvedBrowserOrigins']) {
+      const desc = scopeDescriptors[key];
+      if (!desc || !desc.enumerable || !('value' in desc)) {
+        refused('TASK_MODEL_INFERENCE_INVALID', 'Model scope must contain inert consent fields.');
+      }
+    }
+    if (Reflect.ownKeys(suppliedScope).some(key =>
+        typeof key !== 'string' || !['objective', 'approvedRoots', 'approvedBrowserOrigins'].includes(key))) {
+      refused('TASK_MODEL_INFERENCE_INVALID', 'Model scope contains unsupported authority fields.');
+    }
+    const objective = requiredText(scopeDescriptors.objective!.value, 4096, 'objective');
+    const approvedRoots = exactScopeStrings(scopeDescriptors.approvedRoots!.value, 12, 'approvedRoots');
+    const approvedBrowserOrigins = exactScopeStrings(scopeDescriptors.approvedBrowserOrigins!.value, 12, 'approvedBrowserOrigins');
+    if (approvedRoots.length + approvedBrowserOrigins.length === 0) {
+      refused('TASK_MODEL_INFERENCE_INVALID', 'Explicit bounded approved resource scope required.');
+    }
+    // This copy is never returned to the caller or model provider. A caller
+    // mutating its original arrays after the request begins cannot expand
+    // preflight authorization after an asynchronous model response.
+    const scope: ModelGoalProposalRequest = { objective, approvedRoots, approvedBrowserOrigins };
     for (const root of scope.approvedRoots) {
       if (typeof root !== 'string' || root.length > 4096 || root.includes('\0') ||
           !path.isAbsolute(root)) {
