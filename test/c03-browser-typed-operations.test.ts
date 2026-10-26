@@ -53,8 +53,9 @@ test('C03 rejects malformed browser operations before contacting any CDP endpoin
     { capability:'browser.interact', input:{targetId:'tab1',operation:'select_text_range',target:{ref:'b-1'},start:2,end:1}, error:'INVALID_BROWSER_TEXT_RANGE' },
     { capability:'browser.interact', input:{targetId:'tab1',operation:'select_text_range',target:{ref:'b-1'},start:0,end:Infinity}, error:'INVALID_BROWSER_TEXT_RANGE' },
     { capability:'browser.interact', input:{targetId:'tab1',operation:'click',target:{ref:'b-1'},expectDownload:['true']}, error:'INVALID_DOWNLOAD_INTERACTION' },
-    { capability:'browser.interact', input:{targetId:'tab1',operation:'click',target:{ref:'b-1'},expectDownload:true,downloadTimeoutMs:'30000'}, error:'INVALID_DOWNLOAD_TIMEOUT' },
-    { capability:'browser.interact', input:{targetId:'tab1',operation:'click',target:{ref:'b-1'},expectDownload:true,downloadTimeoutMs:[30000]}, error:'INVALID_DOWNLOAD_TIMEOUT' }
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'click',target:{ref:'b-1'},expectDownload:true}, error:'BROWSER_DOWNLOAD_ORIGIN_DENIED' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'click',target:{ref:'b-1'},expectDownload:true,expectedOrigin:'https://example.test',downloadTimeoutMs:'30000'}, error:'INVALID_DOWNLOAD_TIMEOUT' },
+    { capability:'browser.interact', input:{targetId:'tab1',operation:'click',target:{ref:'b-1'},expectDownload:true,expectedOrigin:'https://example.test',downloadTimeoutMs:[30000]}, error:'INVALID_DOWNLOAD_TIMEOUT' }
   ];
   try {
     for (const [index, entry] of cases.entries()) {
