@@ -66,6 +66,17 @@ test('C00 inventory never walks protected state, parent paths or symlink targets
     ...base,relativePaths:['src/alias.js']
   }),/C00_LOCAL_PROVENANCE_INVALID/);
 });
+
+test('C00 cannot coerce a caller object into a provenance HMAC key',async t=>{
+  const root=await fixture(t);
+  let conversions=0;
+  const forged={toString(){conversions++;return 'a'.repeat(64);}};
+  await assert.rejects(inspectExplicitLocalSourceProvenance({
+    root,relativePaths:['src/known.ts'],referenceDigests:{},hmacKey:forged
+  }),/C00_LOCAL_PROVENANCE_INVALID/);
+  assert.equal(conversions,0,'source inventory must not execute token conversion');
+});
+
 test('C00 without independent source reference never declares a unique recovered controller',async t=>{
   const root=await fixture(t);
   const response=await inspectExplicitLocalSourceProvenance({
