@@ -42,7 +42,7 @@ export function validateFrozen125CampaignManifest(input) {
   const dataset = requireInertEvaluationObject(input.dataset, invalid, 'dataset',
     ['name','revision','taskIds','fixtureBuildDigest','independentOracleDigest']);
   name(dataset.name,'dataset name');
-  if (!COMMIT.test(dataset.revision ?? '')) invalid('dataset revision must be a Git commit');
+  if (typeof dataset.revision !== 'string' || !COMMIT.test(dataset.revision)) invalid('dataset revision must be a Git commit');
   hash(dataset.fixtureBuildDigest,'fixture build');
   hash(dataset.independentOracleDigest,'independent scorer definition');
   requireDenseEvaluationArray(dataset.taskIds,125,125,invalid,'all 125 task identities');
