@@ -155,3 +155,46 @@ test('C07 the latest successfully observed initial value is the only no-op evide
   }));
   assert.equal(verifyGoalOutcomeTruth(task).ok, true);
 });
+
+
+test('C04/C07 UIA outcome proof refuses coercible operations, values and selectors', () => {
+  let conversions = 0;
+  const impostor = {
+    toString() { conversions++; return 'editor'; },
+    valueOf() { conversions++; return 42; }
+  };
+  const badGoals: Array<(goal: Record<string, unknown>) => void> = [
+    goal => { goal.operation = { toString() { conversions++; return 'set_value'; } }; },
+    goal => { goal.value = { toString() { conversions++; return 'ready'; } }; },
+    goal => { goal.selector = { automationId: impostor }; },
+    goal => { goal.selector = { automationId: 'editor', processId: '42' }; },
+    goal => { goal.selector = { automationId: 'editor', unknownKey: 'ignored' }; },
+    goal => { goal.selector = { automationId: 'editor', processId: impostor }; },
+    goal => { const selector: Record<string, unknown> = {};
+      Object.defineProperty(selector, 'automationId', {
+        enumerable: true, get() { conversions++; return 'editor'; }
+      }); goal.selector = selector; }
+  ];
+  for (const [index, mutate] of badGoals.entries()) {
+    const task = fixture();
+    mutate(task.execution!.plannerState.goal as Record<string, unknown>);
+    assert.equal(verifyGoalOutcomeTruth(task).ok, false, 'invalid UIA goal ' + index);
+  }
+  assert.equal(conversions, 0, 'verification never invokes caller conversion hooks or selector accessors');
+});
+
+test('C04/C07 numeric UIA process ownership is exact and never string-coerced', () => {
+  const task = fixture();
+  const goal = task.execution!.plannerState.goal as Record<string, unknown>;
+  goal.selector = { automationId: 'editor', processId: 42 };
+  const read = task.execution!.records[0]!.observation;
+  if (read?.schemaVersion !== 2) throw Error('expected typed UIA observation');
+  read.importantState = { uiaElements: [{
+    automationIdHash: digest('editor'), valueHash: digest('ready'), processId: 42
+  }] };
+  assert.equal(verifyGoalOutcomeTruth(task).ok, true, 'exact numeric process identity remains valid');
+  read.importantState = { uiaElements: [{
+    automationIdHash: digest('editor'), valueHash: digest('ready'), processId: '42'
+  }] };
+  assert.equal(verifyGoalOutcomeTruth(task).ok, false, 'string-coerced observed process cannot attest exact identity');
+});
