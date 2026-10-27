@@ -13,3 +13,4 @@ No authentication endpoint or website approval button, no browser/WebAuthn verif
 
 ## Verification
 Synthetic tests cover duplicate/mismatched histories, dispatched uncertainty, privacy, bounded local receipts, immutable durable files, and invalid input refusal. Real original-device validation, cross-process concurrent snapshot testing and physical release acceptance are **NOT_RUN**.
+Privacy hardening: the `actionId` display field is **not** the original caller-controlled action ID. It is a process-local HMAC-SHA256 display reference with a random secret, preventing path-like or credential-shaped IDs from leaking or being cheaply guessed. It deliberately cannot serve as a replay/approval lookup token and is not stable after a server restart. Receipt/journal correlation uses the unchanged exact underlying ID only in memory. The display timestamp is normalized to strict UTC ISO 8601 before returning. Original action identity is never emitted.
