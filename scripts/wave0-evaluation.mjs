@@ -41,6 +41,7 @@ function safeSum(records, label) {
   }, 0);
 }
 export function validateWave0Record(record, sourceCommit) {
+  requireInertEvaluationObject(record, fail, 'run receipt');
   if (!record || typeof record !== 'object' || Array.isArray(record)) fail('record must be an object');
   const lane = record.lane;
   if (!LANES.includes(lane)) fail('unknown lane');
