@@ -587,7 +587,7 @@ test('C06 developer process port declarations reject coercion before any session
   };
   const badPorts: unknown[] = [
     ['8080'], [[8080]], [true], [attacker], [new Number(8080)],
-    [1.5], [0], [65536], [Number.NaN], [Infinity],
+    [1.5], [0], [65536], [Number.NaN], [Infinity], Array(1),
     Array.from({ length: 129 }, () => 8080), '8080'
   ];
   for (const [index, ports] of badPorts.entries()) {
