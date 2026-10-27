@@ -5,10 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { writeDurableStateText, readDurableStateText } from '../src/core/durable-state.ts';
+import { withDurableStateLock } from '../src/core/durable-state-lock.ts';
 import { createMultiFileEditPlan, applyMultiFileEditPlan } from '../src/core/multi-file-edit-plan.ts';
 import {
   WorkspaceEditTransactionProvider,
   workspaceEditTransactionJournalPath,
+  workspaceEditTransactionCoordinatorPath,
   type WorkspaceEditTransactionRecord
 } from '../src/capabilities/workspace-edit-transaction.ts';
 import type { ActionRequest } from '../src/core/types.ts';
@@ -473,4 +475,99 @@ test('R3 rejects forged pending-verifier records without durable pre-dispatch ve
   await assert.rejects(()=>tx.finalizeDeferred(a),
     (e:any)=>e?.code==='WORKSPACE_EDIT_TRANSACTION_CORRUPT');
   assert.equal((await tx.reconcile({action:a})).status,'uncertain');
+});
+
+
+test('C06/C08 distinct provider instances serialize competing edits under one durable-state coordinator', async t => {
+  const { root, stateDir } = await fixture(t);
+  const before = 'const serial = 1;\n';
+  const target = path.join(root, 'serial.ts');
+  await fs.writeFile(target, before);
+  const providers = [0, 1].map(() => new WorkspaceEditTransactionProvider({
+    allowedRoots: [root], stateDir, windowsPathLeaseExecutable: WINDOWS_PATH_LEASE_EXECUTABLE
+  }));
+  const edit = (value: string) => createMultiFileEditPlan({ files: [{
+    path: 'serial.ts', expectedSha256: digest(before),
+    edits: [{ start: before.indexOf('1'), end: before.indexOf('1') + 1, replacement: value }]
+  }] });
+  const results = await Promise.all([
+    providers[0]!.execute(action('concurrent-a', root, edit('2'))),
+    providers[1]!.execute(action('concurrent-b', root, edit('3')))
+  ]);
+  assert.equal(results.filter(result => result.ok).length, 1,
+    'exactly one competing edit may consume the original file generation');
+  const denied = results.find(result => !result.ok)!;
+  assert.equal(denied.error?.sideEffectState, 'none', 'loser must be refused before mutation');
+  const winningValue = results[0]!.ok ? '2' : '3';
+  assert.equal(await fs.readFile(target, 'utf8'), 'const serial = ' + winningValue + ';\n');
+  assert.deepEqual((await fs.readdir(root)).filter(name => name.includes('.operator-edit-')), []);
+});
+
+test('C06/C08 a held coordinator lock fences editing before its first journal write', async t => {
+  const { root, stateDir } = await fixture(t);
+  const initial = 'const guarded = 1;\n';
+  const target = path.join(root, 'guarded.ts');
+  await fs.writeFile(target, initial);
+  const plan = createMultiFileEditPlan({ files: [{
+    path: 'guarded.ts', expectedSha256: digest(initial),
+    edits: [{ start: initial.indexOf('1'), end: initial.indexOf('1') + 1, replacement: '2' }]
+  }] });
+  const a = action('locked-edit', root, plan);
+  const provider = new WorkspaceEditTransactionProvider({
+    allowedRoots: [root], stateDir, windowsPathLeaseExecutable: WINDOWS_PATH_LEASE_EXECUTABLE
+  });
+  let release!: () => void;
+  let acquired!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const entered = new Promise<void>(resolve => { acquired = resolve; });
+  const owner = withDurableStateLock(workspaceEditTransactionCoordinatorPath(stateDir), async () => {
+    acquired();
+    await gate;
+  });
+  await entered;
+  const pending = provider.execute(a);
+  try {
+    const settledEarly = await Promise.race([
+      pending.then(() => true),
+      new Promise<false>(resolve => setTimeout(() => resolve(false), 75))
+    ]);
+    assert.equal(settledEarly, false, 'an independently owned lock must block edits');
+    await assert.rejects(fs.access(workspaceEditTransactionJournalPath(stateDir, a.id)));
+    assert.equal(await fs.readFile(target, 'utf8'), initial);
+  } finally {
+    release();
+    await owner;
+  }
+  const result = await pending;
+  assert.equal(result.ok, true, result.error?.message);
+  assert.equal(await fs.readFile(target, 'utf8'), 'const guarded = 2;\n');
+});
+
+
+test('C06/C08 unknown coordinator ownership rejects edits before dispatch and reconciles uncertain', async t => {
+  const { root, stateDir } = await fixture(t);
+  const initial = 'const fenced = 1;\n';
+  await fs.writeFile(path.join(root, 'fenced.ts'), initial);
+  const plan = createMultiFileEditPlan({ files: [{
+    path: 'fenced.ts', expectedSha256: digest(initial),
+    edits: [{ start: initial.indexOf('1'), end: initial.indexOf('1') + 1, replacement: '2' }]
+  }] });
+  const a = action('unknown-coordinator', root, plan);
+  const provider = new WorkspaceEditTransactionProvider({
+    allowedRoots: [root], stateDir, windowsPathLeaseExecutable: WINDOWS_PATH_LEASE_EXECUTABLE
+  });
+  const lock = workspaceEditTransactionCoordinatorPath(stateDir) + '.lock';
+  await fs.mkdir(path.dirname(lock), { recursive: true });
+  await fs.writeFile(lock, 'unknown-owner');
+  const result = await provider.execute(a);
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'WORKSPACE_EDIT_COORDINATOR_UNAVAILABLE');
+  assert.equal(result.error?.executionPhase, 'pre_dispatch');
+  assert.equal(result.error?.sideEffectState, 'none');
+  assert.equal(await fs.readFile(path.join(root, 'fenced.ts'), 'utf8'), initial);
+  await assert.rejects(fs.access(workspaceEditTransactionJournalPath(stateDir, a.id)));
+  const recovered = await provider.reconcile({ action: a });
+  assert.equal(recovered.status, 'uncertain');
+  assert.equal(await fs.readFile(path.join(root, 'fenced.ts'), 'utf8'), initial);
+  await fs.rm(lock);
 });
