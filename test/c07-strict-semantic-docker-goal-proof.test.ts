@@ -91,3 +91,52 @@ test('C07 built-in semantic planner cannot mark an unknown or type-confused goal
       check.name === 'typed-goal-outcome-truth')?.ok, false);
   }
 });
+
+
+test('C07 file-change Git evidence requires inert literal path hashes rather than caller coercion', () => {
+  const task = fixture();
+  task.execution!.plannerState.goal = {
+    kind: 'controlled-file-change', root: '/fixture', path: '/fixture/a.ts', content: 'exact bytes'
+  };
+  const original = task.execution!.records[0]!;
+  const observed = original.observation;
+  if (observed?.schemaVersion !== 2) throw Error('Fixture needs a v2 observation');
+  const makeRecord = (stepKey: string, capability: string, domain: 'filesystem' | 'git',
+    importantState: Record<string, unknown>) => ({
+    ...original,
+    stepKey,
+    actionId: stepKey,
+    capability,
+    observation: {
+      ...observed, domain, capability, entityId: domain + ':fixture', importantState
+    }
+  });
+  const expectedGitHash = digest('a.ts');
+  task.execution!.records = [
+    makeRecord('verify-file', 'file.info', 'filesystem', { sha256: digest('exact bytes') }),
+    makeRecord('inspect-git', 'git.status', 'git', { gitPathHashes: [expectedGitHash] })
+  ];
+  assert.equal(verifyGoalOutcomeTruth(task).ok, true, 'legitimate literal proof stays accepted');
+
+  let invoked = 0;
+  const forged = { toString() { invoked++; return expectedGitHash; } };
+  const gitObservation = task.execution!.records[1]!.observation;
+  if (gitObservation?.schemaVersion !== 2) throw Error('Fixture lost its v2 observation');
+  gitObservation.importantState = { gitPathHashes: [forged] };
+  assert.equal(verifyGoalOutcomeTruth(task).ok, false,
+    'a coerced attacker object is not Git proof');
+  assert.equal(invoked, 0, 'verifier must never execute untrusted conversion hooks');
+
+  const getterArray: unknown[] = [];
+  Object.defineProperty(getterArray, '0', {
+    enumerable: true, get() { invoked++; return expectedGitHash; }
+  });
+  getterArray.length = 1;
+  gitObservation.importantState = { gitPathHashes: getterArray };
+  assert.equal(verifyGoalOutcomeTruth(task).ok, false,
+    'getter-backed digest observations are not inert machine evidence');
+  assert.equal(invoked, 0, 'verifier must inspect own data descriptors, not execute getters');
+
+  gitObservation.importantState = { gitPathHashes: [expectedGitHash.toUpperCase()] };
+  assert.equal(verifyGoalOutcomeTruth(task).ok, false, 'digest casing must match machine proof contract');
+});
