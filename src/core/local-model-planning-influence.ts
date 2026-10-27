@@ -29,11 +29,41 @@ function influence(digest: string, command: TaskPlanningInfluence['command'],
   effect: TaskPlanningInfluence['effect'], reason: string): TaskPlanningInfluence {
   return { proposalDigest: digest, command, effect, reason, grantsAuthority: false, runtimeVetoRequired: true };
 }
-function lastEvent(events: TaskPlannerEvent[]): { kind: PlannerEventKind; decision: SupportedDecision } | undefined {
-  if (!Array.isArray(events) || events.length > 100) invalid('Runtime event history is unbounded.');
-  const event = events.at(-1);
-  if (!event || !EVENT_KINDS.has(event.kind) || !DECISIONS.has(event.decision)) return undefined;
-  return { kind: event.kind, decision: event.decision as SupportedDecision };
+function lastEvent(events: TaskPlannerEvent[]): { kind: PlannerEventKind; decision: SupportedDecision; at: string } | undefined {
+  // Optional advisor input remains untrusted until canonical event ownership
+  // is checked. Array.at() and event getters may execute injected code.
+  if (!Array.isArray(events) || events.length > 100 ||
+      Object.getPrototypeOf(events) !== Array.prototype ||
+      Reflect.ownKeys(events).length !== events.length + 1) {
+    invalid('Runtime advisor event history must be a bounded dense plain array.');
+  }
+  if (events.length === 0) return undefined;
+  const slot = Object.getOwnPropertyDescriptor(events, String(events.length - 1));
+  if (!slot || !slot.enumerable || !('value' in slot)) {
+    invalid('Runtime advisor event is missing or accessor-backed.');
+  }
+  const raw = slot.value as unknown;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) ||
+      (Object.getPrototypeOf(raw) !== Object.prototype &&
+       Object.getPrototypeOf(raw) !== null)) {
+    invalid('Runtime advisor event is not inert data.');
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(raw);
+  const read = (field: 'kind' | 'decision' | 'at'): unknown => {
+    const descriptor = descriptors[field];
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+      invalid('Runtime advisor event has an executable or missing required field.');
+    }
+    return descriptor.value;
+  };
+  const kind = read('kind') as PlannerEventKind;
+  const decision = read('decision') as PlannerEventDecision;
+  const at = read('at');
+  if (!EVENT_KINDS.has(kind) || !DECISIONS.has(decision)) return undefined;
+  if (typeof at !== 'string' || at.length > 64 || !Number.isFinite(Date.parse(at))) {
+    return undefined;
+  }
+  return { kind, decision: decision as SupportedDecision, at };
 }
 function parseAdvice(text: string): ModelCommand {
   let decoded: unknown;
@@ -85,7 +115,7 @@ export class LoopbackOllamaPlanningInfluence implements TaskPlanningInfluencePro
         event.decision !== 'WAIT' && event.decision !== 'FAIL') return undefined;
 
     const previous = request.task.execution?.records.at(-1);
-    const lastAt = request.recentEvents.at(-1)?.at;
+    const lastAt = event.at;
     if (previous?.state === 'SUCCEEDED' && typeof previous.finishedAt === 'string' &&
         typeof lastAt === 'string' &&
         Number.isFinite(Date.parse(previous.finishedAt)) && Number.isFinite(Date.parse(lastAt)) &&

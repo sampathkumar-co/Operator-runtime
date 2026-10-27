@@ -280,3 +280,50 @@ test('C05 valid one-hour task context does not invalidate an eight-second adviso
   const input = request('WAIT', { timeout: 60 * 60_000 });
   assert.equal(await advisor.review(input), undefined);
 });
+
+
+test('C05/C08 advisor rejects executable and sparse event envelopes without inference', async () => {
+  let modelCalls = 0;
+  let reservations = 0;
+  let conversions = 0;
+  const advisor = new LoopbackOllamaPlanningInfluence({
+    model: 'local-test:latest',
+    fetchFn: fakeFetch({ command: 'REOBSERVE' }, () => { modelCalls++; })
+  });
+  const attacks: Array<(input: TaskPlanningInfluenceRequest) => void> = [
+    input => { input.recentEvents = Array(1) as TaskPlannerEvent[]; },
+    input => { const source = input.recentEvents[0]!;
+      const poisoned: TaskPlannerEvent[] = [];
+      Object.defineProperty(poisoned, '0', {
+        enumerable: true, get() { conversions++; return source; }
+      });
+      poisoned.length = 1;
+      input.recentEvents = poisoned;
+    },
+    input => { Object.defineProperty(input.recentEvents[0]!, 'kind', {
+      enumerable: true, get() { conversions++; return 'STALE_TARGET'; }
+    }); },
+    input => { Object.defineProperty(input.recentEvents[0]!, 'decision', {
+      enumerable: true, get() { conversions++; return 'REOBSERVE'; }
+    }); },
+    input => { Object.defineProperty(input.recentEvents[0]!, 'at', {
+      enumerable: true, get() { conversions++; return new Date().toISOString(); }
+    }); },
+    input => { (input.recentEvents as any).at = () => {
+      conversions++; return input.recentEvents[0]; }; }
+  ];
+  for (const mutate of attacks) {
+    const req = request('REOBSERVE');
+    req.reserveModelBudget = async () => { reservations++; };
+    mutate(req);
+    await assert.rejects(advisor.review(req), (error: any) =>
+      error?.code === 'TASK_MODEL_INFLUENCE_INVALID');
+  }
+  const malformed = request('REOBSERVE');
+  malformed.reserveModelBudget = async () => { reservations++; };
+  malformed.recentEvents[0]!.at = 'invalid-date';
+  assert.equal(await advisor.review(malformed), undefined);
+  assert.equal(conversions, 0, 'no hostile array or event accessors may execute');
+  assert.equal(modelCalls, 0, 'no inference from malformed event envelopes');
+  assert.equal(reservations, 0, 'no model spend reservations from malformed events');
+});
