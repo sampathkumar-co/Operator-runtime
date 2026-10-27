@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createMultiFileEditPlan } from '../src/core/multi-file-edit-plan.ts';
-import { WorkspaceEditTransactionProvider } from '../src/capabilities/workspace-edit-transaction.ts';
+import { WorkspaceEditTransactionProvider, workspaceEditTransactionJournalPath } from '../src/capabilities/workspace-edit-transaction.ts';
+import { readDurableStateText, writeDurableStateText } from '../src/core/durable-state.ts';
 import { VerifiedWorkspaceEditProvider } from '../src/capabilities/verified-workspace-edit.ts';
 import type { ActionRequest } from '../src/core/types.ts';
 
@@ -301,4 +302,68 @@ test('R3 held bytes changed before resume remain uncertain and never trigger ano
   assert.equal(result.error?.sideEffectState,'uncertain');
   assert.equal(await fs.readFile(path.join(root,'safe.ts'),'utf8'),'export const safe = 999;\n');
   assert.equal((await provider.reconcile({action:a})).status,'uncertain');
+});
+
+
+test('R3 a rollback-required verifier fence cannot be auto-committed from post-edit hashes', async t => {
+  const {root,stateDir,registryPath}=await fixture(t);
+  const original='export const locked = 1;\n';
+  await fs.writeFile(path.join(root,'locked.ts'),original);
+  await writeRegistry(registryPath,root,[{
+    id:'verify-rollback',kind:'test',executable:'node',args:['-e','process.exit(0)'],cwd:'.',risk:'read'
+  }]);
+  const plan=createMultiFileEditPlan({
+    files:[{path:'locked.ts',expectedSha256:digest(original),
+      edits:[{start:original.indexOf('1'),end:original.indexOf('1')+1,replacement:'2'}]}],
+    verification:{trustedCommandIds:['verify-rollback']}
+  });
+  const action=verifiedAction('rollback-window',root,plan);
+  const internal:ActionRequest={
+    id:action.id+':edit',capability:'workspace.edit.transaction',risk:'write',
+    input:{workspaceRoot:root,plan},provenance:{kind:'trusted_policy',source:action.id}
+  };
+  const tx=new WorkspaceEditTransactionProvider({allowedRoots:[root],stateDir});
+  assert.equal((await tx.executeDeferred(internal)).ok,true);
+  const journalPath=workspaceEditTransactionJournalPath(stateDir,internal.id);
+  const options={maxBytes:4*1024*1024,errorCode:'WORKSPACE_EDIT_TRANSACTION_CORRUPT',
+    invalidMessage:'Workspace edit transaction journal is invalid.'} as const;
+  const journal=JSON.parse(await readDurableStateText(journalPath,options));
+  assert.equal(journal.requiresVerification,true);
+  await writeDurableStateText(journalPath,JSON.stringify({...journal,phase:'ROLLBACK_REQUIRED'}),options);
+  assert.equal((await tx.reconcile({action:internal})).status,'uncertain');
+  const verifier=new VerifiedWorkspaceEditProvider({
+    allowedRoots:[root],allowedExecutables:['node'],stateDir,registryPath
+  });
+  assert.equal((await verifier.reconcile({action})).status,'uncertain');
+  assert.equal(await fs.readFile(path.join(root,'locked.ts'),'utf8'),'export const locked = 2;\n');
+  const persisted=JSON.parse(await readDurableStateText(journalPath,options));
+  assert.equal(persisted.phase,'ROLLBACK_REQUIRED','recovery must not convert failed verification into commit');
+  assert.equal((await fs.stat(journal.files[0].backupPath)).isFile(),true);
+});
+
+test('R3 retry of a verified committed edit returns durable success without rerunning verifiers', async t => {
+  const {root,stateDir,registryPath}=await fixture(t);
+  const original='export const idempotent = 1;\n';
+  await fs.writeFile(path.join(root,'idempotent.ts'),original);
+  const registered=(exitCode:number)=>[{
+    id:'verify-idempotent',kind:'test',executable:'node',
+    args:['-e',`process.exit(${exitCode})`],cwd:'.',risk:'read'
+  }];
+  await writeRegistry(registryPath,root,registered(0));
+  const plan=createMultiFileEditPlan({
+    files:[{path:'idempotent.ts',expectedSha256:digest(original),
+      edits:[{start:original.indexOf('1'),end:original.indexOf('1')+1,replacement:'2'}]}],
+    verification:{trustedCommandIds:['verify-idempotent']}
+  });
+  const action=verifiedAction('verified-idempotent',root,plan);
+  const first=new VerifiedWorkspaceEditProvider({allowedRoots:[root],allowedExecutables:['node'],stateDir,registryPath});
+  assert.equal((await first.execute(action)).ok,true);
+  // The command would now fail if replayed. Exact prior completion should
+  // return its own durable result instead of executing the new command.
+  await writeRegistry(registryPath,root,registered(9));
+  const restarted=new VerifiedWorkspaceEditProvider({allowedRoots:[root],allowedExecutables:['node'],stateDir,registryPath});
+  const retry=await restarted.execute(action);
+  assert.equal(retry.ok,true,retry.error?.message);
+  assert.equal((retry.output as any).alreadyCompleted,true);
+  assert.equal(await fs.readFile(path.join(root,'idempotent.ts'),'utf8'),'export const idempotent = 2;\n');
 });
