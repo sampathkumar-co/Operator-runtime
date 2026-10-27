@@ -228,3 +228,25 @@ test('C11 telemetry does not widen abort or mismatched delivery wait authority',
   assert.equal(recorder.snapshot()[0]?.result, 'failed', 'unfulfilled wait must not be reported as success');
   assert.equal((await store.get(deviceId, 1))?.deliveryId, deliveryId);
 });
+
+
+test('C08/C09 shared relay-result namespace rejects nonliteral values without conversion', async t => {
+  const stateDir = await temp(t);
+  let invoked = 0;
+  const forged = {
+    toString() { invoked++; return 'relay-result-streams'; },
+    valueOf() { invoked++; return 'relay-result-streams'; }
+  };
+  for (const sharedNamespace of [
+    ['relay-result-streams'], forged, 42, true, '', '__epoch',
+    'relay-result-streams?bad'
+  ]) {
+    assert.throws(
+      () => new RelayResultStore(stateDir, { sharedNamespace } as any),
+      (error: any) => error?.code === 'RELAY_RESULT_SHARED_NAMESPACE_INVALID'
+    );
+  }
+  assert.equal(invoked, 0, 'the shared-state boundary may never execute caller coercion hooks');
+  assert.ok(new RelayResultStore(stateDir));
+  assert.ok(new RelayResultStore(stateDir, { sharedNamespace: 'relay-result-streams/devices' }));
+});
