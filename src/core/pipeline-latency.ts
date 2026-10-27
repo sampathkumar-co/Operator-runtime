@@ -2,6 +2,10 @@ import crypto from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { performance } from 'node:perf_hooks';
 
+// Per-process secret prevents dictionary recovery of low-entropy task references.
+// Cross-host correlation is deliberately not inferred from these local spans.
+const TRACE_KEY = crypto.randomBytes(32);
+
 export const PIPELINE_STAGES = [
   'hosted.ingress_auth', 'hosted.validation_serialization', 'relay.queue',
   'relay.queue_wait', 'relay.result_wait', 'relay.dispatch', 'relay.network_to_device',
@@ -39,7 +43,7 @@ export function opaqueTraceId(value: string): string {
   if (typeof value !== 'string' || !value || Buffer.byteLength(value, 'utf8') > 512) {
     throw new Error('Pipeline trace correlation identifier must be a bounded string.');
   }
-  return crypto.createHash('sha256').update('mecord.pipeline.v1\0').update(value).digest('hex');
+  return crypto.createHmac('sha256', TRACE_KEY).update('mecord.pipeline.v1\0').update(value).digest('hex');
 }
 function capacity(raw: number): number {
   if (!Number.isSafeInteger(raw) || raw < 1 || raw > 8192) {
