@@ -238,7 +238,7 @@ test('C08/C09 shared relay-result namespace rejects nonliteral values without co
     valueOf() { invoked++; return 'relay-result-streams'; }
   };
   for (const sharedNamespace of [
-    ['relay-result-streams'], forged, 42, true, '', '__epoch',
+    ['relay-result-streams'], forged, null, 42, true, '', '__epoch',
     'relay-result-streams?bad'
   ]) {
     assert.throws(
