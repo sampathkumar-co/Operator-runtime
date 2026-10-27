@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import test from 'node:test';
 import {
@@ -6,6 +7,7 @@ import {
   validateDeveloperChangeQualificationPlan
 } from '../src/core/developer-change-qualification.ts';
 import { createMultiFileEditPlan } from '../src/core/multi-file-edit-plan.ts';
+import { canonicalJson } from '../src/core/action-identity.ts';
 import type { ActionResult } from '../src/core/types.ts';
 
 function editPlan(options: {
@@ -253,4 +255,28 @@ test('C06 hidden scope metadata and sparse qualification arrays cannot validate'
   Reflect.deleteProperty(sparse.steps, '0');
   assert.throws(() => validateDeveloperChangeQualificationPlan(sparse),
     (error: any) => error?.code === 'DEVELOPER_QUALIFICATION_PLAN_INVALID');
+});
+
+test('C06 recomputing digest cannot certify missing verifiers, missing tests or false reindex contract', () => {
+  const baseline = createDeveloperChangeQualificationPlan({
+    editPlan: editPlan(), trustedCommandInspection: inspection(standardCommands)
+  });
+  const rehash = (plan: typeof baseline) => {
+    const { id: _id, ...identity } = plan;
+    return crypto.createHash('sha256').update(canonicalJson(identity), 'utf8').digest('hex');
+  };
+  const forge = (mutate: (plan: typeof baseline) => void) => {
+    const plan = structuredClone(baseline);
+    mutate(plan);
+    plan.steps.forEach((step, index) => { step.order = index + 1; });
+    plan.id = rehash(plan);
+    assert.throws(() => validateDeveloperChangeQualificationPlan(plan),
+      (error: any) => error?.code === 'DEVELOPER_QUALIFICATION_PLAN_INVALID');
+  };
+  forge(p => {
+    p.steps = p.steps.filter(step => step.kind === 'format');
+    p.requiredTestPaths = [];
+  });
+  forge(p => { p.steps = p.steps.filter(step => step.kind !== 'test'); });
+  forge(p => { p.reindexAfterFormatting = false; });
 });
