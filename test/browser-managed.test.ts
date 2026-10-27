@@ -448,11 +448,9 @@ test('C03 canonical protected-root check rejects a symlink alias to existing use
   }
   await assert.rejects(assertDedicatedResolvedProfileRoots(profile, [alias]),
     (e: any) => e?.code === 'BROWSER_DEDICATED_PROFILE_FORBIDDEN');
-  await assert.doesNotReject(assertDedicatedResolvedProfileRoots(
-    path.join(parent, 'safe-target'), [alias]).catch((e: any) => {
-    // The safe target does not exist: this must not be falsely certified.
-    if (e?.code !== 'ENOENT') throw e;
-  }));
+  const safe = path.join(parent, 'safe-target');
+  await fs.mkdir(safe);
+  await assert.doesNotReject(assertDedicatedResolvedProfileRoots(safe, [alias]));
 });
 
 test('C03 dedicated browser refuses dispatch after emergency Stop and close', async (t) => {
