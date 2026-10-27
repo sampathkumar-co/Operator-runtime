@@ -429,6 +429,29 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
     const allAfter = states.every((item) =>
       item.target.kind === 'regular' && item.target.sha256 === item.file.afterSha256
     );
+    const allBefore = states.every((item) =>
+      item.target.kind === 'regular' && item.target.sha256 === item.file.beforeSha256
+    );
+    // Terminal journal phases cannot be interpreted as new transaction
+    // authority when external writers replace matching target bytes later.
+    if (record.phase === 'ROLLED_BACK') {
+      return {
+        status: allBefore ? 'not_applied' : 'uncertain',
+        evidence: [evidence('workspace_edit_reconciliation', 'info',
+          allBefore
+            ? 'A rolled-back transaction remains terminal with exact original target hashes.'
+            : 'Rolled-back target bytes changed after recovery; journal remains terminal and no edit was replayed.',
+          { planId: record.planId })]
+      };
+    }
+    if ((record.phase === 'COMMITTED' || record.phase === 'COMMITTED_CLEANUP') && !allAfter) {
+      return {
+        status: 'uncertain',
+        evidence: [evidence('workspace_edit_reconciliation', 'info',
+          'Committed edit target hashes changed; no rollback or new completion was inferred.',
+          { planId: record.planId })]
+      };
+    }
     if (allAfter) {
       const cleanup = { ...record, phase: 'COMMITTED_CLEANUP' as const, updatedAt: this.#now() };
       await this.#writeRecord(cleanup);
@@ -447,9 +470,6 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
       };
     }
 
-    const allBefore = states.every((item) =>
-      item.target.kind === 'regular' && item.target.sha256 === item.file.beforeSha256
-    );
     if (allBefore) {
       await this.#cleanupRolledBack(record);
       const rolledBack = { ...record, phase: 'ROLLED_BACK' as const, updatedAt: this.#now() };
