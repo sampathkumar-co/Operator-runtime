@@ -40,8 +40,31 @@ export function validateResourceExtractorCoverage(): void {
 }
 validateResourceExtractorCoverage();
 
+function inertNamespaceInput(input: Record<string, unknown>, key: string): unknown {
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      (Object.getPrototypeOf(input) !== Object.prototype &&
+       Object.getPrototypeOf(input) !== null)) {
+    throw new OperatorError('RESOURCE_TARGET_INVALID',
+      'Resource namespace input must be an inert record.');
+  }
+  const value = Object.getOwnPropertyDescriptor(input, key);
+  if (!value) return undefined;
+  if (!value.enumerable || !('value' in value)) {
+    throw new OperatorError('RESOURCE_TARGET_INVALID',
+      'Resource namespace must be an own data field: ' + key);
+  }
+  return value.value;
+}
+
 function requiredSegment(value: unknown, fallback: string): string {
-  const raw = String(value ?? fallback).trim().toLowerCase();
+  // Resource identities are authority-bearing lock keys. Coercing an object
+  // invokes caller hooks and may lock a different browser/profile namespace.
+  if (value === undefined || value === null) return escapeSegment(fallback);
+  if (typeof value !== 'string' || value.length > 256) {
+    throw new OperatorError('RESOURCE_TARGET_INVALID',
+      'Resource namespace must be a bounded literal string.');
+  }
+  const raw = value.trim().toLowerCase();
   return escapeSegment(raw || fallback);
 }
 
@@ -127,7 +150,7 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
     keys.add('compute:sandbox');
   } else if (action.capability.startsWith('postgres.')) {
     const root = normalizedAbsolute(input.path);
-    const profile = requiredSegment(input.profileId, 'profiles');
+    const profile = requiredSegment(inertNamespaceInput(input, 'profileId'), 'profiles');
     keys.add(root ? `database:${root}/profile:${profile}` : `database:profile:${profile}`);
   } else if (action.capability === 'vscode.inspect') {
     keys.add('vscode:installation');
@@ -192,7 +215,7 @@ export async function resolvePhysicalResourceKeysForAction(action: ActionRequest
 
   if (action.capability.startsWith('postgres.')) {
     const rootPath = [...keys].find((key) => key.startsWith('fs-path:'));
-    if (rootPath) keys.add(`database:${rootPath.slice('fs-path:'.length)}/profile:${escapeSegment(String(input.profileId ?? 'profiles').toLowerCase())}`);
+    if (rootPath) keys.add(`database:${rootPath.slice('fs-path:'.length)}/profile:${requiredSegment(inertNamespaceInput(input, 'profileId'), 'profiles')}`);
   }
 
   if (action.capability === 'process.inspect' || action.capability === 'process.manage') {
@@ -287,17 +310,26 @@ export function canonicalResourceKeys(keys: readonly string[]): string[] {
 
 function browserResourceKey(action: ActionRequest): string {
   const input = action.input;
-  const instance = requiredSegment(input.sessionId, 'default');
+  const instance = requiredSegment(inertNamespaceInput(input, 'sessionId'), 'default');
   const targets = `browser:instance:${instance}/targets`;
-  const requestedTarget = action.capability === 'browser.navigate' && input.newTab === true
+  const newTab = inertNamespaceInput(input, 'newTab');
+  const targetId = inertNamespaceInput(input, 'targetId');
+  const frameId = inertNamespaceInput(input, 'frameId');
+  if ((newTab !== undefined && newTab !== null && typeof newTab !== 'boolean') ||
+      (targetId !== undefined && targetId !== null && typeof targetId !== 'string') ||
+      (frameId !== undefined && frameId !== null && typeof frameId !== 'string')) {
+    throw new OperatorError('RESOURCE_TARGET_INVALID',
+      'Browser target, frame or newTab resource scope has malformed types.');
+  }
+  const requestedTarget = action.capability === 'browser.navigate' && newTab === true
     ? undefined
-    : typeof input.targetId === 'string' && input.targetId.trim()
-      ? requiredSegment(input.targetId, 'target')
+    : typeof targetId === 'string' && targetId.trim()
+      ? requiredSegment(targetId, 'target')
       : undefined;
   if (!requestedTarget) return targets;
   const target = `${targets}/${requestedTarget}`;
-  const frame = typeof input.frameId === 'string' && input.frameId.trim()
-    ? requiredSegment(input.frameId, 'frame')
+  const frame = typeof frameId === 'string' && frameId.trim()
+    ? requiredSegment(frameId, 'frame')
     : undefined;
   return frame ? `${target}/frames/${frame}` : target;
 }
