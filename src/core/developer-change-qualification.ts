@@ -166,22 +166,24 @@ export function createDeveloperChangeQualificationPlan(input: {
 export function validateDeveloperChangeQualificationPlan(
   input: DeveloperChangeQualificationPlan
 ): DeveloperChangeQualificationPlan {
-  if (!input || input.schemaVersion !== 1 || !/^[0-9a-f]{64}$/.test(String(input.id ?? ''))) {
+  const plan = inertRecord(input, 'DEVELOPER_QUALIFICATION_PLAN_INVALID', 'qualification plan') as unknown as DeveloperChangeQualificationPlan;
+  if (plan.schemaVersion !== 1 || typeof plan.id !== 'string' || !/^[0-9a-f]{64}$/.test(plan.id)) {
     throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', 'Qualification plan shape is invalid.');
   }
-  if (!/^[0-9a-f]{64}$/.test(String(input.editPlanId ?? ''))) {
+  if ((typeof plan.editPlanId !== 'string' || !/^[0-9a-f]{64}$/.test(plan.editPlanId))) {
     throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', 'editPlanId is invalid.');
   }
-  if (!path.isAbsolute(input.projectRoot)) {
+  if (!path.isAbsolute(plan.projectRoot)) {
     throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', 'projectRoot must be absolute.');
   }
-  if (!Array.isArray(input.changedPaths) || input.changedPaths.length < 1) {
+  if (!Array.isArray(plan.changedPaths) || plan.changedPaths.length < 1) {
     throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', 'changedPaths is invalid.');
   }
-  if (!Array.isArray(input.requiredTestPaths) || !Array.isArray(input.steps) || input.steps.length < 1) {
+  if (!Array.isArray(plan.requiredTestPaths) || !Array.isArray(plan.steps) || plan.steps.length < 1) {
     throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', 'Qualification plan arrays are invalid.');
   }
-  const steps = input.steps.map((step, index) => normalizeStep(step, index + 1));
+  const steps = inertArray(plan.steps, MAX_COMMANDS, 'DEVELOPER_QUALIFICATION_PLAN_INVALID', 'steps')
+    .map((step, index) => normalizeStep(step as DeveloperQualificationStep, index + 1));
   const seenCommands = new Set<string>();
   let previousKind = -1;
   for (const step of steps) {
@@ -203,15 +205,15 @@ export function validateDeveloperChangeQualificationPlan(
   }
   const identity = {
     schemaVersion: 1 as const,
-    editPlanId: input.editPlanId,
-    projectRoot: path.resolve(input.projectRoot),
-    changedPaths: uniqueRelativePaths(input.changedPaths, 'changedPaths'),
-    requiredTestPaths: uniqueRelativePaths(input.requiredTestPaths, 'requiredTestPaths'),
+    editPlanId: plan.editPlanId,
+    projectRoot: path.resolve(plan.projectRoot),
+    changedPaths: uniqueRelativePaths(plan.changedPaths, 'changedPaths'),
+    requiredTestPaths: uniqueRelativePaths(plan.requiredTestPaths, 'requiredTestPaths'),
     steps,
-    reindexAfterFormatting: input.reindexAfterFormatting === true
+    reindexAfterFormatting: plan.reindexAfterFormatting === true
   };
   const id = crypto.createHash('sha256').update(canonicalJson(identity), 'utf8').digest('hex');
-  if (id !== input.id) {
+  if (id !== plan.id) {
     throw new OperatorError(
       'DEVELOPER_QUALIFICATION_PLAN_INVALID',
       'Qualification plan id does not match immutable content.'
