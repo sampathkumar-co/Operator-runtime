@@ -418,12 +418,14 @@ export class RelayResultStore {
   }
 }
 
-function validSharedNamespace(value: string): string {
-  const text = String(value ?? '');
-  if (!/^[A-Za-z0-9._:@/+=-]{1,256}$/.test(text) || text === '__epoch') {
+function validSharedNamespace(value: unknown): string {
+  // A shared-state namespace is an authority boundary. Never invoke
+  // attacker valueOf/toString hooks or accept coercible arrays/objects.
+  if (typeof value !== 'string' ||
+      !/^[A-Za-z0-9._:@/+=-]{1,256}$/.test(value) || value === '__epoch') {
     throw new OperatorError('RELAY_RESULT_SHARED_NAMESPACE_INVALID', 'Shared relay result namespace is invalid.');
   }
-  return text;
+  return value;
 }
 
 function boundedRetention(value: number | undefined): number {
