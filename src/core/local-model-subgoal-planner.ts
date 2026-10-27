@@ -302,18 +302,22 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
     targetCount: number,
     schemaCount: number,
     observationRef: string,
-    parent: AbortSignal | undefined,
-    timeoutMs: number
+    parent: AbortSignal,
+    timeoutMs: number,
+    reserve: (tokens: number) => Promise<void>,
+    reservedTokens: number
   ): Promise<DynamicSubgoalProposal> {
+    if (parent.aborted) throw new OperatorError('TASK_PLANNER_ABORTED', 'Dynamic composition was stopped before reservation.');
     const controller = new AbortController();
+    const startedAt = performance.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
     try {
-      const signal = parent ? AbortSignal.any([parent, controller.signal]) : controller.signal;
+      const signal = AbortSignal.any([parent, controller.signal]);
       const cancelled = new Promise<never>((_, reject) => {
         onAbort = () => reject(new OperatorError('TASK_PLANNER_ABORTED', 'Dynamic composition was canceled before dispatch.'));
-        if (parent?.aborted) onAbort();
-        else parent?.addEventListener('abort', onAbort, { once: true });
+        parent.addEventListener('abort', onAbort, { once: true });
+        if (parent.aborted) onAbort();
       });
       const deadline = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
@@ -321,6 +325,15 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
           reject(new OperatorError('TASK_MODEL_SUBGOAL_TIMEOUT', 'Dynamic composition exceeded its deadline.'));
         }, timeoutMs);
       });
+      // Persist a conservative model charge while this same timeout/Stop
+      // fence is active. Late or hung reservations cannot send a prompt.
+      await Promise.race([reserve(reservedTokens), deadline, cancelled]);
+      if (signal.aborted) {
+        throw new OperatorError('TASK_PLANNER_ABORTED', 'Subgoal model was stopped during reservation.');
+      }
+      if (performance.now() - startedAt >= timeoutMs) {
+        throw new OperatorError('TASK_MODEL_SUBGOAL_TIMEOUT', 'Model reservation consumed the task decision deadline.');
+      }
       const inference = this.#composer
         ? Promise.resolve().then(() => this.#composer!.compose({
             modelId: this.#model, prompt, targetCount, schemaCount, observationRef, signal, timeoutMs
@@ -330,7 +343,7 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
       return validateCompositionProposal(proposal, targetCount, schemaCount, observationRef);
     } finally {
       if (timer) clearTimeout(timer);
-      if (parent && onAbort) parent.removeEventListener('abort', onAbort);
+      if (onAbort) parent.removeEventListener('abort', onAbort);
       controller.abort();
     }
   }
@@ -343,16 +356,19 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
     return proposal as DynamicSubgoalProposal;
   }
 
-  async #select(prompt: string, count: number, parent: AbortSignal | undefined, timeoutMs: number): Promise<number> {
+  async #select(prompt: string, count: number, parent: AbortSignal, timeoutMs: number,
+    reserve: (tokens: number) => Promise<void>, reservedTokens: number): Promise<number> {
+    if (parent.aborted) throw new OperatorError('TASK_PLANNER_ABORTED', 'Local subgoal selection was stopped before reservation.');
     const controller = new AbortController();
+    const startedAt = performance.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
     try {
-      const signal = parent ? AbortSignal.any([parent, controller.signal]) : controller.signal;
+      const signal = AbortSignal.any([parent, controller.signal]);
       const cancelled = new Promise<never>((_, reject) => {
         onAbort = () => reject(new OperatorError('TASK_PLANNER_ABORTED', 'Local model selection was canceled before dispatch.'));
-        if (parent?.aborted) onAbort();
-        else parent?.addEventListener('abort', onAbort, { once: true });
+        parent.addEventListener('abort', onAbort, { once: true });
+        if (parent.aborted) onAbort();
       });
       const deadline = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
@@ -360,6 +376,15 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
           reject(new OperatorError('TASK_MODEL_SUBGOAL_TIMEOUT', 'Local subgoal selection exceeded its deadline.'));
         }, timeoutMs);
       });
+      // Persist a conservative model charge while this same timeout/Stop
+      // fence is active. Late or hung reservations cannot send a prompt.
+      await Promise.race([reserve(reservedTokens), deadline, cancelled]);
+      if (signal.aborted) {
+        throw new OperatorError('TASK_PLANNER_ABORTED', 'Subgoal model was stopped during reservation.');
+      }
+      if (performance.now() - startedAt >= timeoutMs) {
+        throw new OperatorError('TASK_MODEL_SUBGOAL_TIMEOUT', 'Model reservation consumed the task decision deadline.');
+      }
       const inference = this.#ranker
         ? Promise.resolve().then(() => this.#ranker!.select({
             modelId: this.#model, prompt, candidateCount: count, signal, timeoutMs
@@ -372,7 +397,7 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
       return selected;
     } finally {
       if (timer) clearTimeout(timer);
-      if (parent && onAbort) parent.removeEventListener('abort', onAbort);
+      if (onAbort) parent.removeEventListener('abort', onAbort);
       controller.abort();
     }
   }
