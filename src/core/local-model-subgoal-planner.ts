@@ -69,7 +69,7 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
 
   constructor(options: { model: string; fetchFn?: typeof fetch; now?: () => number; ranker?: ReadySubgoalRanker; composer?: DynamicSubgoalComposer; enableLoopbackComposition?: boolean }) {
     if (typeof options.model !== 'string' ||
-      !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(options.model)) {
+      !/^(?=.{1,128}$)[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(options.model)) {
       invalid('Local planner model identifier is invalid.');
     }
     if (options.ranker !== undefined && typeof options.ranker?.select !== 'function') {
@@ -160,9 +160,12 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
       throw new OperatorError('TASK_MODEL_BUDGET_UNAVAILABLE',
         'Local model scheduling requires the canonical durable pre-call reservation authority.');
     }
-    await context.reserveModelBudget(Buffer.byteLength(prompt, 'utf8') + 64);
+    if (!context.signal) {
+      throw new OperatorError('TASK_PLANNER_ABORTED', 'Model ordering requires the current task Stop fence.');
+    }
     const selected = await this.#select(prompt, ready.length, context.signal,
-      Math.min(8_000, Math.max(1, Math.floor(context.budget.activeDeadlineMsRemaining))));
+      Math.min(8_000, Math.max(1, Math.floor(context.budget.activeDeadlineMsRemaining))),
+      context.reserveModelBudget, Buffer.byteLength(prompt, 'utf8') + 64);
     // Late model outputs after Pause/Cancel must not mutate shared planner state.
     if (context.signal?.aborted) {
       throw new OperatorError('TASK_PLANNER_ABORTED', 'Canceled subgoal selection was discarded.');
@@ -251,10 +254,13 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
       throw new OperatorError('TASK_MODEL_BUDGET_UNAVAILABLE',
         'Dynamic composition requires the canonical durable pre-call reservation authority.');
     }
-    await context.reserveModelBudget(Buffer.byteLength(prompt, 'utf8') + 128);
+    if (!context.signal) {
+      throw new OperatorError('TASK_PLANNER_ABORTED', 'Dynamic composition requires the current task Stop fence.');
+    }
     const proposal = await this.#requestComposition(
       prompt, targets.length, schemas.length, observationRef, context.signal,
-      Math.min(8_000, Math.max(1, Math.floor(context.budget.activeDeadlineMsRemaining)))
+      Math.min(8_000, Math.max(1, Math.floor(context.budget.activeDeadlineMsRemaining))),
+      context.reserveModelBudget, Buffer.byteLength(prompt, 'utf8') + 128
     );
     if (context.signal?.aborted) {
       throw new OperatorError('TASK_PLANNER_ABORTED', 'Canceled dynamic composition was discarded.');
@@ -296,18 +302,22 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
     targetCount: number,
     schemaCount: number,
     observationRef: string,
-    parent: AbortSignal | undefined,
-    timeoutMs: number
+    parent: AbortSignal,
+    timeoutMs: number,
+    reserve: (tokens: number) => Promise<void>,
+    reservedTokens: number
   ): Promise<DynamicSubgoalProposal> {
+    if (parent.aborted) throw new OperatorError('TASK_PLANNER_ABORTED', 'Dynamic composition was stopped before reservation.');
     const controller = new AbortController();
+    const startedAt = performance.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
     try {
-      const signal = parent ? AbortSignal.any([parent, controller.signal]) : controller.signal;
+      const signal = AbortSignal.any([parent, controller.signal]);
       const cancelled = new Promise<never>((_, reject) => {
         onAbort = () => reject(new OperatorError('TASK_PLANNER_ABORTED', 'Dynamic composition was canceled before dispatch.'));
-        if (parent?.aborted) onAbort();
-        else parent?.addEventListener('abort', onAbort, { once: true });
+        parent.addEventListener('abort', onAbort, { once: true });
+        if (parent.aborted) onAbort();
       });
       const deadline = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
@@ -315,6 +325,15 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
           reject(new OperatorError('TASK_MODEL_SUBGOAL_TIMEOUT', 'Dynamic composition exceeded its deadline.'));
         }, timeoutMs);
       });
+      // Persist a conservative model charge while this same timeout/Stop
+      // fence is active. Late or hung reservations cannot send a prompt.
+      await Promise.race([reserve(reservedTokens), deadline, cancelled]);
+      if (signal.aborted) {
+        throw new OperatorError('TASK_PLANNER_ABORTED', 'Subgoal model was stopped during reservation.');
+      }
+      if (performance.now() - startedAt >= timeoutMs) {
+        throw new OperatorError('TASK_MODEL_SUBGOAL_TIMEOUT', 'Model reservation consumed the task decision deadline.');
+      }
       const inference = this.#composer
         ? Promise.resolve().then(() => this.#composer!.compose({
             modelId: this.#model, prompt, targetCount, schemaCount, observationRef, signal, timeoutMs
@@ -324,7 +343,7 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
       return validateCompositionProposal(proposal, targetCount, schemaCount, observationRef);
     } finally {
       if (timer) clearTimeout(timer);
-      if (parent && onAbort) parent.removeEventListener('abort', onAbort);
+      if (onAbort) parent.removeEventListener('abort', onAbort);
       controller.abort();
     }
   }
@@ -337,16 +356,19 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
     return proposal as DynamicSubgoalProposal;
   }
 
-  async #select(prompt: string, count: number, parent: AbortSignal | undefined, timeoutMs: number): Promise<number> {
+  async #select(prompt: string, count: number, parent: AbortSignal, timeoutMs: number,
+    reserve: (tokens: number) => Promise<void>, reservedTokens: number): Promise<number> {
+    if (parent.aborted) throw new OperatorError('TASK_PLANNER_ABORTED', 'Local subgoal selection was stopped before reservation.');
     const controller = new AbortController();
+    const startedAt = performance.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
     try {
-      const signal = parent ? AbortSignal.any([parent, controller.signal]) : controller.signal;
+      const signal = AbortSignal.any([parent, controller.signal]);
       const cancelled = new Promise<never>((_, reject) => {
         onAbort = () => reject(new OperatorError('TASK_PLANNER_ABORTED', 'Local model selection was canceled before dispatch.'));
-        if (parent?.aborted) onAbort();
-        else parent?.addEventListener('abort', onAbort, { once: true });
+        parent.addEventListener('abort', onAbort, { once: true });
+        if (parent.aborted) onAbort();
       });
       const deadline = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
@@ -354,6 +376,15 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
           reject(new OperatorError('TASK_MODEL_SUBGOAL_TIMEOUT', 'Local subgoal selection exceeded its deadline.'));
         }, timeoutMs);
       });
+      // Persist a conservative model charge while this same timeout/Stop
+      // fence is active. Late or hung reservations cannot send a prompt.
+      await Promise.race([reserve(reservedTokens), deadline, cancelled]);
+      if (signal.aborted) {
+        throw new OperatorError('TASK_PLANNER_ABORTED', 'Subgoal model was stopped during reservation.');
+      }
+      if (performance.now() - startedAt >= timeoutMs) {
+        throw new OperatorError('TASK_MODEL_SUBGOAL_TIMEOUT', 'Model reservation consumed the task decision deadline.');
+      }
       const inference = this.#ranker
         ? Promise.resolve().then(() => this.#ranker!.select({
             modelId: this.#model, prompt, candidateCount: count, signal, timeoutMs
@@ -366,7 +397,7 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
       return selected;
     } finally {
       if (timer) clearTimeout(timer);
-      if (parent && onAbort) parent.removeEventListener('abort', onAbort);
+      if (onAbort) parent.removeEventListener('abort', onAbort);
       controller.abort();
     }
   }
