@@ -602,3 +602,40 @@ test('C05 scheduler rejects model URL-shaped identifiers and requires a Stop fen
     (e: any) => e?.code === 'TASK_PLANNER_ABORTED');
   assert.equal(called, 0);
 });
+
+
+
+test('C05 dynamic checkpoint cannot transmit after a slow durable budget charge expires', async () => {
+  const ctx = composerContext();
+  const before = ctx.task.execution!.plannerState.durablePlan.revision;
+  ctx.budget.activeDeadlineMsRemaining = 10;
+  let modelCalls = 0;
+  ctx.reserveModelBudget = async () => { await new Promise(resolve => setTimeout(resolve, 40)); };
+  const planner = new LocalModelAutonomousWorkflowPlanner({
+    model: 'gemma3:1b', now: () => TIME, enableLoopbackComposition: true,
+    fetchFn: (async () => { modelCalls++; return new Response('{}'); }) as typeof fetch
+  });
+  await assert.rejects(() => planner.next(ctx),
+    (e: any) => e?.code === 'TASK_MODEL_SUBGOAL_TIMEOUT');
+  await new Promise(resolve => setTimeout(resolve, 55));
+  assert.equal(modelCalls, 0);
+  assert.equal(ctx.task.execution!.plannerState.durablePlan.revision, before);
+});
+
+test('C05 Stop interrupts uncooperative dynamic composition reservation without plan mutation', async () => {
+  const ctx = composerContext();
+  const before = ctx.task.execution!.plannerState.durablePlan.revision;
+  const abort = new AbortController();
+  ctx.signal = abort.signal;
+  ctx.reserveModelBudget = async () => await new Promise<void>(() => {});
+  let modelCalls = 0;
+  const planner = new LocalModelAutonomousWorkflowPlanner({
+    model: 'gemma3:1b', now: () => TIME, enableLoopbackComposition: true,
+    fetchFn: (async () => { modelCalls++; return new Response('{}'); }) as typeof fetch
+  });
+  const running = planner.next(ctx);
+  abort.abort();
+  await assert.rejects(running, (e: any) => e?.code === 'TASK_PLANNER_ABORTED');
+  assert.equal(modelCalls, 0);
+  assert.equal(ctx.task.execution!.plannerState.durablePlan.revision, before);
+});
