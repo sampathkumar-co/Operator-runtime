@@ -13,6 +13,7 @@ import type {
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { readDurableStateText, writeDurableStateText } from '../core/durable-state.ts';
+import { withDurableStateLock } from '../core/durable-state-lock.ts';
 import { ArtifactStore } from '../core/artifact-store.ts';
 import { canonicalJson } from '../core/action-identity.ts';
 import {
@@ -749,11 +750,23 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
     this.#serial = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     try {
-      return await operation();
+      // The instance queue is only a local ordering optimization. Protect
+      // the *entire* read/stage/apply/journal/finalize/reconcile lifecycle with
+      // one exact-owner interprocess lock for this canonical state directory.
+      // Separate action IDs can still target the same files, so per-action
+      // journal locks alone are not sufficient to prevent lost updates.
+      return await withDurableStateLock(
+        workspaceEditTransactionCoordinatorPath(this.#stateDir), operation
+      );
     } finally {
       release();
     }
   }
+}
+
+/** Shared lock domain for all edits and held verifications in this state dir. */
+export function workspaceEditTransactionCoordinatorPath(stateDir: string): string {
+  return path.join(path.resolve(stateDir), 'workspace-edit-transactions', '.coordinator-state');
 }
 
 export function workspaceEditTransactionJournalPath(stateDir: string, actionId: string): string {
