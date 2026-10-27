@@ -172,7 +172,7 @@ test('C03/C07 machine observation distinguishes SPA hash routes without retainin
   assert.equal(ai.destinationDigest, bi.destinationDigest, 'document identity remains equal');
   assert.match(String(ai.routeDigest), /^[0-9a-f]{64}$/);
   assert.notEqual(ai.routeDigest, bi.routeDigest, 'SPA route is part of the outcome identity');
-  assert.doesNotMatch(JSON.stringify(a), /SECRET-ROUTE-78|#\\/payment|checkout/);
+  assert.doesNotMatch(JSON.stringify(a), /SECRET-ROUTE-78|payment|checkout/);
   const withoutHash = normalizeMachineObservation(req, result('browser.inspect', 'browser.cdp', {
     tabs: [{ id: 'tab-1', type: 'page', url: 'https://example.test/checkout' }]
   }));
