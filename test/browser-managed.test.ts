@@ -38,6 +38,9 @@ test('managed browser launch args always use an isolated non-default data direct
   assert.equal(args.includes('--remote-debugging-port=0'), true);
   assert.equal(args.includes(`--user-data-dir=${dataDir}`), true);
   assert.equal(args.some((arg) => arg.includes('Default')), false);
+  assert.equal(args.includes('--headless=new'), false, 'Legacy launch should remain unchanged.');
+  assert.equal(buildManagedBrowserArgs(dataDir,{headless:true}).includes('--headless=new'),true,
+    'Opt-in owned profile must be able to launch Chrome without disturbing the user desktop.');
   assert.throws(() => buildManagedBrowserArgs(path.parse(dataDir).root), /non-root absolute path/);
 });
 
@@ -315,6 +318,41 @@ test('managed browser emergency lifecycle still closes owned child when delegate
   });
   await assert.rejects(provider.emergencyStop(), /delegate close failed/);
   assert.equal(launcherClosed, true);
+});
+
+
+test('dedicated managed mode refuses configured CDP endpoints, legacy profiles and injected delegates', async(t)=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'mecord-owned-browser-policy-'));
+ t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+ assert.throws(()=>new ManagedBrowserProvider({dedicatedProfileOnly:true}),
+  /explicit absolute dataDir/);
+ assert.throws(()=>new ManagedBrowserProvider({dedicatedProfileOnly:true,dataDir:dir,
+  endpoint:'http://127.0.0.1:9222'}),/without external endpoint/);
+ assert.throws(()=>new ManagedBrowserProvider({dedicatedProfileOnly:true,dataDir:dir,
+  discoveryDataDirs:[dir]}),/without external endpoint/);
+ assert.throws(()=>new ManagedBrowserProvider({dedicatedProfileOnly:true,dataDir:dir,
+  autoLaunch:false}),/managed child launch/);
+ assert.throws(()=>new ManagedBrowserProvider({dedicatedProfileOnly:true,
+  dataDir:path.join(os.homedir(),'.operator','browser-profile')}),
+  /must not reuse a standard browser profile or protected runtime directory/);
+ const defaults=candidateBrowserDataDirs(process.platform,process.env,os.homedir());
+ if(defaults.length)assert.throws(()=>new ManagedBrowserProvider({dedicatedProfileOnly:true,
+  dataDir:defaults[0]}),/must not reuse a standard browser profile/);
+});
+
+test('owned Chromium launcher never deletes or adopts a pre-existing DevToolsActivePort',async(t)=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'mecord-owned-browser-existing-owner-'));
+ t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+ const executable=path.join(dir,process.platform==='win32'?'fake-chrome.exe':'fake-chrome');
+ await fs.writeFile(executable,'not a real executable');
+ const portFile=path.join(dir,'DevToolsActivePort');
+ const contents='62222\n/devtools/browser/foreign-owner\n';
+ await fs.writeFile(portFile,contents);
+ const launcher=new ManagedChromiumLauncher({dedicatedProfileOnly:true,
+  dataDir:dir,executablePath:executable});
+ await assert.rejects(launcher.ensureEndpoint(),/refuse to overwrite a potentially active owner/);
+ assert.equal(await fs.readFile(portFile,'utf8'),contents);
+ await launcher.close();
 });
 
 test('C03 managed browser discovery refuses oversized forged CDP version responses', async (t) => {
