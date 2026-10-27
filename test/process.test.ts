@@ -602,3 +602,28 @@ test('C06 developer process port declarations reject coercion before any session
   }
   assert.equal(coerced, 0, 'caller-provided port conversion hooks must never execute');
 });
+
+
+test('C02/C06 bounded process numeric inputs never invoke caller coercion hooks', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-process-numeric-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'] });
+  let conversions = 0;
+  const hostile = {
+    valueOf() { conversions++; throw Error('caller-valueOf'); },
+    toString() { conversions++; throw Error('caller-toString'); }
+  };
+  const rejected = await provider.execute({
+    id: 'numeric-timeout-injection', capability: 'terminal.execute', risk: 'destructive',
+    input: { executable: 'not-allowlisted', args: [], cwd: root, timeoutMs: hostile },
+    provenance: { kind: 'runtime' }
+  } as any);
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.error?.code, 'EXECUTABLE_DENIED');
+  const observed = await provider.execute({
+    id: 'numeric-inspect-injection', capability: 'process.inspect', risk: 'read',
+    input: { limit: hostile, offset: hostile, pid: hostile }, provenance: { kind: 'runtime' }
+  } as any);
+  assert.equal(typeof observed.ok, 'boolean', 'typed provider result must be returned');
+  assert.equal(conversions, 0, 'numeric parser must not call attacker-controlled conversion methods');
+});
