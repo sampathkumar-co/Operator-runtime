@@ -68,6 +68,16 @@ test('C01 manifest refuses incomplete, duplicate, sparse and getter-backed campa
   }
   assert.equal(invoked,0,'no accessor-backed campaign fields may execute');
 });
+
+test('C01 frozen dataset revision must be a literal commit, not an executable identity',()=>{
+  let conversions=0;
+  const manifest=fixture();
+  manifest.dataset.revision={toString(){conversions++;return 'b'.repeat(40);}} as never;
+  assert.throws(()=>validateFrozen125CampaignManifest(manifest),
+    /C01_CAMPAIGN_MANIFEST_INVALID/);
+  assert.equal(conversions,0);
+});
+
 test('C01 evaluation report refuses sparse or getter-backed records before scoring coverage',()=>{
   const blank=Array(2);
   assert.throws(()=>buildWave0EvaluationReport({sourceCommit:source,records:blank}),
