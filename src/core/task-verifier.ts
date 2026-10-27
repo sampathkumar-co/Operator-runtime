@@ -456,8 +456,18 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
     const rowCount = state.rowCount;
     const limit = goal.limit ?? 100;
     const expectedInputHash = sha256(canonicalJson(expectedInput));
+    const observation = record?.observation;
+    const started = Date.parse(record?.startedAt ?? '');
+    const finished = Date.parse(record?.finishedAt ?? '');
+    const captured = observation?.schemaVersion === 2 ? Date.parse(observation.observedAt) : NaN;
     const predicates = {
       record: Boolean(record),
+      readCapability: record?.risk === 'read' && record?.capability === 'postgres.select',
+      observation: observation?.schemaVersion === 2 &&
+        observation.capability === 'postgres.select' &&
+        observation.epistemicStatus === 'KNOWN' && observation.ambiguous === false,
+      causalReceipt: Number.isFinite(started) && Number.isFinite(finished) &&
+        Number.isFinite(captured) && started <= captured && captured <= finished,
       inputHash: record?.inputHash === expectedInputHash,
       profile: state.profileId === goal.profileId,
       schema: state.schema === (goal.schema ?? 'public'),

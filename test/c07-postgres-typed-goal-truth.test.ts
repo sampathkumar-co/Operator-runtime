@@ -117,3 +117,58 @@ test('C07 PostgreSQL result evidence must use literal machine-observed rows, lim
     'an accessor-backed column entry is not trustworthy');
   assert.equal(calls, 0, 'no untrusted valueOf, toString or getter may execute');
 });
+
+
+test('C07 PostgreSQL SELECT proof requires completed known read from matching capability', () => {
+  const goal = { kind: 'postgres-select', root: '/registered', profileId: 'local',
+    schema: 'public', table: 'items', columns: ['id'], limit: 25,
+    offset: 0, timeoutMs: 5000 };
+  const task = makeGoal(goal);
+  const input = postgresSelectActionInput({ root: goal.root, profileId: goal.profileId,
+    schema: goal.schema, table: goal.table, columns: goal.columns, filters: [],
+    orderBy: [], limit: goal.limit, offset: goal.offset, timeoutMs: goal.timeoutMs });
+  const inputHash = crypto.createHash('sha256').update(canonicalJson(input)).digest('hex');
+  task.execution!.records.push({
+    stepKey: 'select-postgres-rows', actionId: 'causal-select', capability: 'postgres.select',
+    risk: 'read', inputHash, attempt: 0, state: 'SUCCEEDED',
+    startedAt: '2026-10-26T10:00:00.000Z', finishedAt: '2026-10-26T10:00:00.200Z',
+    evidence: [],
+    observation: {
+      schemaVersion: 2, channel: 'semantic', domain: 'database',
+      provider: 'synthetic', capability: 'postgres.select', entityId: 'database:fixture',
+      observedAt: '2026-10-26T10:00:00.100Z', stateVersion: 'a'.repeat(64),
+      importantState: { profileId: 'local', schema: 'public', table: 'items',
+        limit: 25, offset: 0, rowCount: 1, columns: ['id'] },
+      epistemicStatus: 'KNOWN', epistemicReason: '', ambiguous: false,
+      confidence: 1, evidenceRefs: ['b'.repeat(64)]
+    }
+  });
+  const valid = structuredClone(task.execution!.records[0]!);
+  assert.equal(verifyGoalOutcomeTruth(task).ok, true);
+  const mutations: Array<(record: typeof valid) => void> = [
+    record => { record.risk = 'write'; },
+    record => { record.capability = 'project.inspect'; },
+    record => { record.startedAt = '2026-10-26T10:00:00.150Z'; },
+    record => { record.finishedAt = '2026-10-26T10:00:00.050Z'; },
+    record => { record.finishedAt = undefined; },
+    record => { if (record.observation?.schemaVersion === 2) {
+      record.observation.capability = 'file.info';
+    } },
+    record => { if (record.observation?.schemaVersion === 2) {
+      record.observation.epistemicStatus = 'UNKNOWN';
+    } },
+    record => { if (record.observation?.schemaVersion === 2) {
+      record.observation.ambiguous = true;
+    } }
+  ];
+  for (const [index, mutate] of mutations.entries()) {
+    const broken = structuredClone(valid);
+    mutate(broken);
+    task.execution!.records = [broken];
+    assert.equal(verifyGoalOutcomeTruth(task).ok, false,
+      'malformed independent DB read receipt case ' + index);
+  }
+  task.execution!.records = [valid];
+  assert.equal(verifyGoalOutcomeTruth(task).ok, true,
+    'only completed known matching SELECT read can verify data');
+});
