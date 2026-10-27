@@ -1052,7 +1052,8 @@ function normalizeDeclaredPorts(value: unknown): number[] {
   if (!Array.isArray(value) || value.length > 128) {
     throw new OperatorError('DEVELOPER_RUNTIME_PORT_INVALID', 'ports must be an array with at most 128 entries.');
   }
-  const ports = value.map((port) => {
+  // Array.from visits sparse array holes as undefined, which must also fail.
+  const ports = Array.from(value, (port) => {
     // Do not coerce model/caller JSON values: Number(object) can run a
     // hostile valueOf hook, and strings/arrays/bools are not port integers.
     if (typeof port !== 'number' || !Number.isSafeInteger(port) || port < 1 || port > 65535) {
