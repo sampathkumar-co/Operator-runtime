@@ -111,7 +111,11 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
   }
 
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
-    return await this.#enqueue(async () => await this.#executeSerial(action, context, false));
+    try {
+      return await this.#enqueue(async () => await this.#executeSerial(action, context, false));
+    } catch (error) {
+      return this.#coordinatorRefusal(action, error);
+    }
   }
 
   /**
@@ -120,7 +124,11 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
    * verification hold by supplying a field.
    */
   async executeDeferred(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
-    return await this.#enqueue(async () => await this.#executeSerial(action, context, true));
+    try {
+      return await this.#enqueue(async () => await this.#executeSerial(action, context, true));
+    } catch (error) {
+      return this.#coordinatorRefusal(action, error);
+    }
   }
 
   /** Only the trusted verifier workflow may call this after its checks pass. */
@@ -192,7 +200,25 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
     request: ProviderReconciliationRequest,
     _context: CapabilityExecutionContext = {}
   ): Promise<ProviderReconciliationResult> {
-    return await this.#enqueue(async () => await this.#reconcileSerial(request.action));
+    try {
+      return await this.#enqueue(async () => await this.#reconcileSerial(request.action));
+    } catch (error) {
+      if (!(error instanceof OperatorError) || error.code !== 'WORKSPACE_EDIT_COORDINATOR_UNAVAILABLE') throw error;
+      return { status: 'uncertain', evidence: [evidence('workspace_edit_reconciliation', 'info',
+        'Exclusive workspace edit state could not be acquired; no transaction was inspected or modified.',
+        { code: error.code })] };
+    }
+  }
+
+  #coordinatorRefusal(action: ActionRequest, error: unknown): ActionResult {
+    if (!(error instanceof OperatorError) || error.code !== 'WORKSPACE_EDIT_COORDINATOR_UNAVAILABLE') throw error;
+    return {
+      ok: false, capability: action.capability, provider: this.name,
+      evidence: [evidence('workspace_edit_transaction', 'fail', error.message, { code: error.code })],
+      error: { code: error.code, message: error.message, retryable: true,
+        sideEffectState: 'none', executionPhase: 'pre_dispatch' },
+      durationMs: 0
+    };
   }
 
   async #executeSerial(action: ActionRequest, context: CapabilityExecutionContext, deferFinalization: boolean): Promise<ActionResult> {
@@ -755,9 +781,24 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
       // one exact-owner interprocess lock for this canonical state directory.
       // Separate action IDs can still target the same files, so per-action
       // journal locks alone are not sufficient to prevent lost updates.
-      return await withDurableStateLock(
-        workspaceEditTransactionCoordinatorPath(this.#stateDir), operation
-      );
+      let entered = false;
+      try {
+        return await withDurableStateLock(
+          workspaceEditTransactionCoordinatorPath(this.#stateDir),
+          async () => { entered = true; return await operation(); }
+        );
+      } catch (error) {
+        if (!entered) {
+          // No caller action, journal read or target mutation began. In
+          // contrast, failures after entry may have dispatched effects.
+          throw new OperatorError('WORKSPACE_EDIT_COORDINATOR_UNAVAILABLE',
+            'Workspace edit coordinator is busy or its ownership cannot be verified.', {
+              retryable: true,
+              details: { sideEffectState: 'none', executionPhase: 'pre_dispatch' }
+            });
+        }
+        throw error;
+      }
     } finally {
       release();
     }
