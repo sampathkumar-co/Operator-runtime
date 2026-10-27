@@ -79,3 +79,32 @@ test('C11 malformed capacity, stage and trace inputs fail closed', async () => {
   assert.throws(()=>opaqueTraceId('x'.repeat(600)));
   assert.deepEqual(recorder.snapshot(),[]);
 });
+
+
+test('C11 outcome classifier records unfulfilled waits without changing action results', async () => {
+  const recorder = new PipelineLatencyRecorder({ enabled: true });
+  const empty = await recorder.measure({ stage: 'relay.result_wait', origin: 'relay-server' },
+    () => null, value => value !== null);
+  assert.equal(empty, null);
+  assert.equal(recorder.snapshot()[0]?.result, 'failed');
+
+  const value = await recorder.measure({ stage: 'relay.result_wait', origin: 'relay-server' },
+    () => ({ accepted: true }), output => output.accepted);
+  assert.deepEqual(value, { accepted: true });
+  assert.equal(recorder.snapshot()[1]?.result, 'ok');
+
+  // Even a broken diagnostic classifier cannot change or reject action output.
+  const original = { unchanged: true };
+  const retained = await recorder.measure({ stage: 'relay.result_wait', origin: 'relay-server' },
+    () => original, () => { throw new Error('private telemetry exception'); });
+  assert.equal(retained, original);
+  assert.equal(recorder.snapshot()[2]?.result, 'failed');
+  assert.equal(JSON.stringify(recorder.snapshot()).includes('private telemetry exception'), false);
+
+  let calls = 0;
+  const disabled = new PipelineLatencyRecorder();
+  assert.equal(await disabled.measure({stage:'relay.result_wait',origin:'relay-server'},
+    () => null, () => { calls++; return false; }), null);
+  assert.equal(calls, 0);
+  assert.deepEqual(disabled.snapshot(), []);
+});
