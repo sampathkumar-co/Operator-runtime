@@ -107,18 +107,24 @@ function importantStateFromResult(result: ActionResult): Record<string, unknown>
       const type = text(tab.type);
       const url = text(tab.url);
       const destinationDigest = url ? browserDestinationDigest(url) : undefined;
+      const routeDigest = url ? browserRouteDigest(url) : undefined;
       if (!id && !destinationDigest) return [];
       return [{
         ...(id ? { id: bounded(id, 256) } : {}),
         ...(type && /^[a-z][a-z0-9_-]{0,31}$/i.test(type) ? { type } : {}),
-        ...(destinationDigest ? { destinationDigest } : {})
+        ...(destinationDigest ? { destinationDigest } : {}),
+        ...(routeDigest ? { routeDigest } : {})
       }];
     });
     if (safeTabs.length) state.browserTargets = safeTabs;
     const targetId = text(output.targetId);
     const directUrl = text(output.url);
     if (targetId) state.targetId = bounded(targetId, 256);
-    if (directUrl) state.destinationDigest = browserDestinationDigest(directUrl);
+    if (directUrl) {
+      state.destinationDigest = browserDestinationDigest(directUrl);
+      const directRouteDigest = browserRouteDigest(directUrl);
+      if (directRouteDigest) state.routeDigest = directRouteDigest;
+    }
     const download = record(output.download);
     const artifactSha256 = text(download.artifactSha256);
     const actionTargetDigest = text(download.actionTargetDigest);
@@ -270,6 +276,16 @@ function browserDestinationDigest(raw: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+/** An explicit hash-route is part of the SPA destination, but raw paths,
+ * queries and fragments must not appear in durable machine observations. */
+function browserRouteDigest(raw: string): string | undefined {
+  try {
+    const parsed = new URL(raw);
+    if (!parsed.hash) return undefined;
+    const pathname = parsed.pathname === '/' ? '/' : parsed.pathname.replace(/\/$/, '');
+    return sha256(`${parsed.origin}${pathname}${parsed.search}${parsed.hash}`);
+  } catch { return undefined; }
 }
 function sha256(value: string): string {
   return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
