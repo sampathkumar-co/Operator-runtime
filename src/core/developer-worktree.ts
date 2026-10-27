@@ -79,11 +79,15 @@ export class DeveloperWorktreeManager {
     repositoryRoot: string;
     baseCommit: string;
   }): Promise<DeveloperWorktreeInspection> {
-    return await this.#enqueue(input.sessionId, async () => {
+    const supplied = inertWorktreeFields(input, 'create request',
+      ['sessionId', 'repositoryRoot', 'baseCommit'],
+      ['sessionId', 'repositoryRoot', 'baseCommit']);
+    const sessionId = normalizeSessionId(supplied.sessionId);
+    const baseCommit = normalizeCommit(supplied.baseCommit);
+    const requestedRoot = requireLiteralWorktreePath(supplied.repositoryRoot, 'repositoryRoot');
+    return await this.#enqueue(sessionId, async () => {
       await this.#init();
-      const sessionId = normalizeSessionId(input.sessionId);
-      const baseCommit = normalizeCommit(input.baseCommit);
-      const repositoryRoot = await this.#resolveRepositoryRoot(input.repositoryRoot);
+      const repositoryRoot = await this.#resolveRepositoryRoot(requestedRoot);
       await assertNoRepoLocalContentFilters(repositoryRoot);
       await verifyCommit(repositoryRoot, baseCommit);
 
@@ -155,10 +159,12 @@ export class DeveloperWorktreeManager {
     sessionId: string;
     expectedFingerprint: string;
   }): Promise<DeveloperWorktreeInspection> {
-    return await this.#enqueue(input.sessionId, async () => {
+    const supplied = inertWorktreeFields(input, 'release request',
+      ['sessionId', 'expectedFingerprint'], ['sessionId', 'expectedFingerprint']);
+    const sessionId = normalizeSessionId(supplied.sessionId);
+    const expectedFingerprint = normalizeDigest(supplied.expectedFingerprint, 'expectedFingerprint');
+    return await this.#enqueue(sessionId, async () => {
       await this.#init();
-      const sessionId = normalizeSessionId(input.sessionId);
-      const expectedFingerprint = normalizeDigest(input.expectedFingerprint, 'expectedFingerprint');
       let record = await this.#requireRecord(sessionId);
       record = (await this.#reconcileRecord(record)).record;
 
@@ -562,10 +568,9 @@ function validateRecord(
   input: unknown,
   worktreeRoot: string
 ): DeveloperWorktreeRecord {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    throw corrupt('Developer Worktree ownership record must be an object.');
-  }
-  const raw = input as Record<string, unknown>;
+  const raw = inertWorktreeFields(input, 'ownership record',
+    ['schemaVersion', 'sessionId', 'repositoryRoot', 'worktreePath',
+      'baseCommit', 'phase', 'createdAt', 'updatedAt']);
   if (raw.schemaVersion !== 1) throw corrupt('Unsupported Developer Worktree schema.');
   const sessionId = normalizeSessionId(raw.sessionId);
   const repositoryRoot = absolutePath(raw.repositoryRoot, 'repositoryRoot');
@@ -581,10 +586,11 @@ function validateRecord(
     throw corrupt('Owned worktree path does not match the session identity.');
   }
   const baseCommit = normalizeCommit(raw.baseCommit);
-  const phase = String(raw.phase ?? '') as DeveloperWorktreePhase;
-  if (!['CREATING', 'ACTIVE', 'RELEASING', 'RELEASED'].includes(phase)) {
-    throw corrupt('Developer Worktree phase is invalid.');
+  if (typeof raw.phase !== 'string' ||
+      !['CREATING', 'ACTIVE', 'RELEASING', 'RELEASED'].includes(raw.phase)) {
+    throw corrupt('Developer Worktree phase must be a literal known state.');
   }
+  const phase = raw.phase as DeveloperWorktreePhase;
   const createdAt = canonicalIso(raw.createdAt, 'createdAt');
   const updatedAt = canonicalIso(raw.updatedAt, 'updatedAt');
   if (Date.parse(updatedAt) < Date.parse(createdAt)) {
@@ -852,8 +858,54 @@ async function pathExists(file: string): Promise<boolean> {
   }
 }
 
+/**
+ * Snapshot untrusted caller/persisted identities once, without invoking
+ * accessors or inherited properties during authority/recovery decisions.
+ */
+function inertWorktreeFields(
+  input: unknown,
+  label: string,
+  required: readonly string[],
+  allowed?: readonly string[]
+): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      (Object.getPrototypeOf(input) !== Object.prototype &&
+       Object.getPrototypeOf(input) !== null)) {
+    throw new OperatorError('DEVELOPER_WORKTREE_IDENTITY_INVALID',
+      label + ' must be an inert plain data record.');
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(input);
+  if (Reflect.ownKeys(input).some(key => typeof key !== 'string' ||
+      (allowed !== undefined && !allowed.includes(key))) ||
+      required.some(key => !Object.hasOwn(descriptors, key))) {
+    throw new OperatorError('DEVELOPER_WORKTREE_IDENTITY_INVALID',
+      label + ' has missing, symbolic or unsupported fields.');
+  }
+  const snapshot: Record<string, unknown> = Object.create(null);
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (!descriptor.enumerable || !('value' in descriptor)) {
+      throw new OperatorError('DEVELOPER_WORKTREE_IDENTITY_INVALID',
+        label + ' contains an executable or hidden field.');
+    }
+    snapshot[key] = descriptor.value;
+  }
+  return snapshot;
+}
+
+function requireLiteralWorktreePath(input: unknown, label: string): string {
+  if (typeof input !== 'string' || !input || input.includes('\0')) {
+    throw new OperatorError('DEVELOPER_WORKTREE_PATH_INVALID',
+      label + ' must be a literal nonempty path.');
+  }
+  return input;
+}
+
 function normalizeSessionId(input: unknown): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') {
+    throw new OperatorError('DEVELOPER_WORKTREE_SESSION_ID_INVALID',
+      'sessionId must be a literal string.');
+  }
+  const value = input;
   if (!SESSION_ID.test(value)) {
     throw new OperatorError(
       'DEVELOPER_WORKTREE_SESSION_ID_INVALID',
@@ -864,7 +916,11 @@ function normalizeSessionId(input: unknown): string {
 }
 
 function normalizeCommit(input: unknown): string {
-  const value = String(input ?? '').toLowerCase();
+  if (typeof input !== 'string') {
+    throw new OperatorError('DEVELOPER_WORKTREE_COMMIT_INVALID',
+      'baseCommit must be a literal commit id.');
+  }
+  const value = input.toLowerCase();
   if (!COMMIT_ID.test(value)) {
     throw new OperatorError(
       'DEVELOPER_WORKTREE_COMMIT_INVALID',
@@ -875,7 +931,11 @@ function normalizeCommit(input: unknown): string {
 }
 
 function normalizeDigest(input: unknown, label: string): string {
-  const value = String(input ?? '').toLowerCase();
+  if (typeof input !== 'string') {
+    throw new OperatorError('DEVELOPER_WORKTREE_PRECONDITION_INVALID',
+      label + ' must be a literal SHA-256.');
+  }
+  const value = input.toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(value)) {
     throw new OperatorError(
       'DEVELOPER_WORKTREE_PRECONDITION_INVALID',
@@ -886,7 +946,10 @@ function normalizeDigest(input: unknown, label: string): string {
 }
 
 function absolutePath(input: unknown, label: string): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') {
+    throw corrupt(label + ' must be a literal absolute path.');
+  }
+  const value = input;
   if (!value || value.includes('\0') || !path.isAbsolute(value)) {
     throw corrupt(label + ' must be an absolute path.');
   }
@@ -894,7 +957,10 @@ function absolutePath(input: unknown, label: string): string {
 }
 
 function canonicalIso(input: unknown, label: string): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') {
+    throw corrupt(label + ' must be a literal canonical ISO timestamp.');
+  }
+  const value = input;
   if (
     !value ||
     !Number.isFinite(Date.parse(value)) ||
