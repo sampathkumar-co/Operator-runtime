@@ -8,11 +8,11 @@ A Chromium CDP endpoint can be supplied by a user or discovered from an existing
 
 When the caller explicitly chooses **dedicatedProfileOnly: true**, the ManagedChromiumLauncher:
 
-1. Requires a caller-specified **absolute, separate dataDir** outside normal Chrome/Edge user profiles and the protected .operator state tree.
+1. Requires a caller-specified **absolute, pre-provisioned real directory** outside normal Chrome/Edge user profiles and the protected .operator state tree. It never creates the directory automatically; the owner must provision and protect it first.
 2. Rejects configured endpoints, discoveryDataDirs, custom launchers/delegates, and autoLaunch: false. It never trusts an externally discovered port as proof of ownership.
 3. Creates an independently spawned **headless** child with a separate profile and an ephemeral CDP port.
 4. Reuses the endpoint only while its own child is alive; closes its own child before a fresh launch.
-5. Refuses to delete or reuse a pre-existing DevToolsActivePort file in that directory; refuses a symlinked dedicated profile.
+5. Refuses to delete or reuse an existing DevToolsActivePort file (including dangling symlinks) in that directory; refuses symlinked profile directories and resolves parent aliases/junctions before comparing protected roots.
 6. Refrains from touching user-selected tabs. Browser tab focus is **explicit**, via normal browser.tab.focus, in the independent Chrome, after ordinary authorization.
 7. Preserves existing result/uncertainty classification if a native input command fails. It does not silently replay mutations or emulate focus.
 
