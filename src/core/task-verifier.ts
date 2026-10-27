@@ -488,7 +488,12 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
     const elements = Array.isArray(state.uiaElements) ? state.uiaElements.map(asRecord) : [];
     const selector = asRecord(verify ? (goal.verifySelector ?? goal.selector) : goal.selector);
     const element = elements.find((candidate) => uiaSelectorMatches(candidate, selector));
-    const operation = String(goal.operation ?? '');
+    const operation = typeof goal.operation === 'string' ? goal.operation : '';
+    // Only the declared string value can be compared with machine-state
+    // hashes. Calling String() on an object would execute caller code.
+    if (operation === '' || (operation === 'set_value' && typeof goal.value !== 'string')) {
+      return outcome(true, false, 'Application goal operation or desired value has malformed types.', versions(inspect));
+    }
     if (!verify && operation !== 'set_value') {
       return outcome(true, false, 'Application operation requires a fresh post-operation semantic reinspection before outcome truth can be certified.', versions(inspect));
     }
@@ -516,7 +521,7 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
       knownFreshRead(verify) && Number.isFinite(Date.parse(operate.finishedAt ?? '')) &&
       Date.parse(verify!.startedAt) >= Date.parse(operate!.finishedAt!));
     let semanticEffect = Boolean(element);
-    if (semanticEffect && operation === 'set_value') semanticEffect = element!.valueHash === sha256(String(goal.value ?? ''));
+    if (semanticEffect && operation === 'set_value') semanticEffect = element!.valueHash === sha256(goal.value as string);
     if (semanticEffect && operation === 'focus' && element!.focused !== undefined) semanticEffect = element!.focused === true;
     if (semanticEffect && operation === 'select' && element!.selected !== undefined) semanticEffect = element!.selected === true;
     if (semanticEffect && operation === 'expand' && element!.expandCollapseState !== undefined) semanticEffect = element!.expandCollapseState === 'expanded';
@@ -612,11 +617,28 @@ function uiaSelectorMatches(element: Record<string, unknown>, selector: Record<s
     ['className', 'classNameHash'],
     ['controlType', 'controlTypeHash']
   ];
-  for (const [source, observed] of mapping) {
-    if (selector[source] !== undefined && element[observed] !== sha256(String(selector[source]))) return false;
+  // Proof selectors are data, not executable descriptions. A coercible,
+  // accessor-backed or unsupported selector must not match a UIA target.
+  if (Object.getPrototypeOf(selector) !== Object.prototype &&
+      Object.getPrototypeOf(selector) !== null) return false;
+  const allowed = new Set([...mapping.map(([key]) => key), 'processId']);
+  const keys = Reflect.ownKeys(selector);
+  if (!keys.length || keys.some(key => typeof key !== 'string' || !allowed.has(key))) return false;
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(selector, key);
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) return false;
+    if (key === 'processId') {
+      if (typeof descriptor.value !== 'number' ||
+          !Number.isSafeInteger(descriptor.value) || descriptor.value <= 0 ||
+          typeof element.processId !== 'number' || element.processId !== descriptor.value) return false;
+    } else {
+      if (typeof descriptor.value !== 'string' || descriptor.value.length === 0 ||
+          descriptor.value.length > 512 || descriptor.value.includes('\\0')) return false;
+      const targetHash = element[mapping.find(([source]) => source === key)![1]];
+      if (targetHash !== sha256(descriptor.value)) return false;
+    }
   }
-  if (selector.processId !== undefined && Number(element.processId) !== Number(selector.processId)) return false;
-  return mapping.some(([source]) => selector[source] !== undefined) || selector.processId !== undefined;
+  return true;
 }
 
 function browserDestinationDigest(raw: string): string | undefined {
