@@ -75,7 +75,7 @@ test('C01 Lane A keeps malformed model output inert and does not run accessor co
   }));
   assert.equal(getterCalled, 0);
   assert.equal(r.records[0]?.verifiedSuccess, false);
-  assert.equal(r.records[0]?.failureStage, 'unattributed');
+  assert.equal(r.records[0]?.failureStage, 'schema');
 });
 
 test('C01 Lane A deadline produces timing failure without dispatch or fabricated model score', async () => {
