@@ -118,3 +118,30 @@ test('C08 original pending receipt query is bounded and cannot modify durable st
   const after=await Promise.all(filenames.map(name=>fs.readFile(path.join(root,name),'utf8')));
   assert.deepEqual(after,before);
 });
+
+
+
+test('C08 reviewed action reference is not the caller-controlled action ID, path or credential text', () => {
+  const privateIdentifier = 'project/secrets/CREDENTIAL-LIKE-TOKEN:owner-private-task';
+  const original=receipt(privateIdentifier,'write');
+  const paired=journal(privateIdentifier,['PREPARED']);
+  const first=buildOriginalRecoveryReviewModel([original],[paired]);
+  const second=buildOriginalRecoveryReviewModel([original],[paired]);
+  assert.equal(first.items.length,1);
+  assert.match(first.items[0]!.actionId,/^review:[a-f0-9]{64}$/);
+  assert.equal(first.items[0]!.actionId,second.items[0]!.actionId);
+  assert.notEqual(first.items[0]!.actionId,privateIdentifier);
+  for(const leaked of ['project/secrets','CREDENTIAL-LIKE-TOKEN','owner-private-task']) {
+    assert.equal(JSON.stringify(first).includes(leaked),false,leaked);
+  }
+  assert.notEqual(buildOriginalRecoveryReviewModel([
+    receipt('different-action-id','write')
+  ],[journal('different-action-id')]).items[0]!.actionId,first.items[0]!.actionId);
+});
+
+test('C08 stored timestamp cannot copy free-form date text into a recovery API', () => {
+  const r=receipt('safe-id','write',{startedAt:'Tue, 27 Oct 2026 00:00:00 GMT'});
+  const model=buildOriginalRecoveryReviewModel([r],[journal('safe-id')]);
+  assert.equal(model.items[0]!.startedAt,'2026-10-27T00:00:00.000Z');
+  assert.equal(JSON.stringify(model).includes('GMT'),false);
+});

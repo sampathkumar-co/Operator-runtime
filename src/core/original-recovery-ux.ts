@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { OperatorError } from './errors.ts';
 import type { ActionJournalEntry, ActionJournalState } from './action-transition-journal.ts';
 import type { ActionRisk } from './types.ts';
@@ -10,6 +11,7 @@ export type OriginalRecoveryStatus =
   | 'AUTHORITY_REVIEW_REQUIRED';
 
 export interface OriginalRecoveryRow {
+  /** Opaque, process-local display reference: NEVER the original action ID or an approval token. */
   actionId: string;
   capability: string;
   risk: ActionRisk;
@@ -36,6 +38,12 @@ const RISKS = new Set<ActionRisk>(['read','write','external','system','destructi
 const MAX_ROWS = 256;
 const MAX_HISTORY = 64;
 const SAFE_REFERENCE = /^[a-zA-Z0-9._:/-]{1,160}$/;
+const REVIEW_REFERENCE_KEY = crypto.randomBytes(32);
+function opaqueReviewReference(actionId: string): string {
+  return 'review:' + crypto.createHmac('sha256', REVIEW_REFERENCE_KEY)
+    .update('mecord.original-recovery.review.v1\0').update(actionId).digest('hex');
+}
+
 const SAFE_CAPABILITY = /^[a-z][a-z0-9._-]{0,127}$/;
 
 function invalid(): never {
@@ -108,12 +116,12 @@ export function buildOriginalRecoveryReviewModel(
       explanation = 'The historical action is unresolved. Do not retry or infer owner consent.';
     }
     items.push({
-      actionId: receipt.actionId,
+      actionId: opaqueReviewReference(receipt.actionId),
       capability: match ? journal!.capability : 'Unverified action',
       risk: receipt.risk,
       status, explanation,
       journal: match ? history.join(' → ') : 'History unavailable or mismatched',
-      startedAt: receipt.startedAt,
+      startedAt: new Date(Date.parse(receipt.startedAt)).toISOString(),
       ownerVerificationRequired: true,
       canApproveOnWebsite: false
     });
