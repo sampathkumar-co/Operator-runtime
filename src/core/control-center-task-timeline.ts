@@ -71,11 +71,45 @@ export function buildControlCenterTaskTimeline(
   refs.sort((a, b) => a.at.localeCompare(b.at) || a.order - b.order);
   // Pagination must not silently change meaning while task records are being
   // appended or revised. Bind all pages to the same exact history snapshot.
-  const historyHash = crypto.createHash('sha256').update(task.id).update('\0').update(task.updatedAt);
+  const historyHash = crypto.createHash('sha256').update(task.id).update('\0')
+    .update(task.updatedAt).update('\0').update(task.state);
+  // A timeline entry can be reconciled or independently verified *in place*
+  // without a new actionId/start time (and older snapshots may have been
+  // paged already). Hash the exact displayed state and evidence, not just
+  // event ordering, so stale cursors fail closed instead of mixing revisions.
+  // Hash incrementally to avoid building or retaining a second giant history.
   for (const ref of refs) {
-    const identity = ref.kind === 'action' ? records[ref.index]!.actionId :
-      `failure:${ref.index}:${task.failures[ref.index]!.code}`;
-    historyHash.update('\0').update(ref.kind).update(':').update(identity).update(':').update(ref.at);
+    historyHash.update('\0').update(ref.kind).update(':').update(ref.at);
+    if (ref.kind === 'failure') {
+      const failure = task.failures[ref.index]!;
+      historyHash.update(JSON.stringify([ref.index, failure.code, bounded(failure.message, 1024)]));
+      continue;
+    }
+    const record = records[ref.index]!;
+    const observation = record.observation;
+    historyHash.update(JSON.stringify([
+      record.actionId, record.capability, record.state, record.attempt, record.risk,
+      record.finishedAt ?? null, record.errorCode ?? null,
+      record.executionPhase ?? null, record.sideEffectState ?? null,
+      observation?.provider ?? null, observation?.channel ?? null,
+      observation?.domain ?? null, observation?.observedAt ?? null,
+      observation?.schemaVersion === 2 ? observation.epistemicStatus : null,
+      record.evidence.length
+    ]));
+    for (const item of record.evidence) {
+      historyHash.update('\0').update(JSON.stringify([
+        bounded(item.kind, 256), item.status, bounded(item.message, 1024),
+        item.timestamp
+      ]));
+    }
+  }
+  // Aggregate evidence is also part of the returned timeline projection.
+  historyHash.update('\0').update(String(task.evidence.length));
+  for (const item of task.evidence) {
+    historyHash.update('\0').update(JSON.stringify([
+      bounded(item.kind, 256), item.status, bounded(item.message, 1024),
+      item.timestamp
+    ]));
   }
   const snapshot = historyHash.digest('hex');
   if (options.before !== undefined && options.snapshot !== snapshot) {
