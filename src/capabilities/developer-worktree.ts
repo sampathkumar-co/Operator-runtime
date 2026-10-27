@@ -1,4 +1,5 @@
 import path from 'node:path';
+import fs from 'node:fs/promises';
 import type {
   ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider,
   CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult
@@ -57,12 +58,15 @@ function requiredDigest(value: string, label: string, lengths: number[]): string
   }
   return value.toLowerCase();
 }
-function exactRepository(inspected: DeveloperWorktreeInspection, requested: string): void {
-  const norm = (raw: string) => {
-    const resolved = path.resolve(raw).replace(/\\/g, '/').replace(/\/+$/, '');
+async function exactRepository(inspected: DeveloperWorktreeInspection, requested: string): Promise<void> {
+  // The manager binds ownership to fs.realpath() after accepting legal
+  // ancestor aliases (for example /var -> /private/var on macOS).
+  // Compare the same *physical* directory identity on both sides.
+  const norm = async (raw: string): Promise<string> => {
+    const resolved = (await fs.realpath(raw)).replace(/\\/g, '/').replace(/\/+$/, '');
     return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
   };
-  if (norm(inspected.record.repositoryRoot) !== norm(requested)) {
+  if (await norm(inspected.record.repositoryRoot) !== await norm(requested)) {
     throw new OperatorError('DEVELOPER_WORKTREE_REPOSITORY_BINDING_MISMATCH',
       'Session belongs to a different repository root.');
   }
@@ -127,7 +131,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
         const baseCommit = requiredDigest(literalField(action.input, 'baseCommit'), 'baseCommit', [40, 64]);
         mutationEntered = true;
         const inspected = await this.#manager.create({ sessionId, repositoryRoot, baseCommit });
-        exactRepository(inspected, repositoryRoot);
+        await exactRepository(inspected, repositoryRoot);
         if (inspected.record.phase !== 'ACTIVE' || !inspected.exists ||
             inspected.head !== baseCommit || inspected.clean !== true) {
           throw new OperatorError('DEVELOPER_WORKTREE_CREATE_UNCERTAIN',
@@ -137,17 +141,17 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
       }
       if (operation === 'workspace.worktree.inspect') {
         const inspected = await this.#manager.inspectReadOnly(sessionId);
-        exactRepository(inspected, repositoryRoot);
+        await exactRepository(inspected, repositoryRoot);
         return successful(action, inspected, started);
       }
 
       const expectedFingerprint = requiredDigest(
         literalField(action.input, 'expectedFingerprint'), 'expectedFingerprint', [64]);
       const before = await this.#manager.inspect(sessionId);
-      exactRepository(before, repositoryRoot);
+      await exactRepository(before, repositoryRoot);
       mutationEntered = true;
       const inspected = await this.#manager.release({ sessionId, expectedFingerprint });
-      exactRepository(inspected, repositoryRoot);
+      await exactRepository(inspected, repositoryRoot);
       if (inspected.record.phase !== 'RELEASED' || inspected.exists) {
         throw new OperatorError('DEVELOPER_WORKTREE_RELEASE_UNCERTAIN',
           'Release lacks an independently proved terminal absence.');
@@ -181,10 +185,11 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
       const sessionId = requiredSession(literalField(action.input, 'sessionId'));
       const repositoryRoot = requiredPath(literalField(action.input, 'repositoryRoot'));
       const inspected = await this.#manager.inspect(sessionId);
-      exactRepository(inspected, repositoryRoot);
+      await exactRepository(inspected, repositoryRoot);
       if (action.capability === 'workspace.worktree.create') {
         const baseCommit = requiredDigest(literalField(action.input, 'baseCommit'), 'baseCommit', [40, 64]);
         if (inspected.record.phase === 'ACTIVE' && inspected.exists &&
+            inspected.record.baseCommit === baseCommit &&
             inspected.head === baseCommit && inspected.clean === true) {
           return { status: 'completed', result: successful(action, inspected, 0),
             evidence: [evidence('developer_worktree_reconciliation', 'pass',
