@@ -211,6 +211,32 @@ function assertDedicatedProfileOptions(options: ManagedBrowserOptions): void {
   }
 }
 
+/**
+ * Lexical profile denial is not sufficient when a standard browser directory
+ * (or protected .operator root) is itself a junction/symlink. Resolve BOTH
+ * sides before evaluating containment; never treat an unreadable root as safe.
+ */
+export async function assertDedicatedResolvedProfileRoots(
+  profilePath: string, forbiddenRoots: readonly string[]
+): Promise<void> {
+  const actualProfile = await fs.realpath(profilePath);
+  for (const forbidden of forbiddenRoots) {
+    let actualRoot: string;
+    try {
+      actualRoot = await fs.realpath(forbidden);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    const relative = path.relative(actualRoot, actualProfile);
+    if (relative === '' || (!relative.startsWith('..' + path.sep) &&
+        relative !== '..' && !path.isAbsolute(relative))) {
+      throw new OperatorError('BROWSER_DEDICATED_PROFILE_FORBIDDEN',
+        'Dedicated profile resolves inside a standard browser or protected runtime directory.');
+    }
+  }
+}
+
 export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
   #options: ManagedBrowserOptions;
   #child?: ChildProcess;
@@ -287,6 +313,10 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
       }
       const actualProfilePath = await fs.realpath(dataDir);
       assertDedicatedProfileOptions({ ...this.#options, dataDir: actualProfilePath });
+      await assertDedicatedResolvedProfileRoots(actualProfilePath, [
+        ...candidateBrowserDataDirs(process.platform, process.env, os.homedir()),
+        path.join(os.homedir(), '.operator')
+      ]);
     } else {
       await fs.mkdir(dataDir, { recursive: true, mode: 0o700 });
     }
