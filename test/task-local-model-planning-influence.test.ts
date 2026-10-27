@@ -219,3 +219,64 @@ test('C05 model cannot bypass hard reconciliation after later unrelated success'
   assert.equal((await advisor.review(stale))?.command, 'RECONCILE');
   assert.equal(calls, 0);
 });
+
+
+
+test('C05 slow durable reservation never initiates a model call after task deadline', async () => {
+  let calls = 0;
+  const advisor = new LoopbackOllamaPlanningInfluence({
+    model: 'gemma3:1b', fetchFn: fakeFetch({ command: 'WAIT' }, () => { calls++; })
+  });
+  const input = request('WAIT', { timeout: 10 });
+  input.reserveModelBudget = async () => {
+    await new Promise(resolve => setTimeout(resolve, 40));
+  };
+  await assert.rejects(() => advisor.review(input),
+    (e: any) => e?.code === 'TASK_MODEL_INFLUENCE_TIMEOUT');
+  await new Promise(resolve => setTimeout(resolve, 55));
+  assert.equal(calls, 0);
+});
+
+test('C05 a hung durable reservation is interruptible by Stop without model dispatch', async () => {
+  let calls = 0;
+  const controller = new AbortController();
+  const advisor = new LoopbackOllamaPlanningInfluence({
+    model: 'gemma3:1b', fetchFn: fakeFetch({ command: 'WAIT' }, () => { calls++; })
+  });
+  const input = request('WAIT', { timeout: 1000 });
+  input.signal = controller.signal;
+  input.reserveModelBudget = async () => await new Promise<void>(() => {});
+  const result = advisor.review(input);
+  controller.abort();
+  await assert.rejects(result, (e: any) => e?.code === 'TASK_MODEL_INFLUENCE_ABORTED');
+  assert.equal(calls, 0);
+});
+
+test('C05 advisory understands the five canonical action-risk classes without expanding authority', async () => {
+  const seen: string[] = [];
+  const advisor = new LoopbackOllamaPlanningInfluence({
+    model: 'gemma3:1b',
+    fetchFn: fakeFetch({ command: 'WAIT' }, (_url, init) => {
+      seen.push(JSON.parse(String(init?.body)).prompt);
+    })
+  });
+  for (const risk of ['read', 'write', 'external', 'system', 'destructive'] as const) {
+    const input = request('WAIT');
+    input.risk = risk;
+    const response = await advisor.review(input);
+    assert.equal(response?.command, 'WAIT');
+    assert.equal(response?.grantsAuthority, false);
+  }
+  assert.equal(seen.length, 5);
+  for (const risk of ['read', 'write', 'external', 'system', 'destructive']) {
+    assert.ok(seen.some(text => text.includes('"risk":"' + risk + '"')));
+  }
+});
+
+test('C05 valid one-hour task context does not invalidate an eight-second advisory cap', async () => {
+  const advisor = new LoopbackOllamaPlanningInfluence({
+    model: 'gemma3:1b', fetchFn: fakeFetch({ command: 'ALLOW' })
+  });
+  const input = request('WAIT', { timeout: 60 * 60_000 });
+  assert.equal(await advisor.review(input), undefined);
+});
