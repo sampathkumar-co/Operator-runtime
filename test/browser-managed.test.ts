@@ -413,3 +413,19 @@ test('C03 dedicated mode refuses dangling DevToolsActivePort without deleting li
   assert.equal((await fs.lstat(port)).isSymbolicLink(), true);
   await launcher.close();
 });
+
+
+test('C03 strict owned profile refuses group/world readable POSIX browser data', async (t) => {
+  if (process.platform === 'win32') { t.skip('Windows requires independent ACL attestation'); return; }
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-owned-permissions-'));
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const executable = path.join(dataDir, 'fake-chrome');
+  await fs.writeFile(executable, 'not an executable');
+  await fs.chmod(dataDir, 0o755);
+  const launcher = new ManagedChromiumLauncher({
+    dedicatedProfileOnly: true, dataDir, executablePath: executable
+  });
+  await assert.rejects(launcher.ensureEndpoint(),
+    (e: any) => e?.code === 'BROWSER_DEDICATED_PROFILE_PERMISSIONS');
+  await launcher.close();
+});
