@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   ManagedBrowserProvider,
   ManagedChromiumLauncher,
+  assertDedicatedResolvedProfileRoots,
   buildManagedBrowserArgs,
   candidateBrowserDataDirs,
   candidateBrowserPaths,
@@ -38,6 +39,9 @@ test('managed browser launch args always use an isolated non-default data direct
   assert.equal(args.includes('--remote-debugging-port=0'), true);
   assert.equal(args.includes(`--user-data-dir=${dataDir}`), true);
   assert.equal(args.some((arg) => arg.includes('Default')), false);
+  assert.equal(args.includes('--headless=new'), false, 'Legacy launch should remain unchanged.');
+  assert.equal(buildManagedBrowserArgs(dataDir,{headless:true}).includes('--headless=new'),true,
+    'Opt-in owned profile must be able to launch Chrome without disturbing the user desktop.');
   assert.throws(() => buildManagedBrowserArgs(path.parse(dataDir).root), /non-root absolute path/);
 });
 
@@ -317,6 +321,41 @@ test('managed browser emergency lifecycle still closes owned child when delegate
   assert.equal(launcherClosed, true);
 });
 
+
+test('dedicated managed mode refuses configured CDP endpoints, legacy profiles and injected delegates', async(t)=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'mecord-owned-browser-policy-'));
+ t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+ assert.throws(()=>new ManagedBrowserProvider({dedicatedProfileOnly:true}),
+  /explicit absolute dataDir/);
+ assert.throws(()=>new ManagedBrowserProvider({dedicatedProfileOnly:true,dataDir:dir,
+  endpoint:'http://127.0.0.1:9222'}),/without external endpoint/);
+ assert.throws(()=>new ManagedBrowserProvider({dedicatedProfileOnly:true,dataDir:dir,
+  discoveryDataDirs:[dir]}),/without external endpoint/);
+ assert.throws(()=>new ManagedBrowserProvider({dedicatedProfileOnly:true,dataDir:dir,
+  autoLaunch:false}),/managed child launch/);
+ assert.throws(()=>new ManagedBrowserProvider({dedicatedProfileOnly:true,
+  dataDir:path.join(os.homedir(),'.operator','browser-profile')}),
+  /must not reuse a standard browser profile or protected runtime directory/);
+ const defaults=candidateBrowserDataDirs(process.platform,process.env,os.homedir());
+ if(defaults.length)assert.throws(()=>new ManagedBrowserProvider({dedicatedProfileOnly:true,
+  dataDir:defaults[0]}),/must not reuse a standard browser profile/);
+});
+
+test('owned Chromium launcher never deletes or adopts a pre-existing DevToolsActivePort',async(t)=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'mecord-owned-browser-existing-owner-'));
+ t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+ const executable=path.join(dir,process.platform==='win32'?'fake-chrome.exe':'fake-chrome');
+ await fs.writeFile(executable,'not a real executable');
+ const portFile=path.join(dir,'DevToolsActivePort');
+ const contents='62222\n/devtools/browser/foreign-owner\n';
+ await fs.writeFile(portFile,contents);
+ const launcher=new ManagedChromiumLauncher({dedicatedProfileOnly:true,
+  dataDir:dir,executablePath:executable});
+ await assert.rejects(launcher.ensureEndpoint(),/refuse to overwrite a potentially active owner/);
+ assert.equal(await fs.readFile(portFile,'utf8'),contents);
+ await launcher.close();
+});
+
 test('C03 managed browser discovery refuses oversized forged CDP version responses', async (t) => {
   const profileDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-cdp-oversized-'));
   t.after(() => fs.rm(profileDir, { recursive: true, force: true }));
@@ -335,4 +374,100 @@ test('C03 managed browser discovery refuses oversized forged CDP version respons
   await fs.writeFile(path.join(profileDir, 'DevToolsActivePort'),
     `${port}\n/devtools/browser/test-browser\n`);
   assert.equal(await discoverDevToolsEndpoint([profileDir]), undefined);
+});
+
+
+test('C03 dedicated mode refuses unprovisioned profile without creating it', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-owned-unprovisioned-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const executable = path.join(parent, process.platform === 'win32' ? 'fake-chrome.exe' : 'fake-chrome');
+  await fs.writeFile(executable, 'not a real executable');
+  const missing = path.join(parent, 'absent', 'dedicated-profile');
+  const launcher = new ManagedChromiumLauncher({
+    dedicatedProfileOnly: true, dataDir: missing, executablePath: executable
+  });
+  await assert.rejects(launcher.ensureEndpoint(),
+    (e: any) => e?.code === 'BROWSER_DEDICATED_PROFILE_NOT_PROVISIONED');
+  await assert.rejects(fs.lstat(missing), (e: any) => e?.code === 'ENOENT');
+  await launcher.close();
+});
+
+test('C03 dedicated mode refuses dangling DevToolsActivePort without deleting link', async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-owned-dangling-port-'));
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const executable = path.join(dataDir, process.platform === 'win32' ? 'fake-chrome.exe' : 'fake-chrome');
+  await fs.writeFile(executable, 'not a real executable');
+  const port = path.join(dataDir, 'DevToolsActivePort');
+  try {
+    await fs.symlink(path.join(dataDir, 'nonexistent-target'), port, 'file');
+  } catch (e) {
+    if (['EPERM', 'EACCES', 'ENOTSUP'].includes((e as NodeJS.ErrnoException).code ?? '')) {
+      t.skip('File symlink creation unavailable on runner'); return;
+    }
+    throw e;
+  }
+  const launcher = new ManagedChromiumLauncher({
+    dedicatedProfileOnly: true, dataDir, executablePath: executable
+  });
+  await assert.rejects(launcher.ensureEndpoint(),
+    (e: any) => e?.code === 'BROWSER_DEDICATED_PROFILE_IN_USE');
+  assert.equal((await fs.lstat(port)).isSymbolicLink(), true);
+  await launcher.close();
+});
+
+
+test('C03 strict owned profile refuses group/world readable POSIX browser data', async (t) => {
+  if (process.platform === 'win32') { t.skip('Windows requires independent ACL attestation'); return; }
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-owned-permissions-'));
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const executable = path.join(dataDir, 'fake-chrome');
+  await fs.writeFile(executable, 'not an executable');
+  await fs.chmod(dataDir, 0o755);
+  const launcher = new ManagedChromiumLauncher({
+    dedicatedProfileOnly: true, dataDir, executablePath: executable
+  });
+  await assert.rejects(launcher.ensureEndpoint(),
+    (e: any) => e?.code === 'BROWSER_DEDICATED_PROFILE_PERMISSIONS');
+  await launcher.close();
+});
+
+test('C03 canonical protected-root check rejects a symlink alias to existing user data', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-alias-scope-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const protectedDir = path.join(parent, 'real-protected');
+  const profile = path.join(protectedDir, 'existing-profile');
+  const alias = path.join(parent, 'protected-alias');
+  await fs.mkdir(profile, { recursive: true });
+  try {
+    await fs.symlink(protectedDir, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (e) {
+    if (['EPERM', 'EACCES', 'ENOTSUP'].includes((e as NodeJS.ErrnoException).code ?? '')) {
+      t.skip('Directory symlink unavailable on runner'); return;
+    }
+    throw e;
+  }
+  await assert.rejects(assertDedicatedResolvedProfileRoots(profile, [alias]),
+    (e: any) => e?.code === 'BROWSER_DEDICATED_PROFILE_FORBIDDEN');
+  const safe = path.join(parent, 'safe-target');
+  await fs.mkdir(safe);
+  await assert.doesNotReject(assertDedicatedResolvedProfileRoots(safe, [alias]));
+});
+
+test('C03 dedicated browser refuses dispatch after emergency Stop and close', async (t) => {
+  const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-owned-stopped-'));
+  t.after(() => fs.rm(profile, { recursive: true, force: true }));
+  const provider = new ManagedBrowserProvider({
+    dedicatedProfileOnly: true, dataDir: profile
+  });
+  await provider.emergencyStop();
+  const result = await provider.execute({
+    id: 'post-stop-browser-read',
+    capability: 'browser.inspect', risk: 'read', input: {},
+    provenance: { kind: 'runtime' }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'BROWSER_DEDICATED_STOPPED');
+  assert.equal(result.error?.sideEffectState, 'none');
+  assert.equal(result.error?.executionPhase, 'pre_dispatch');
+  await provider.close();
 });

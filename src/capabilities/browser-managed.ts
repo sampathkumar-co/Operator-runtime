@@ -36,6 +36,12 @@ export type ManagedBrowserOptions = {
   dataDir?: string;
   discoveryDataDirs?: string[];
   launchTimeoutMs?: number;
+  /**
+   * Opt-in ownership fence: launch a dedicated child using an explicitly supplied,
+   * isolated dataDir. Do not attach to configured/discovered/user Chrome sessions.
+   * The default remains unchanged for existing installations.
+   */
+  dedicatedProfileOnly?: boolean;
   launcher?: BrowserEndpointLauncher;
   /** Test/integration seam for a protocol-compatible CDP delegate. */
   delegate?: CapabilityProvider;
@@ -109,7 +115,7 @@ export function candidateBrowserDataDirs(platform: NodeJS.Platform, env: NodeJS.
   return values;
 }
 
-export function buildManagedBrowserArgs(dataDir: string): string[] {
+export function buildManagedBrowserArgs(dataDir: string, options: { headless?: boolean } = {}): string[] {
   const resolved = path.resolve(dataDir);
   if (!path.isAbsolute(dataDir) || resolved === path.parse(resolved).root) {
     throw new OperatorError('UNSAFE_BROWSER_DATA_DIR', 'Managed browser data directory must be a non-root absolute path.');
@@ -119,6 +125,7 @@ export function buildManagedBrowserArgs(dataDir: string): string[] {
     `--user-data-dir=${resolved}`,
     '--no-first-run',
     '--no-default-browser-check',
+    ...(options.headless ? ['--headless=new'] : []),
     'about:blank'
   ];
 }
@@ -176,16 +183,81 @@ export async function discoverDevToolsEndpoint(dataDirs: string[]): Promise<{ en
   return undefined;
 }
 
+/**
+ * Dedicated mode requires an independent, explicit profile directory and a new
+ * child process. Existing CDP ports, user browser roots, and protected runtime
+ * state are never implicitly reused.
+ */
+function assertDedicatedProfileOptions(options: ManagedBrowserOptions): void {
+  if (options.endpoint || options.discoveryDataDirs?.length || options.autoLaunch === false
+      || options.launcher || options.delegate || !options.dataDir || !path.isAbsolute(options.dataDir)) {
+    throw new OperatorError('BROWSER_DEDICATED_OWNERSHIP_INVALID',
+      'Dedicated mode requires an explicit absolute dataDir and managed child launch, without external endpoint, discovery, or delegate injection.');
+  }
+  const resolved = path.resolve(options.dataDir);
+  const forbidden = [
+    ...candidateBrowserDataDirs(process.platform, process.env, os.homedir()),
+    path.join(os.homedir(), '.operator')
+  ];
+  for (const root of forbidden) {
+    const relative = path.relative(root, resolved);
+    if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
+      throw new OperatorError('BROWSER_DEDICATED_PROFILE_FORBIDDEN',
+        'Dedicated profile must not reuse a standard browser profile or protected runtime directory.');
+    }
+  }
+  if (resolved === path.parse(resolved).root) {
+    throw new OperatorError('BROWSER_DEDICATED_PROFILE_FORBIDDEN', 'Dedicated profile must not be a filesystem root.');
+  }
+}
+
+/**
+ * Lexical profile denial is not sufficient when a standard browser directory
+ * (or protected .operator root) is itself a junction/symlink. Resolve BOTH
+ * sides before evaluating containment; never treat an unreadable root as safe.
+ */
+export async function assertDedicatedResolvedProfileRoots(
+  profilePath: string, forbiddenRoots: readonly string[]
+): Promise<void> {
+  const actualProfile = await fs.realpath(profilePath);
+  for (const forbidden of forbiddenRoots) {
+    let actualRoot: string;
+    try {
+      actualRoot = await fs.realpath(forbidden);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    const relative = path.relative(actualRoot, actualProfile);
+    if (relative === '' || (!relative.startsWith('..' + path.sep) &&
+        relative !== '..' && !path.isAbsolute(relative))) {
+      throw new OperatorError('BROWSER_DEDICATED_PROFILE_FORBIDDEN',
+        'Dedicated profile resolves inside a standard browser or protected runtime directory.');
+    }
+  }
+}
+
 export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
   #options: ManagedBrowserOptions;
   #child?: ChildProcess;
   #launchedEndpoint?: string;
+  #dedicatedEnsureInFlight?: Promise<string>;
 
   constructor(options: ManagedBrowserOptions = {}) {
     this.#options = options;
   }
 
   async ensureEndpoint(): Promise<string> {
+    if (this.#options.dedicatedProfileOnly) {
+      assertDedicatedProfileOptions(this.#options);
+      if (this.#dedicatedEnsureInFlight) return await this.#dedicatedEnsureInFlight;
+      const attempt = this.#ensureDedicatedEndpoint();
+      this.#dedicatedEnsureInFlight = attempt;
+      try { return await attempt; }
+      finally {
+        if (this.#dedicatedEnsureInFlight === attempt) this.#dedicatedEnsureInFlight = undefined;
+      }
+    }
     const configured = this.#options.endpoint ?? 'http://127.0.0.1:9222';
     if (await endpointHealthy(configured)) return configured;
     if (this.#launchedEndpoint && await endpointHealthy(this.#launchedEndpoint)) return this.#launchedEndpoint;
@@ -200,12 +272,68 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
       throw new OperatorError('BROWSER_ENDPOINT_UNAVAILABLE', 'No healthy configured or discoverable local Chromium CDP endpoint is available and managed auto-launch is disabled.', { retryable: true });
     }
 
+    return await this.#launchDedicated();
+  }
+
+  async #ensureDedicatedEndpoint(): Promise<string> {
+      if (this.#child && this.#child.exitCode === null && this.#child.signalCode === null
+          && this.#launchedEndpoint && await endpointHealthy(this.#launchedEndpoint)) {
+        return this.#launchedEndpoint;
+      }
+      // No configured/discovered endpoint can prove child-process ownership.
+      // Retire only a child owned by this launcher before any fresh spawn.
+      if (this.#child) await this.#terminateChild();
+      return await this.#launchDedicated();
+  }
+
+  async #launchDedicated(): Promise<string> {
     const executable = await this.#resolveExecutable();
     const dataDir = this.#managedDataDir();
-    const args = buildManagedBrowserArgs(dataDir);
-    await fs.mkdir(dataDir, { recursive: true, mode: 0o700 });
+    const args = buildManagedBrowserArgs(dataDir, { headless: this.#options.dedicatedProfileOnly });
+    if (this.#options.dedicatedProfileOnly) {
+      // The owner must provision a distinct directory in advance. Never mkdir
+      // through a symlinked parent and accidentally modify protected profiles.
+      // Realpath checks also catch aliases/junctions that bypass lexical checks.
+      let profile;
+      try {
+        profile = await fs.lstat(dataDir);
+      } catch {
+        throw new OperatorError('BROWSER_DEDICATED_PROFILE_NOT_PROVISIONED',
+          'Dedicated browser profile directory must already exist and be owner-provisioned.');
+      }
+      if (profile.isSymbolicLink() || !profile.isDirectory()) {
+        throw new OperatorError('BROWSER_DEDICATED_PROFILE_SYMLINK',
+          'Dedicated Chrome profile must be a real directory, not a symlink or file.');
+      }
+      if (process.platform !== 'win32' &&
+          ((profile.mode & 0o077) !== 0 ||
+           (typeof process.getuid === 'function' && profile.uid !== process.getuid()))) {
+        throw new OperatorError('BROWSER_DEDICATED_PROFILE_PERMISSIONS',
+          'Dedicated browser profile must belong to the current user and deny group/other access.');
+      }
+      const actualProfilePath = await fs.realpath(dataDir);
+      assertDedicatedProfileOptions({ ...this.#options, dataDir: actualProfilePath });
+      await assertDedicatedResolvedProfileRoots(actualProfilePath, [
+        ...candidateBrowserDataDirs(process.platform, process.env, os.homedir()),
+        path.join(os.homedir(), '.operator')
+      ]);
+    } else {
+      await fs.mkdir(dataDir, { recursive: true, mode: 0o700 });
+    }
     const portFile = path.join(dataDir, 'DevToolsActivePort');
-    await fs.rm(portFile, { force: true });
+    if (this.#options.dedicatedProfileOnly) {
+      // Use lstat, not stat: dangling symlinks must not be mistaken for absent
+      // ownership files. Never remove an existing port file owned elsewhere.
+      try {
+        await fs.lstat(portFile);
+        throw new OperatorError('BROWSER_DEDICATED_PROFILE_IN_USE',
+          'Dedicated browser profile already has DevToolsActivePort; refuse to overwrite a potentially active owner.');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      }
+    } else {
+      await fs.rm(portFile, { force: true });
+    }
 
     const child = spawn(executable, args, {
       shell: false,
@@ -242,6 +370,9 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
   }
 
   async close(): Promise<void> {
+    if (this.#dedicatedEnsureInFlight) {
+      await this.#dedicatedEnsureInFlight.catch(() => undefined);
+    }
     await this.#terminateChild();
   }
 
@@ -289,12 +420,19 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
 
 export class ManagedBrowserProvider implements CapabilityProvider {
   readonly name = 'browser.managed';
+  #dedicatedProfileOnly: boolean;
+  #dedicatedInitInFlight?: Promise<void>;
+  #dedicatedStopped = false;
   #delegate: CapabilityProvider;
   #launcher: BrowserEndpointLauncher;
   #endpoint: string;
 
   constructor(options: ManagedBrowserOptions = {}) {
-    this.#endpoint = options.endpoint ?? 'http://127.0.0.1:9222';
+    if (options.dedicatedProfileOnly) assertDedicatedProfileOptions(options);
+    this.#dedicatedProfileOnly = options.dedicatedProfileOnly === true;
+    // Strict mode must never make the first call against a user's default CDP port.
+    this.#endpoint = this.#dedicatedProfileOnly ? 'http://127.0.0.1:1'
+      : options.endpoint ?? 'http://127.0.0.1:9222';
     this.#delegate = options.delegate ?? new BrowserCdpProvider(this.#endpoint);
     this.#launcher = options.launcher ?? new ManagedChromiumLauncher(options);
   }
@@ -307,6 +445,48 @@ export class ManagedBrowserProvider implements CapabilityProvider {
 
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
+    if (this.#dedicatedProfileOnly) {
+      const stopped = (): ActionResult => ({
+        ok: false, capability: action.capability, provider: this.name,
+        evidence: [evidence('browser_ownership', 'fail',
+          'Dedicated Chromium was stopped before dispatch; no action was attempted.')],
+        error: { code: 'BROWSER_DEDICATED_STOPPED',
+          message: 'Dedicated browser is stopped; create a new provider for further work.',
+          retryable: false, sideEffectState: 'none', executionPhase: 'pre_dispatch' },
+        durationMs: Math.round(performance.now() - started)
+      });
+      if (this.#dedicatedStopped) return stopped();
+      try {
+        // The entire ownership startup AND delegate binding are single-flight.
+        // Shutdown waits for this boundary and prevents subsequent dispatch.
+        if (!this.#dedicatedInitInFlight) {
+          const inFlight = this.#bindDedicatedEndpoint();
+          this.#dedicatedInitInFlight = inFlight;
+          void inFlight.finally(() => {
+            if (this.#dedicatedInitInFlight === inFlight) {
+              this.#dedicatedInitInFlight = undefined;
+            }
+          }).catch(() => undefined);
+        }
+        await this.#dedicatedInitInFlight;
+      } catch (error) {
+        if (this.#dedicatedStopped) return stopped();
+        const op = error instanceof OperatorError ? error :
+          new OperatorError('BROWSER_DEDICATED_LAUNCH_FAILED',
+            'Dedicated browser could not establish an owned process.', { retryable: false });
+        return { ok: false, capability: action.capability, provider: this.name,
+          evidence: [evidence('browser_ownership', 'fail',
+            'No dedicated browser process was available; refused to attach to another Chrome instance.',
+            { code: op.code })],
+          error: { code: op.code, message: op.message, retryable: false, sideEffectState: 'none' },
+          durationMs: Math.round(performance.now() - started) };
+      }
+      if (this.#dedicatedStopped) return stopped();
+      // No await occurs between the Stop fence and dispatch. Any already
+      // dispatched action remains subject to canonical cancellation/uncertainty.
+      const result = await this.#delegate.execute(action, context);
+      return { ...result, provider: this.name };
+    }
     const first = await this.#delegate.execute(action, context);
     if (first.ok || !first.error?.code || !RECOVERABLE_CDP_CODES.has(first.error.code)) {
       return { ...first, provider: this.name };
@@ -381,7 +561,22 @@ export class ManagedBrowserProvider implements CapabilityProvider {
     await this.#closeOwnedResources();
   }
 
+  async #bindDedicatedEndpoint(): Promise<void> {
+    const endpoint = await this.#launcher.ensureEndpoint();
+    if (this.#dedicatedStopped || endpoint === this.#endpoint) return;
+    await this.#delegate.close?.();
+    if (this.#dedicatedStopped) return;
+    this.#endpoint = endpoint;
+    this.#delegate = new BrowserCdpProvider(endpoint);
+  }
+
   async #closeOwnedResources(): Promise<void> {
+    if (this.#dedicatedProfileOnly) {
+      this.#dedicatedStopped = true;
+      // The startup gate includes both launch and delegate replacement.
+      // Waiting here cannot leave a new delegate dispatching after shutdown.
+      await this.#dedicatedInitInFlight?.catch(() => undefined);
+    }
     const results = await Promise.allSettled([
       (async () => this.#delegate.close?.())(),
       (async () => this.#launcher.close())()
