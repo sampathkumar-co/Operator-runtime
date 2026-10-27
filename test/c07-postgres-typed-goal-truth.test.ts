@@ -172,3 +172,53 @@ test('C07 PostgreSQL SELECT proof requires completed known read from matching ca
   assert.equal(verifyGoalOutcomeTruth(task).ok, true,
     'only completed known matching SELECT read can verify data');
 });
+
+
+test('C07 SQL goal arrays must be dense own-data structures without executable accessors', () => {
+  const base = {
+    kind: 'postgres-select', root: '/registered', profileId: 'local',
+    schema: 'public', table: 'items', columns: ['id'], limit: 25,
+    offset: 0, timeoutMs: 5000
+  };
+  let getterCalls = 0;
+  const accessorArray: unknown[] = [];
+  Object.defineProperty(accessorArray, '0', {
+    enumerable: true, get() { getterCalls++; return 'id'; }
+  });
+  accessorArray.length = 1;
+  const nested: Record<string, unknown> = { field: 'id' };
+  Object.defineProperty(nested, 'op', {
+    enumerable: true, get() { getterCalls++; return 'eq'; }
+  });
+  const extra = ['id'] as any;
+  extra.every = () => { getterCalls++; return true; };
+  const cases: Array<Record<string, unknown>> = [
+    { columns: Array(1) }, { columns: accessorArray },
+    { columns: extra }, { filters: Array(1) },
+    { orderBy: Array(1) }, { filters: [nested] },
+    { orderBy: [new Date()] }, { columns: new Array(101).fill('id') }
+  ];
+  for (const [index, delta] of cases.entries()) {
+    const verdict = verifyGoalOutcomeTruth(makeGoal({ ...base, ...delta }));
+    assert.equal(verdict.supported, true);
+    assert.equal(verdict.ok, false, 'malformed SQL goal array case ' + index);
+    assert.match(verdict.detail, /malformed input types/);
+  }
+  const getterGoal: Record<string, unknown> = { ...base };
+  Object.defineProperty(getterGoal, 'columns', {
+    enumerable: true, get() { getterCalls++; return ['id']; }
+  });
+  const verdict = verifyGoalOutcomeTruth(makeGoal(getterGoal));
+  assert.equal(verdict.ok, false);
+  assert.match(verdict.detail, /malformed input types/);
+  assert.equal(getterCalls, 0, 'PostgreSQL goal validation must not invoke hooks');
+
+  const valid = verifyGoalOutcomeTruth(makeGoal({
+    ...base, filters: [{ field: 'id', op: 'eq', value: 'A' }],
+    orderBy: [{ field: 'id', direction: 'asc' }]
+  }));
+  assert.equal(valid.supported, true);
+  assert.equal(valid.ok, false);
+  assert.match(valid.detail, /result evidence does not match/,
+    'normal literal object operands remain supported');
+});
