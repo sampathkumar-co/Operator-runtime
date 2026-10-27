@@ -308,3 +308,35 @@ test('C10 forged object identifiers cannot acquire an approval or recovery displ
     );
   }
 });
+
+
+test('C10 independently passed verification must never be offered for a retry under no-effect claims', () => {
+  const cases = [
+    { actionId: 'contradicted-pre-dispatch', capability: 'file.replace',
+      retryable: true, sideEffectState: 'none' as const,
+      executionPhase: 'pre_dispatch' as const, verificationStatus: 'passed' as const,
+      updatedAt: NOW },
+    { actionId: 'contradicted-not-applied', capability: 'browser.interact',
+      retryable: true, sideEffectState: 'none' as const,
+      executionPhase: 'dispatched' as const, reconciliationStatus: 'not_applied' as const,
+      verificationStatus: 'passed' as const, updatedAt: NOW },
+    { actionId: 'contradicted-verified-result', capability: 'terminal.execute',
+      retryable: true, sideEffectState: 'known' as const,
+      reconciliationStatus: 'not_applied' as const,
+      verificationStatus: 'passed' as const, updatedAt: NOW }
+  ];
+  const model = buildRecoveryCenterModel(cases);
+  for (const candidate of cases) {
+    const item = model.items.find(value => value.actionId === candidate.actionId)!;
+    assert.equal(item.disposition, 'BLOCKED', candidate.actionId);
+    assert.equal(item.recommendedAction, 'ESCALATE', candidate.actionId);
+    assert.equal(item.requiresFreshApproval, false);
+  }
+  const ordinary = buildRecoveryCenterModel([{
+    actionId: 'verified-failed-before-dispatch', capability: 'file.replace',
+    retryable: true, sideEffectState: 'none' as const, executionPhase: 'pre_dispatch' as const,
+    verificationStatus: 'failed' as const, updatedAt: NOW
+  }]);
+  assert.equal(ordinary.items[0]!.recommendedAction, 'RETRY',
+    'a proven no-effect failed verification may still request fresh-authority retry');
+});
