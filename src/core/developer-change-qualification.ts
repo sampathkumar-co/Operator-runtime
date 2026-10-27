@@ -58,6 +58,11 @@ function inertRecord(input: unknown, code: string, label: string): Record<string
   }
   return copied;
 }
+function exactKeys(record: Record<string, unknown>, keys: readonly string[], code: string, label: string): void {
+  if (Object.keys(record).length !== keys.length || keys.some(key => !Object.hasOwn(record, key))) {
+    throw new OperatorError(code, label + ' contains missing or extra authority fields.');
+  }
+}
 function inertArray(input: unknown, max: number, code: string, label: string): unknown[] {
   if (!Array.isArray(input) || input.length > max) {
     throw new OperatorError(code, label + ' must be a bounded array.');
@@ -78,6 +83,8 @@ export function createDeveloperChangeQualificationPlan(input: {
   trustedCommandInspection: ActionResult;
 }): DeveloperChangeQualificationPlan {
   const request = inertRecord(input, 'DEVELOPER_QUALIFICATION_PLAN_INVALID', 'qualification request');
+  exactKeys(request, ['editPlan', 'trustedCommandInspection'],
+    'DEVELOPER_QUALIFICATION_PLAN_INVALID', 'qualification request');
   const editPlan = validateMultiFileEditPlan(request.editPlan as MultiFileEditPlan);
   const inspected = validateTrustedCommandInspection(request.trustedCommandInspection as ActionResult);
   const explicit = new Set(editPlan.verification.trustedCommandIds);
@@ -167,6 +174,10 @@ export function validateDeveloperChangeQualificationPlan(
   input: DeveloperChangeQualificationPlan
 ): DeveloperChangeQualificationPlan {
   const plan = inertRecord(input, 'DEVELOPER_QUALIFICATION_PLAN_INVALID', 'qualification plan') as unknown as DeveloperChangeQualificationPlan;
+  exactKeys(plan as unknown as Record<string, unknown>,
+    ['schemaVersion', 'id', 'editPlanId', 'projectRoot', 'changedPaths',
+      'requiredTestPaths', 'steps', 'reindexAfterFormatting'],
+    'DEVELOPER_QUALIFICATION_PLAN_INVALID', 'qualification plan');
   if (plan.schemaVersion !== 1 || typeof plan.id !== 'string' || !/^[0-9a-f]{64}$/.test(plan.id)) {
     throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', 'Qualification plan shape is invalid.');
   }
@@ -286,6 +297,9 @@ function validateTrustedCommandInspection(result: ActionResult): {
 
 function normalizeStep(input: DeveloperQualificationStep, expectedOrder: number): DeveloperQualificationStep {
   const step = inertRecord(input, 'DEVELOPER_QUALIFICATION_PLAN_INVALID', 'qualification step') as unknown as DeveloperQualificationStep;
+  exactKeys(step as unknown as Record<string, unknown>,
+    ['order', 'commandId', 'kind', 'risk', 'reason'],
+    'DEVELOPER_QUALIFICATION_PLAN_INVALID', 'qualification step');
   if (step.order !== expectedOrder) {
     throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', 'Qualification step order is not contiguous.');
   }
