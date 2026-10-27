@@ -261,6 +261,12 @@ function browserResourceKey(action: ActionRequest): string {
   const newTab = inertNamespaceInput(input, 'newTab');
   const targetId = inertNamespaceInput(input, 'targetId');
   const frameId = inertNamespaceInput(input, 'frameId');
+  if ((newTab !== undefined && newTab !== null && typeof newTab !== 'boolean') ||
+      (targetId !== undefined && targetId !== null && typeof targetId !== 'string') ||
+      (frameId !== undefined && frameId !== null && typeof frameId !== 'string')) {
+    throw new OperatorError('RESOURCE_TARGET_INVALID',
+      'Browser target, frame or newTab resource scope has malformed types.');
+  }
   const requestedTarget = action.capability === 'browser.navigate' && newTab === true
     ? undefined
     : typeof targetId === 'string' && targetId.trim()
