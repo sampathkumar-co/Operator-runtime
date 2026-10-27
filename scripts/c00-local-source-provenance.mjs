@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 const SHA = /^[a-f0-9]{64}$/;
 const FILE = /\.(?:ts|tsx|js|mjs|cjs|json|py|ps1|rs|cs|md)$/i;
 const BLOCKED = new Set(['.operator','.ssh','.git','.mecord-secrets',
-  '.env','node_modules','appdata','secrets','credentials','tokens']);
+  '.env','node_modules','secrets','credentials','tokens']);
 function invalid(message) { throw new Error('C00_LOCAL_PROVENANCE_INVALID: ' + message); }
 function ownData(value, keys, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
