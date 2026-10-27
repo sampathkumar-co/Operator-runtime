@@ -6,6 +6,8 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { DeveloperWorktreeProvider } from '../src/capabilities/developer-worktree.ts';
+import { developerWorktreeRecordPath } from '../src/core/developer-worktree.ts';
+import { writeDurableStateText } from '../src/core/durable-state.ts';
 import type { ActionRequest } from '../src/core/types.ts';
 import { supportedGitAvailable } from './git-test-support.ts';
 
@@ -209,4 +211,42 @@ test('C06 create recovery never certifies a moved HEAD as the original session c
   const proof = await provider.reconcile({ action: spoof });
   assert.equal(proof.status, 'uncertain',
     'moved HEAD may not certify a new create intent bound to another original commit');
+});
+
+
+test('C06 release preflight and reconciliation never finalize an unfinished create journal', async t => {
+  if (!supportedGitAvailable()) { t.skip('supported Git unavailable'); return; }
+  const fx = await fixture(t);
+  const provider = new DeveloperWorktreeProvider({
+    allowedRepositoryRoots: [fx.repositoryRoot], worktreeRoot: fx.worktreeRoot,
+    stateDir: fx.stateDir
+  });
+  const input = { sessionId: 'interrupted-create', repositoryRoot: fx.repositoryRoot,
+    baseCommit: fx.baseCommit };
+  const created = await provider.execute(action('workspace.worktree.create', 'write', input));
+  assert.equal(created.ok, true, created.error?.message);
+  const fingerprint = (created.output as Record<string, unknown>).fingerprint as string;
+  const file = developerWorktreeRecordPath(fx.stateDir, input.sessionId);
+  const record = JSON.parse(await fs.readFile(file, 'utf8'));
+  await writeDurableStateText(file, JSON.stringify({ ...record, phase: 'CREATING' }), {
+    maxBytes: 256 * 1024, errorCode: 'DEVELOPER_WORKTREE_STATE_CORRUPT',
+    invalidMessage: 'Developer worktree state is invalid.'
+  });
+  const before = await fs.readFile(file, 'utf8');
+  const release = action('workspace.worktree.release', 'destructive', {
+    ...input, expectedFingerprint: fingerprint
+  });
+  const denied = await provider.execute(release);
+  assert.equal(denied.ok, false);
+  assert.equal(denied.error?.code, 'DEVELOPER_WORKTREE_READ_UNCERTAIN');
+  assert.equal(denied.error?.sideEffectState, 'none');
+  assert.equal(denied.error?.executionPhase, 'pre_dispatch');
+  assert.equal(await fs.readFile(file, 'utf8'), before,
+    'release preflight cannot rewrite unfinished durable creation evidence');
+  const recon = await provider.reconcile({ action: release });
+  assert.equal(recon.status, 'uncertain');
+  assert.equal(await fs.readFile(file, 'utf8'), before,
+    'reconciliation cannot perform state changes while claiming independent proof');
+  assert.equal((await fs.readFile(path.join(fx.repositoryRoot, 'README.txt'), 'utf8')),
+    'original\n', 'original repository remains unmodified');
 });
