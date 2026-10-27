@@ -153,3 +153,60 @@ test('C06 private reconcile rejects wrongly risked release as unproven', async t
   assert.equal(outcome.status, 'uncertain',
     'mislabeled destructive action cannot certify read-only recovery');
 });
+
+
+test('C06 worktree creation and subsequent inspection accept symlinked ancestor paths', async t => {
+  if (process.platform === 'win32' || !supportedGitAvailable()) {
+    t.skip('directory aliases require a POSIX disposable Git fixture'); return;
+  }
+  const fx = await fixture(t);
+  const parent = path.dirname(fx.repositoryRoot);
+  const alias = path.join(parent, 'parent-alias');
+  await fs.symlink(parent, alias, 'dir');
+  const viaAncestorAlias = path.join(alias, path.basename(fx.repositoryRoot));
+  const provider = new DeveloperWorktreeProvider({
+    allowedRepositoryRoots: [fx.repositoryRoot],
+    worktreeRoot: fx.worktreeRoot, stateDir: fx.stateDir
+  });
+  const input = {
+    sessionId: 'alias-session', repositoryRoot: viaAncestorAlias,
+    baseCommit: fx.baseCommit
+  };
+  const result = await provider.execute(action('workspace.worktree.create', 'write', input));
+  assert.equal(result.ok, true, result.error?.message);
+  const inspected = await provider.execute(action('workspace.worktree.inspect', 'read', input));
+  assert.equal(inspected.ok, true, inspected.error?.message);
+  const state = result.output as Record<string, unknown>;
+  const release = await provider.execute(action('workspace.worktree.release', 'destructive', {
+    ...input, expectedFingerprint: state.fingerprint
+  }));
+  assert.equal(release.ok, true, release.error?.message);
+});
+
+test('C06 create recovery never certifies a moved HEAD as the original session commit', async t => {
+  if (!supportedGitAvailable()) { t.skip('supported Git unavailable'); return; }
+  const fx = await fixture(t);
+  const provider = new DeveloperWorktreeProvider({
+    allowedRepositoryRoots: [fx.repositoryRoot],
+    worktreeRoot: fx.worktreeRoot, stateDir: fx.stateDir
+  });
+  const original = action('workspace.worktree.create', 'write', {
+    sessionId: 'head-moved', repositoryRoot: fx.repositoryRoot,
+    baseCommit: fx.baseCommit
+  });
+  const result = await provider.execute(original);
+  assert.equal(result.ok, true, result.error?.message);
+  const worktree = (result.output as Record<string, unknown>).worktreePath as string;
+  await fs.writeFile(path.join(fx.repositoryRoot, 'README.txt'), 'new commit\n');
+  await git(fx.repositoryRoot, ['add', 'README.txt']);
+  await git(fx.repositoryRoot, ['commit', '-m', 'second']);
+  const newCommit = await git(fx.repositoryRoot, ['rev-parse', 'HEAD']);
+  await git(worktree, ['checkout', '--detach', newCommit]);
+  const spoof = action('workspace.worktree.create', 'write', {
+    sessionId: 'head-moved', repositoryRoot: fx.repositoryRoot,
+    baseCommit: newCommit
+  });
+  const proof = await provider.reconcile({ action: spoof });
+  assert.equal(proof.status, 'uncertain',
+    'moved HEAD may not certify a new create intent bound to another original commit');
+});
