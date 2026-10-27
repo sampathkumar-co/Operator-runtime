@@ -223,6 +223,14 @@ export function validateDeveloperChangeQualificationPlan(
     steps,
     reindexAfterFormatting: plan.reindexAfterFormatting === true
   };
+  // An attacker can recompute a SHA-256 over a forged plan. The digest is
+  // integrity addressing, not proof of a valid qualification lifecycle.
+  if (!steps.some(step => step.kind === 'lint' || step.kind === 'test' || step.kind === 'build') ||
+      (identity.requiredTestPaths.length > 0 && !steps.some(step => step.kind === 'test')) ||
+      identity.reindexAfterFormatting !== steps.some(step => step.kind === 'format' && step.risk === 'write')) {
+    throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID',
+      'Qualification plan lacks required verification or has inconsistent formatter/reindex contract.');
+  }
   const id = crypto.createHash('sha256').update(canonicalJson(identity), 'utf8').digest('hex');
   if (id !== plan.id) {
     throw new OperatorError(
