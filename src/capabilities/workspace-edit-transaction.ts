@@ -65,6 +65,8 @@ export interface WorkspaceEditTransactionRecord {
   workspaceRoot: string;
   planId: string;
   rollbackArtifactId?: string;
+  /** Persisted before first mutation, never inferred from target hashes. */
+  requiresVerification?: true;
   phase: WorkspaceEditTransactionPhase;
   files: WorkspaceEditTransactionFileRecord[];
   createdAt: string;
@@ -164,7 +166,7 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
     const record = await this.#readRecord(action.id);
     if (!record) throw new OperatorError('WORKSPACE_EDIT_DEFERRED_MISSING', 'No durable held edit exists.');
     assertRecordMatchesAction(record, workspaceRoot, parsed.plan);
-    if (record.phase !== 'VERIFICATION_PENDING') {
+    if (record.phase !== 'VERIFICATION_PENDING' || record.requiresVerification !== true) {
       throw new OperatorError('WORKSPACE_EDIT_DEFERRED_PHASE_INVALID', 'Edit is not awaiting trusted verification.');
     }
     return record;
@@ -219,7 +221,7 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
         );
       }
 
-      const prepared = await this.#stage(
+      const staged = await this.#stage(
         action,
         parsed.workspaceRootInput,
         workspaceRoot,
@@ -227,6 +229,11 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
         parsed.retainRollback,
         context
       );
+      // Persist the non-bypassable verifier requirement BEFORE first rename.
+      // A crash during APPLYING must never be auto-committed from hashes.
+      const prepared = deferFinalization
+        ? validateRecord({ ...staged, requiresVerification: true })
+        : staged;
       await this.#writeRecord(prepared);
 
       const applying = { ...prepared, phase: 'APPLYING' as const, updatedAt: this.#now() };
@@ -361,7 +368,7 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
     // Held edits must NEVER be auto-finalized or auto-rolled-back by general
     // reconciliation: a restart does not prove required trusted verifiers ran.
     // It remains uncertain until the dedicated verifier continuation acts.
-    if (record.phase === 'VERIFICATION_PENDING') {
+    if (record.requiresVerification === true && record.phase !== 'COMMITTED' && record.phase !== 'ROLLED_BACK') {
       return {
         status: 'uncertain',
         evidence: [evidence('workspace_edit_verification_hold', 'info',
@@ -794,6 +801,13 @@ function validateRecord(input: unknown): WorkspaceEditTransactionRecord {
   const rollbackArtifactId = raw.rollbackArtifactId === undefined
     ? undefined
     : digestField(raw.rollbackArtifactId, 'rollbackArtifactId');
+  if (raw.requiresVerification !== undefined && raw.requiresVerification !== true) {
+    throw corrupt('Deferred edit verification flag is invalid.');
+  }
+  const requiresVerification = raw.requiresVerification === true;
+  if (raw.phase === 'VERIFICATION_PENDING' && !requiresVerification) {
+    throw corrupt('A held edit requires the persisted verifier fence.');
+  }
   const phases = new Set<WorkspaceEditTransactionPhase>([
     'PREPARED', 'APPLYING', 'VERIFICATION_PENDING', 'COMMITTED_CLEANUP', 'COMMITTED', 'ROLLBACK_REQUIRED', 'ROLLED_BACK'
   ]);
@@ -812,6 +826,7 @@ function validateRecord(input: unknown): WorkspaceEditTransactionRecord {
     workspaceRoot,
     planId,
     ...(rollbackArtifactId ? { rollbackArtifactId } : {}),
+    ...(requiresVerification ? { requiresVerification: true as const } : {}),
     phase: raw.phase as WorkspaceEditTransactionPhase,
     files,
     createdAt,
