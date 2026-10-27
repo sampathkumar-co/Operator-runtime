@@ -49,9 +49,11 @@ function context(options: { observation?: 'fresh' | 'stale' | 'unknown'; verifie
   });
   if (verifiedSetup) plan.subgoals[0]!.status = 'VERIFIED';
   const observation = observationChoice === 'unknown'
-    ? { schemaVersion: 2, domain: 'browser', channel: 'semantic', epistemicStatus: 'UNKNOWN', ambiguous: false,
+    ? { schemaVersion: 2, domain: 'browser', channel: 'semantic', capability: 'project.inspect',
+        epistemicStatus: 'UNKNOWN', ambiguous: false,
         observedAt: new Date(TIME - 1000).toISOString() }
-    : { schemaVersion: 2, domain: 'project', channel: 'semantic', epistemicStatus: 'KNOWN', ambiguous: false,
+    : { schemaVersion: 2, domain: 'project', channel: 'semantic', capability: 'project.inspect',
+        epistemicStatus: 'KNOWN', ambiguous: false,
         observedAt: new Date(TIME - (observationChoice === 'stale' ? 180_000 : 1000)).toISOString() };
   return {
     task: {
@@ -61,6 +63,9 @@ function context(options: { observation?: 'fresh' | 'stale' | 'unknown'; verifie
       execution: {
         plannerState: { durablePlan: plan }, records: [{
           state: 'SUCCEEDED', observation, capability: 'project.inspect',
+          risk: 'read',
+          startedAt: new Date(TIME - 2000).toISOString(),
+          finishedAt: new Date(TIME - 500).toISOString(),
           actionId: 'prior-action', stepKey: 'autonomous:0:verify'
         }]
       }
@@ -638,4 +643,37 @@ test('C05 Stop interrupts uncooperative dynamic composition reservation without 
   await assert.rejects(running, (e: any) => e?.code === 'TASK_PLANNER_ABORTED');
   assert.equal(modelCalls, 0);
   assert.equal(ctx.task.execution!.plannerState.durablePlan.revision, before);
+});
+
+
+test('C05 scheduler refuses model influence when a read receipt is not causally bound', async () => {
+  let modelCalls = 0;
+  let reservations = 0;
+  const planner = new LocalModelAutonomousWorkflowPlanner({
+    model: 'local-planner:latest', now: () => TIME,
+    fetchFn: (async () => { modelCalls++; throw Error('must not infer from forged receipt'); }) as typeof fetch
+  });
+  const invalidReads: Array<(ctx: TaskPlannerContext) => void> = [
+    ctx => { ctx.task.execution!.records[0]!.risk = 'write'; },
+    ctx => { ctx.task.execution!.records[0]!.finishedAt = undefined; },
+    ctx => { ctx.task.execution!.records[0]!.startedAt = new Date(TIME - 500).toISOString(); },
+    ctx => { ctx.task.execution!.records[0]!.finishedAt = new Date(TIME - 1500).toISOString(); },
+    ctx => { ctx.task.execution!.records[0]!.finishedAt = new Date(TIME + 100).toISOString(); },
+    ctx => { if (ctx.task.execution!.records[0]!.observation?.schemaVersion === 2) {
+      ctx.task.execution!.records[0]!.observation.capability = 'browser.inspect';
+    } }
+  ];
+  for (const [index, mutate] of invalidReads.entries()) {
+    const ctx = context();
+    ctx.reserveModelBudget = async () => { reservations++; };
+    mutate(ctx);
+    const decision = await planner.next(ctx);
+    assert.equal(decision.type, 'step', 'invalid receipt case ' + index);
+    if (decision.type === 'step') {
+      assert.equal(decision.key, 'autonomous:1:observe',
+        'unproven observation must preserve deterministic scheduler order');
+    }
+  }
+  assert.equal(reservations, 0, 'no durable model-call reservation on an unproven read');
+  assert.equal(modelCalls, 0, 'no local-model network call on an unproven read');
 });
