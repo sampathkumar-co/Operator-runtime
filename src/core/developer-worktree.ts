@@ -155,6 +155,23 @@ export class DeveloperWorktreeManager {
     });
   }
 
+  /** Independent read must not finalize CREATING/RELEASING journals.
+   * Recovery-capable inspect() intentionally retains its existing semantics. */
+  async inspectReadOnly(sessionIdInput: string): Promise<DeveloperWorktreeInspection> {
+    return await this.#enqueue(sessionIdInput, async () => {
+      await this.#init();
+      const sessionId = normalizeSessionId(sessionIdInput);
+      const record = await this.#requireRecord(sessionId);
+      if (record.phase === 'CREATING' || record.phase === 'RELEASING') {
+        throw new OperatorError('DEVELOPER_WORKTREE_READ_UNCERTAIN',
+          'Read-only inspection cannot finalize a pending worktree transaction.');
+      }
+      // ACTIVE and RELEASED phases are independently checked by
+      // #reconcileRecord without changing the durable phase.
+      return await this.#reconcileRecord(record);
+    });
+  }
+
   async release(input: {
     sessionId: string;
     expectedFingerprint: string;
