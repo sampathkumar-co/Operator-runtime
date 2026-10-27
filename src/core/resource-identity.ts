@@ -255,7 +255,7 @@ export async function privateDeveloperWorktreeResourceKeysForAction(
   }
   const identity = await physicalPathIdentity(root);
   return [
-    'developer-worktree:session:' + escapeSegment(sessionId),
+    'developer-worktree:session:' + sessionId,
     identity.pathKey,
     ...(identity.objectKey ? [identity.objectKey] : [])
   ].sort();
