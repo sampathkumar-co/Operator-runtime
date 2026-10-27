@@ -207,6 +207,60 @@ export async function resolvePhysicalResourceKeysForAction(action: ActionRequest
   return [...keys].sort();
 }
 
+/**
+ * Private C06 worktree identity contract. Do NOT add these capabilities to
+ * RESOURCE_EXTRACTOR_CAPABILITIES or the public runtime until their canonical
+ * risks, authorization paths and provider registration have been reviewed.
+ *
+ * Uses the same physical-directory resolution as ordinary Git actions, so a
+ * symlinked ancestor cannot create an unrelated lock domain for the same
+ * repository. A stable session key also conflicts before a path can be read.
+ */
+export async function privateDeveloperWorktreeResourceKeysForAction(
+  action: ActionRequest
+): Promise<string[]> {
+  const risks: Record<string, 'read' | 'write' | 'destructive'> = {
+    'workspace.worktree.create': 'write',
+    'workspace.worktree.inspect': 'read',
+    'workspace.worktree.release': 'destructive'
+  };
+  if (!Object.prototype.hasOwnProperty.call(risks, action.capability) ||
+      risks[action.capability] !== action.risk) {
+    throw new OperatorError('RESOURCE_TARGET_INVALID',
+      'Worktree capability has no matching private canonical risk contract.');
+  }
+  const input = action.input;
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      (Object.getPrototypeOf(input) !== Object.prototype &&
+       Object.getPrototypeOf(input) !== null)) {
+    throw new OperatorError('RESOURCE_TARGET_INVALID',
+      'Worktree identity must be an inert input object.');
+  }
+  const field = (name: 'repositoryRoot' | 'sessionId'): string => {
+    const descriptor = Object.getOwnPropertyDescriptor(input, name);
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor) ||
+        typeof descriptor.value !== 'string') {
+      throw new OperatorError('RESOURCE_TARGET_INVALID',
+        'Worktree identity field must be a literal string: ' + name);
+    }
+    return descriptor.value;
+  };
+  const sessionId = field('sessionId');
+  const root = field('repositoryRoot');
+  if (!/^[A-Za-z0-9._:@-]{1,128}$/.test(sessionId) ||
+      !path.isAbsolute(root) || root.includes('\0') ||
+      Buffer.byteLength(root, 'utf8') > 32768) {
+    throw new OperatorError('RESOURCE_TARGET_INVALID',
+      'Worktree session or repository root is invalid.');
+  }
+  const identity = await physicalPathIdentity(root);
+  return [
+    'developer-worktree:session:' + escapeSegment(sessionId),
+    identity.pathKey,
+    ...(identity.objectKey ? [identity.objectKey] : [])
+  ].sort();
+}
+
 export function resourceKeysConflict(left: string, right: string): boolean {
   const normalizedLeft = normalizeLegacyResourceKey(left);
   const normalizedRight = normalizeLegacyResourceKey(right);
