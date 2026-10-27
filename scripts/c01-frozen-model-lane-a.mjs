@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { buildWave0EvaluationReport } from './wave0-evaluation.mjs';
+import { requireDenseEvaluationArray, requireFrozenEvaluationCases } from './c01-inert-evaluation-input.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
 const HASH = /^[0-9a-f]{64}$/;
@@ -63,6 +64,25 @@ export async function runFrozenModelLaneA(input) {
       input.maxCostMicrosPerCall < 0 || input.maxCostMicrosPerCall > 2_000_000 ||
       !Number.isSafeInteger(input.maxLatencyMs) || input.maxLatencyMs < 100 ||
       input.maxLatencyMs > 45000) fail('Explicit bounded model, exact source and frozen cases are required.');
+  requireFrozenEvaluationCases(input.cases, 1, 200, fail, 'model-only cases',
+    ['id','version','seed','observation','choices','correctChoiceId']);
+  for (const item of input.cases) {
+    requireDenseEvaluationArray(item.choices, 2, 10, fail, 'model-only choices');
+    for (const choice of item.choices) {
+      // Choice descriptions are shown to the model. Their identity must be
+      // ordinary immutable input, not getter-backed executable source.
+      const proto = choice && typeof choice === 'object' && !Array.isArray(choice)
+        ? Object.getPrototypeOf(choice) : null;
+      if ((proto !== Object.prototype && proto !== null) || !choice ||
+          typeof choice !== 'object' || Array.isArray(choice) ||
+          Reflect.ownKeys(choice).some(key => typeof key !== 'string' ||
+            !['id','description'].includes(key) ||
+            !Object.getOwnPropertyDescriptor(choice, key)?.enumerable ||
+            !('value' in Object.getOwnPropertyDescriptor(choice, key)))) {
+        fail('model-only choice contains an executable or hidden field');
+      }
+    }
+  }
   const scenarios = input.cases.map(entry => ({...entry,
     ...snapshot(entry)}));
   if (new Set(scenarios.map(x => x.id + ':' + x.version + ':' + x.seed)).size !== scenarios.length) {
