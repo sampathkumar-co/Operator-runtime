@@ -90,7 +90,8 @@ test('C06 isolated provider validates exact create, inspect, clean release and d
   const resultRelease = await provider.execute(release);
   assert.equal(resultRelease.ok, true, resultRelease.error?.message);
   assert.equal((resultRelease.output as Record<string, unknown>).phase, 'RELEASED');
-  assert.equal((await provider.reconcile({ action: release })).status, 'completed');
+  assert.equal((await provider.reconcile({ action: release })).status, 'uncertain',
+    'terminal absence alone cannot prove which release fingerprint authorized it');
   assert.equal((await fs.readFile(path.join(fx.repositoryRoot, 'README.txt'), 'utf8')),
     'original\n', 'source repository must not be modified or removed');
 });
@@ -134,4 +135,21 @@ test('C06 private worktree provider denies coerced identities, invalid risk and 
   assert.equal((await provider.reconcile({ action: action(
     'workspace.worktree.create', 'write', target
   ) })).status, 'uncertain', 'missing journal is never evidence of no side effect');
+});
+
+
+test('C06 private reconcile rejects wrongly risked release as unproven', async t => {
+  if (!supportedGitAvailable()) { t.skip('supported Git unavailable'); return; }
+  const fx = await fixture(t);
+  const provider = new DeveloperWorktreeProvider({
+    allowedRepositoryRoots: [fx.repositoryRoot],
+    worktreeRoot: fx.worktreeRoot, stateDir: fx.stateDir
+  });
+  const forged = action('workspace.worktree.release', 'read', {
+    repositoryRoot: fx.repositoryRoot, sessionId: 'owned-test',
+    expectedFingerprint: 'a'.repeat(64)
+  });
+  const outcome = await provider.reconcile({ action: forged });
+  assert.equal(outcome.status, 'uncertain',
+    'mislabeled destructive action cannot certify read-only recovery');
 });
