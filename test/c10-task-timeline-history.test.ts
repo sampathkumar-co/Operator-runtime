@@ -108,3 +108,32 @@ test('C10 authenticated read-only history UI is source-backed and contains no HT
   assert.ok(ui.includes('document.createDocumentFragment()'));
   assert.equal(ui.includes('innerHTML'), false);
 });
+
+
+test('C10 a reconciled existing action or edited evidence invalidates an earlier-page snapshot', () => {
+  const cases: Array<(task: ReturnType<typeof longTask>) => void> = [
+    task => { task.execution!.records[0]!.state = 'FAILED'; },
+    task => { task.execution!.records[0]!.finishedAt = '2026-10-01T00:00:30.000Z'; },
+    task => { task.execution!.records[0]!.errorCode = 'RECONCILIATION_REQUIRED'; },
+    task => { task.execution!.records[0]!.evidence[0]!.status = 'fail'; },
+    task => { task.execution!.records[0]!.evidence[0]!.message = 'Unverified read'; },
+    task => { task.failures[0]!.message = 'Outcome is now uncertain'; },
+    task => { task.state = 'FAILED'; },
+    task => { task.evidence.push({
+      kind: 'independent_verification', status: 'info',
+      message: 'Previously unseen evidence', timestamp: '2026-10-01T00:00:00.000Z'
+    }); }
+  ];
+  for (const [index, modify] of cases.entries()) {
+    const task = longTask();
+    const projection = projectTaskRuntime(task);
+    const current = buildControlCenterTaskTimeline(task, projection);
+    const options = { before: current.page.nextBefore!, limit: 100, snapshot: current.page.snapshot };
+    assert.equal(buildControlCenterTaskTimeline(task, projection, options).timeline.length, 100);
+    const originalUpdatedAt = task.updatedAt;
+    modify(task);
+    assert.equal(task.updatedAt, originalUpdatedAt, 'test must not rely on modified task.updatedAt');
+    assert.throws(() => buildControlCenterTaskTimeline(task, projection, options),
+      /TASK_TIMELINE_SNAPSHOT_STALE/, 'edited existing record case ' + index);
+  }
+});
