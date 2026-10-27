@@ -196,3 +196,18 @@ test('C05 model proposal requires dense inert checks, steps and observable condi
   assert.throws(() => validateTaskGoalProposal(suspicious, approved),
     (e: any) => e?.code === 'TASK_PROPOSAL_INVALID');
 });
+
+
+test('C05 already-aborted model input rejects without uncaught deferred rejection or fetch', async () => {
+  let calls = 0;
+  const cancelled = new AbortController();
+  cancelled.abort();
+  const adapter = new LoopbackOllamaTaskGoalInterpreter({
+    model: 'local-test:latest',
+    fetchFn: (async () => { calls += 1; throw Error('should never be contacted'); }) as typeof fetch
+  });
+  await assert.rejects(() => adapter.propose({ ...approved, signal: cancelled.signal }),
+    (e: any) => e?.code === 'TASK_MODEL_CANCELLED');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 0);
+});
