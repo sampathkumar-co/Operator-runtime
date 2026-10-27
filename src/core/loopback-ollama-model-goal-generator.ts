@@ -81,7 +81,7 @@ export class LoopbackOllamaModelGoalGenerator implements ModelGoalGenerator {
       };
       input.signal.addEventListener('abort', onAbort!, { once: true });
       // Covers a racing cancellation between the earlier check and listener.
-      if (input.signal.aborted) onAbort();
+      if (input.signal.aborted) onAbort!();
     });
 
     try {
@@ -139,7 +139,8 @@ export class LoopbackOllamaModelGoalGenerator implements ModelGoalGenerator {
           chunks.push(value);
         }
       } finally {
-        try { await reader.cancel(); } catch { /* cancellation is best effort */ }
+        // A hostile transport must not stall the size/deadline failure path.
+        void reader.cancel().catch(() => undefined);
       }
 
       let envelope: unknown;
