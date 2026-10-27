@@ -143,18 +143,27 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
       const affected = terminalAffectedPaths(action);
       if (affected.length === 0) keys.add('filesystem:any');
       else for (const affectedPath of affected) add('file', affectedPath, keys);
-      if (Array.isArray(input.ports)) {
-        for (const value of input.ports.slice(0, 128)) {
-          const port = Number(value);
-          if (Number.isSafeInteger(port) && port >= 1 && port <= 65535) keys.add('network:tcp:' + String(port));
+      if (input.ports !== undefined) {
+        if (!Array.isArray(input.ports) || input.ports.length > 128) {
+          throw new OperatorError('RESOURCE_TARGET_INVALID', 'Terminal session port declarations are invalid.');
+        }
+        // Provider dispatch already requires literal 1..65535 ports. Do
+        // not run caller valueOf()/toString() while computing resource locks.
+        for (const port of input.ports) {
+          if (typeof port !== 'number' || !Number.isSafeInteger(port) ||
+              port < 1 || port > 65535) {
+            throw new OperatorError('RESOURCE_TARGET_INVALID', 'Terminal port identity must be a literal number.');
+          }
+          keys.add('network:tcp:' + String(port));
         }
       }
     } else if (typeof input.sessionId === 'string' && input.sessionId) {
       keys.add(`process:session/${requiredSegment(input.sessionId, 'session')}`);
     }
   } else if (action.capability === 'process.inspect' || action.capability === 'process.manage') {
-    const pid = Number(input.pid);
-    keys.add(Number.isSafeInteger(pid) && pid > 0 ? `process:windows/${pid}` : 'process:windows');
+    const pid = input.pid;
+    keys.add(typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0
+      ? `process:windows/${pid}` : 'process:windows');
   } else if (action.capability.startsWith('browser.')) {
     keys.add(browserResourceKey(action));
   } else if (action.capability.startsWith('app.') || action.capability === 'visual.capture' || action.capability === 'input.operate') {
@@ -187,7 +196,9 @@ export async function resolvePhysicalResourceKeysForAction(action: ActionRequest
   }
 
   if (action.capability === 'process.inspect' || action.capability === 'process.manage') {
-    keys.add(`process:windows/${escapeSegment(String(input.pid ?? 'global'))}`);
+    const pid = input.pid;
+    keys.add(typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0
+      ? `process:windows/${pid}` : 'process:windows');
   }
 
   if (action.capability.startsWith('app.') || action.capability === 'visual.capture' || action.capability === 'input.operate') {
