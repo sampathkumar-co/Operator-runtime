@@ -19,6 +19,8 @@ test('C02/C03 browser and database resource namespaces never coerce attacker-own
     req('browser.inspect', { sessionId: forged }),
     req('browser.inspect', { sessionId: ['owned-session'] }),
     req('browser.tab.focus', { sessionId: 'safe', targetId: forged }),
+    req('browser.tab.focus', { sessionId: 'safe', frameId: forged }),
+    req('browser.navigate', { sessionId: 'safe', newTab: forged }),
     req('browser.inspect', { sessionId: 'x'.repeat(300) }),
     req('postgres.select', { path: '/workspace', profileId: forged }),
     req('postgres.inspect', { path: '/workspace', profileId: ['my-db'] }),
