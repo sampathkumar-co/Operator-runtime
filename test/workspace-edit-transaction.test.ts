@@ -323,6 +323,8 @@ test('R3 private deferred edit retains exact backup until explicit trusted final
     workspaceEditTransactionJournalPath(stateDir,a.id),JOURNAL_OPTIONS
   )) as WorkspaceEditTransactionRecord;
   assert.equal(heldRecord.phase,'VERIFICATION_PENDING');
+  assert.equal(heldRecord.requiresVerification,true,
+    'verifier fence must survive crashes from PREPARED through APPLYING');
   assert.equal((await fs.stat(heldRecord.files[0]!.backupPath)).isFile(),true);
 
   const restarted=new WorkspaceEditTransactionProvider({
@@ -415,4 +417,60 @@ test('R3 public transaction execute never honors untrusted deferFinalization inp
   )) as WorkspaceEditTransactionRecord;
   assert.equal(record.phase,'COMMITTED');
   await assert.rejects(()=>tx.rollbackDeferred(a),(e:any)=>e?.code==='WORKSPACE_EDIT_DEFERRED_PHASE_INVALID');
+});
+
+
+
+test('R3 a crash during deferred APPLYING cannot turn exact target hashes into verified completion', async t => {
+  const {root,stateDir}=await fixture(t);
+  const initial='export const state = 1;\n';
+  await fs.writeFile(path.join(root,'state.ts'),initial);
+  const plan=createMultiFileEditPlan({
+    files:[{path:'state.ts',expectedSha256:digest(initial),
+      edits:[{start:initial.indexOf('1'),end:initial.indexOf('1')+1,replacement:'2'}]}]
+  });
+  const a=action('r3-deferred-crash-window',root,plan);
+  const provider=new WorkspaceEditTransactionProvider({
+    allowedRoots:[root],stateDir,windowsPathLeaseExecutable:WINDOWS_PATH_LEASE_EXECUTABLE
+  });
+  assert.equal((await provider.executeDeferred(a)).ok,true);
+  const journalPath=workspaceEditTransactionJournalPath(stateDir,a.id);
+  const record=JSON.parse(await readDurableStateText(journalPath,JOURNAL_OPTIONS)) as WorkspaceEditTransactionRecord;
+  assert.equal(record.requiresVerification,true);
+  // Simulate power loss after all renames but before writing final HELD phase.
+  const crashed={...record,phase:'APPLYING'};
+  await writeDurableStateText(journalPath,JSON.stringify(crashed),JOURNAL_OPTIONS);
+  const restarted=new WorkspaceEditTransactionProvider({
+    allowedRoots:[root],stateDir,windowsPathLeaseExecutable:WINDOWS_PATH_LEASE_EXECUTABLE
+  });
+  assert.equal((await restarted.reconcile({action:a})).status,'uncertain');
+  const unchanged=JSON.parse(await readDurableStateText(journalPath,JOURNAL_OPTIONS)) as WorkspaceEditTransactionRecord;
+  assert.equal(unchanged.phase,'APPLYING');
+  assert.equal(unchanged.requiresVerification,true);
+  assert.equal(await fs.readFile(path.join(root,'state.ts'),'utf8'),'export const state = 2;\n');
+  assert.equal((await fs.stat(record.files[0]!.backupPath)).isFile(),true);
+  await assert.rejects(()=>restarted.finalizeDeferred(a),
+    (e:any)=>e?.code==='WORKSPACE_EDIT_DEFERRED_PHASE_INVALID');
+});
+
+test('R3 rejects forged pending-verifier records without durable pre-dispatch verification fence', async t => {
+  const {root,stateDir}=await fixture(t);
+  const initial='let hidden = 1;\n';
+  await fs.writeFile(path.join(root,'hidden.ts'),initial);
+  const plan=createMultiFileEditPlan({
+    files:[{path:'hidden.ts',expectedSha256:digest(initial),
+      edits:[{start:initial.indexOf('1'),end:initial.indexOf('1')+1,replacement:'2'}]}]
+  });
+  const a=action('r3-deferred-missing-fence',root,plan);
+  const tx=new WorkspaceEditTransactionProvider({
+    allowedRoots:[root],stateDir,windowsPathLeaseExecutable:WINDOWS_PATH_LEASE_EXECUTABLE
+  });
+  assert.equal((await tx.executeDeferred(a)).ok,true);
+  const file=workspaceEditTransactionJournalPath(stateDir,a.id);
+  const record=JSON.parse(await readDurableStateText(file,JOURNAL_OPTIONS)) as WorkspaceEditTransactionRecord;
+  delete record.requiresVerification;
+  await writeDurableStateText(file,JSON.stringify(record),JOURNAL_OPTIONS);
+  await assert.rejects(()=>tx.finalizeDeferred(a),
+    (e:any)=>e?.code==='WORKSPACE_EDIT_TRANSACTION_CORRUPT');
+  assert.equal((await tx.reconcile({action:a})).status,'uncertain');
 });
