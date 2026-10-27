@@ -104,12 +104,23 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
     const last = context.task.execution!.records.at(-1);
     const observation = last?.observation;
     const observedAt = observation?.observedAt ? Date.parse(observation.observedAt) : NaN;
-    const ageMs = this.#now() - observedAt;
+    const nowMs = this.#now();
+    const ageMs = nowMs - observedAt;
+    const startedAt = Date.parse(last?.startedAt ?? '');
+    const finishedAt = Date.parse(last?.finishedAt ?? '');
+    // A fresh-looking timestamp alone is not independent proof. The exact
+    // read capability must have observed within its own persisted action
+    // window, and that action must have finished before local model inference.
+    const causalRead = last?.risk === 'read' &&
+      observation?.schemaVersion === 2 && observation.capability === last.capability &&
+      Number.isFinite(startedAt) && Number.isFinite(finishedAt) &&
+      Number.isFinite(observedAt) && Number.isFinite(nowMs) &&
+      startedAt <= observedAt && observedAt <= finishedAt && finishedAt <= nowMs;
     // Do not treat uncertain, ambiguous, expired or forged/unpersisted observations
     // as evidence for AI scheduling. Before observation, use deterministic ordering.
     if (last?.state !== 'SUCCEEDED' || !/^autonomous:\d+:verify$/.test(last.stepKey) ||
       observation?.schemaVersion !== 2 || observation.epistemicStatus !== 'KNOWN' || observation.ambiguous ||
-      !Number.isFinite(ageMs) || ageMs < 0 || ageMs > 120_000) {
+      !causalRead || !Number.isFinite(ageMs) || ageMs < 0 || ageMs > 120_000) {
       return this.#builtin.next(context);
     }
 
