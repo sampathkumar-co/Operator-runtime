@@ -42,6 +42,7 @@ const STATE_OPTIONS = {
 export type WorkspaceEditTransactionPhase =
   | 'PREPARED'
   | 'APPLYING'
+  | 'VERIFICATION_PENDING'
   | 'COMMITTED_CLEANUP'
   | 'COMMITTED'
   | 'ROLLBACK_REQUIRED'
@@ -107,7 +108,81 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
   }
 
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
-    return await this.#enqueue(async () => await this.#executeSerial(action, context));
+    return await this.#enqueue(async () => await this.#executeSerial(action, context, false));
+  }
+
+  /**
+   * Internal-only hold. Deliberately NOT dispatched via execute() or parsed
+   * from public action.input: a caller cannot promote arbitrary edits to a
+   * verification hold by supplying a field.
+   */
+  async executeDeferred(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
+    return await this.#enqueue(async () => await this.#executeSerial(action, context, true));
+  }
+
+  /** Only the trusted verifier workflow may call this after its checks pass. */
+  async finalizeDeferred(action: ActionRequest): Promise<ActionResult> {
+    return await this.#enqueue(async () => {
+      const started = performance.now();
+      const record = await this.#verifiedHeldRecord(action);
+      await this.#assertExactHeldPaths(record);
+      const cleanup = { ...record, phase: 'COMMITTED_CLEANUP' as const, updatedAt: this.#now() };
+      await this.#writeRecord(cleanup);
+      await this.#cleanupCommitted(cleanup);
+      const committed = { ...cleanup, phase: 'COMMITTED' as const, updatedAt: this.#now() };
+      await this.#writeRecord(committed);
+      return successResult(action, committed, started, false);
+    });
+  }
+
+  /** A failed verification may roll back only exact, unmodified edit bytes. */
+  async rollbackDeferred(action: ActionRequest): Promise<ActionResult> {
+    return await this.#enqueue(async () => {
+      const started = performance.now();
+      const record = await this.#verifiedHeldRecord(action);
+      await this.#assertExactHeldPaths(record);
+      const rollbackRequired = { ...record, phase: 'ROLLBACK_REQUIRED' as const, updatedAt: this.#now() };
+      await this.#writeRecord(rollbackRequired);
+      await this.#rollback(rollbackRequired);
+      const rolledBack = { ...rollbackRequired, phase: 'ROLLED_BACK' as const, updatedAt: this.#now() };
+      await this.#writeRecord(rolledBack);
+      return {
+        ok: true, capability: action.capability, provider: this.name,
+        output: { planId: record.planId, rollbackPerformed: true },
+        evidence: [evidence('workspace_edit_rollback', 'pass', 'Exact pre-edit bytes restored after failed trusted verification.')],
+        durationMs: Math.round(performance.now() - started)
+      };
+    });
+  }
+
+  async #verifiedHeldRecord(action: ActionRequest): Promise<WorkspaceEditTransactionRecord> {
+    if (action.risk !== 'write') {
+      throw new OperatorError('WORKSPACE_EDIT_RISK_MISMATCH', 'Held edit requires write risk.');
+    }
+    const parsed = parseAction(action);
+    const workspaceRoot = await this.#resolveWorkspaceRoot(parsed.workspaceRootInput);
+    const record = await this.#readRecord(action.id);
+    if (!record) throw new OperatorError('WORKSPACE_EDIT_DEFERRED_MISSING', 'No durable held edit exists.');
+    assertRecordMatchesAction(record, workspaceRoot, parsed.plan);
+    if (record.phase !== 'VERIFICATION_PENDING') {
+      throw new OperatorError('WORKSPACE_EDIT_DEFERRED_PHASE_INVALID', 'Edit is not awaiting trusted verification.');
+    }
+    return record;
+  }
+
+  async #assertExactHeldPaths(record: WorkspaceEditTransactionRecord): Promise<void> {
+    for (const file of record.files) {
+      const [target, backup, temp, discard] = await Promise.all([
+        inspectPath(file.targetPath), inspectPath(file.backupPath),
+        inspectPath(file.tempPath), inspectPath(file.discardPath)
+      ]);
+      if (target.kind !== 'regular' || target.sha256 !== file.afterSha256 ||
+          backup.kind !== 'regular' || backup.sha256 !== file.beforeSha256 ||
+          temp.kind !== 'missing' || discard.kind !== 'missing') {
+        throw new OperatorError('WORKSPACE_EDIT_DEFERRED_UNCERTAIN',
+          'Held edit or rollback evidence differs from its durable exact hashes.');
+      }
+    }
   }
 
   async reconcile(
@@ -117,7 +192,7 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
     return await this.#enqueue(async () => await this.#reconcileSerial(request.action));
   }
 
-  async #executeSerial(action: ActionRequest, context: CapabilityExecutionContext): Promise<ActionResult> {
+  async #executeSerial(action: ActionRequest, context: CapabilityExecutionContext, deferFinalization: boolean): Promise<ActionResult> {
     const started = performance.now();
     try {
       if (action.risk !== 'write') {
@@ -161,6 +236,17 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
         for (const file of applying.files) {
           if (context.signal?.aborted) throw new OperatorError('EXECUTION_ABORTED', 'Workspace edit was cancelled during apply.');
           await this.#applyOne(file);
+        }
+        if (deferFinalization) {
+          const held = { ...applying, phase: 'VERIFICATION_PENDING' as const, updatedAt: this.#now() };
+          await this.#writeRecord(held);
+          return {
+            ok: true, capability: action.capability, provider: this.name,
+            output: { planId: held.planId, pendingVerification: true },
+            evidence: [evidence('workspace_edit_verification_hold', 'info',
+              'Exact edit targets applied; rollback evidence held for trusted verification.')],
+            durationMs: Math.round(performance.now() - started)
+          };
         }
         const cleanup = { ...applying, phase: 'COMMITTED_CLEANUP' as const, updatedAt: this.#now() };
         await this.#writeRecord(cleanup);
@@ -272,6 +358,16 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
     recordInput: WorkspaceEditTransactionRecord
   ): Promise<ProviderReconciliationResult> {
     const record = validateRecord(recordInput);
+    // Held edits must NEVER be auto-finalized or auto-rolled-back by general
+    // reconciliation: a restart does not prove required trusted verifiers ran.
+    // It remains uncertain until the dedicated verifier continuation acts.
+    if (record.phase === 'VERIFICATION_PENDING') {
+      return {
+        status: 'uncertain',
+        evidence: [evidence('workspace_edit_verification_hold', 'info',
+          'Edit awaiting trusted verification; generic reconciliation has no authority to finalize or replay.')]
+      };
+    }
     const states = await Promise.all(record.files.map(async (file) => ({
       file,
       target: await inspectPath(file.targetPath),
@@ -699,7 +795,7 @@ function validateRecord(input: unknown): WorkspaceEditTransactionRecord {
     ? undefined
     : digestField(raw.rollbackArtifactId, 'rollbackArtifactId');
   const phases = new Set<WorkspaceEditTransactionPhase>([
-    'PREPARED', 'APPLYING', 'COMMITTED_CLEANUP', 'COMMITTED', 'ROLLBACK_REQUIRED', 'ROLLED_BACK'
+    'PREPARED', 'APPLYING', 'VERIFICATION_PENDING', 'COMMITTED_CLEANUP', 'COMMITTED', 'ROLLBACK_REQUIRED', 'ROLLED_BACK'
   ]);
   if (!phases.has(raw.phase as WorkspaceEditTransactionPhase)) throw corrupt('Transaction phase is invalid.');
   if (!Array.isArray(raw.files) || raw.files.length < 1 || raw.files.length > 1000) throw corrupt('Transaction file list is invalid.');
