@@ -1583,7 +1583,8 @@ test('C05/C08 no-progress after a potentially dispatched write blocks without re
   assert.equal(dispatched, 1);
   assert.equal(stopped.execution?.records[0]?.sideEffectState, 'uncertain');
   assert.equal(stopped.execution?.records[0]?.state, 'BLOCKED');
-  assert.ok(stopped.evidence.some(item => item.kind === 'strategy_reconcile' && item.data?.strategy === 'replan'));
+  assert.ok(stopped.evidence.some(item => item.kind === 'strategy_reconcile' && item.data?.strategy === 'reconcile'),
+    'Merged C05 failure taxonomy must classify uncertain NO_PROGRESS as reconciliation, not replanning.');
   const persisted = await new TaskStore(state).get(task.id);
   assert.equal(persisted.state, 'BLOCKED');
   await assert.rejects(() => orchestrator.resume(task.id),

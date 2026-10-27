@@ -904,7 +904,17 @@ export class TaskOrchestrator {
           mode: 'SHADOW', controlCapability: decision.capability, actualOk: result.ok
         }));
       }
-      const productionFailure = result.ok ? undefined : classifyTaskFailure(result.error);
+      // A failed provider can omit side-effect metadata. Classifying that raw
+      // error would treat NO_PROGRESS as safe replanning even when the
+      // canonical durable action record has conservatively marked dispatch
+      // UNCERTAIN. Use the runtime-observed phase/effect truth first.
+      const productionFailure = result.ok ? undefined : classifyTaskFailure(
+        result.error ? {
+          ...result.error,
+          sideEffectState: latestRecord.sideEffectState,
+          executionPhase: latestRecord.executionPhase
+        } : undefined
+      );
       let outcomeShadow: TaskOutcomeShadowAssessment | undefined;
       let outcomeShadowUnavailable = false;
       if (this.#outcomeShadow) {
