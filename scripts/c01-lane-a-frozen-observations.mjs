@@ -122,11 +122,14 @@ export async function runLaneAFrozenDecisions({
           timer = setTimeout(() => { expired = true; controller.abort(); reject(new Error('MODEL_DEADLINE')); }, timeoutMs);
         })
       ]);
-      if (!own(output, ['decision', 'costMicros']) ||
-          Object.keys(output).length !== 2 || !Number.isSafeInteger(output.costMicros) ||
-          output.costMicros < 0) invalid('model cost/decision receipt invalid');
-      costMicros = output.costMicros;
-      modelAnswer = decision(output.decision);
+      // A model provider returns untrusted JSON text, never an executable JS
+      // object. Parsing here avoids getters/proxies in injected adapter output.
+      const payload = parseBoundedJson(output, 4096, 'model decision receipt');
+      if (!own(payload, ['decision', 'costMicros']) ||
+          Object.keys(payload).length !== 2 || !Number.isSafeInteger(payload.costMicros) ||
+          payload.costMicros < 0) invalid('model cost/decision receipt invalid');
+      costMicros = payload.costMicros;
+      modelAnswer = decision(payload.decision);
       failureStage = item.accepted.has(modelAnswer) ? 'none' : 'model';
     } catch {
       failureStage = expired ? 'timing' : 'unattributed';
