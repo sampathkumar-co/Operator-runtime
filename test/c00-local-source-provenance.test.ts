@@ -77,6 +77,29 @@ test('C00 cannot coerce a caller object into a provenance HMAC key',async t=>{
   assert.equal(conversions,0,'source inventory must not execute token conversion');
 });
 
+test('C00 protected source roots cannot be reached through an ancestor alias',async t=>{
+  const root=await fixture(t);
+  const protectedRoot=path.join(root,'.operator');
+  const receipts=path.join(protectedRoot,'receipts');
+  await fs.mkdir(receipts,{recursive:true});
+  await fs.writeFile(path.join(receipts,'private.json'),'{"protected":true}');
+  const alias=path.join(root,'visible');
+  try{ await fs.symlink(protectedRoot,alias,'dir'); }
+  catch(error){
+    if(['EPERM','EACCES'].includes((error as NodeJS.ErrnoException).code??'')){
+      return t.skip('OS symlink privilege unavailable');
+    }
+    throw error;
+  }
+  const reportRoot=path.join(alias,'receipts');
+  await assert.rejects(inspectExplicitLocalSourceProvenance({
+    root:reportRoot,relativePaths:['private.json'],
+    referenceDigests:{},hmacKey:'1'.repeat(64)
+  }),/C00_LOCAL_PROVENANCE_INVALID/);
+  assert.equal(await fs.readFile(path.join(receipts,'private.json'),'utf8'),
+    '{"protected":true}','protected evidence remains unchanged');
+});
+
 test('C00 without independent source reference never declares a unique recovered controller',async t=>{
   const root=await fixture(t);
   const response=await inspectExplicitLocalSourceProvenance({
