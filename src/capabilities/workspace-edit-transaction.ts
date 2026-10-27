@@ -234,6 +234,25 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
       const existing = await this.#readRecord(action.id);
       if (existing) {
         assertRecordMatchesAction(existing, workspaceRoot, parsed.plan);
+        if (deferFinalization && existing.requiresVerification !== true) {
+          // A completed public transaction can never become a verified edit
+          // merely because a trusted caller reused its action identity.
+          throw new OperatorError('WORKSPACE_EDIT_VERIFICATION_FENCE_MISSING',
+            'Existing transaction lacks the durable pre-dispatch verification requirement.');
+        }
+        if (deferFinalization && existing.requiresVerification === true &&
+            existing.phase === 'VERIFICATION_PENDING') {
+          // A restarted verifier can resume the SAME held bytes but cannot
+          // repeat edit application or infer verification from matching hashes.
+          await this.#assertExactHeldPaths(existing);
+          return {
+            ok: true, capability: action.capability, provider: this.name,
+            output: { planId: existing.planId, pendingVerification: true, resumed: true },
+            evidence: [evidence('workspace_edit_verification_hold', 'info',
+              'Original held edit and backups match exact hashes; trusted verification must run again.')],
+            durationMs: Math.round(performance.now() - started)
+          };
+        }
         const reconciled = await this.#reconcileRecord(action, existing);
         if (reconciled.status === 'completed' && reconciled.result) return reconciled.result;
         if (reconciled.status === 'not_applied') {
@@ -351,8 +370,10 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
           code: op.code,
           message: op.message,
           retryable: op.retryable,
-          sideEffectState: op.code === 'WORKSPACE_EDIT_RECONCILIATION_REQUIRED' ? 'uncertain' : 'none',
-          executionPhase: 'pre_dispatch'
+          sideEffectState: op.code === 'WORKSPACE_EDIT_RECONCILIATION_REQUIRED' ||
+            op.code === 'WORKSPACE_EDIT_DEFERRED_UNCERTAIN' ? 'uncertain' : 'none',
+          executionPhase: op.code === 'WORKSPACE_EDIT_DEFERRED_UNCERTAIN' ||
+            op.code === 'WORKSPACE_EDIT_RECONCILIATION_REQUIRED' ? 'effect_observed' : 'pre_dispatch'
         },
         durationMs: Math.round(performance.now() - started)
       };
@@ -395,7 +416,12 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
     // Held edits must NEVER be auto-finalized or auto-rolled-back by general
     // reconciliation: a restart does not prove required trusted verifiers ran.
     // It remains uncertain until the dedicated verifier continuation acts.
-    if (record.requiresVerification === true && record.phase !== 'COMMITTED' && record.phase !== 'ROLLED_BACK') {
+    if (record.requiresVerification === true &&
+        record.phase !== 'COMMITTED_CLEANUP' && record.phase !== 'COMMITTED' &&
+        record.phase !== 'ROLLED_BACK') {
+      // Includes ROLLBACK_REQUIRED. A verifier that failed or was cancelled
+      // must never have its rollback-intent journal auto-committed just
+      // because target bytes still equal the post-edit digest.
       return {
         status: 'uncertain',
         evidence: [evidence('workspace_edit_verification_hold', 'info',
@@ -430,6 +456,29 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
     const allAfter = states.every((item) =>
       item.target.kind === 'regular' && item.target.sha256 === item.file.afterSha256
     );
+    const allBefore = states.every((item) =>
+      item.target.kind === 'regular' && item.target.sha256 === item.file.beforeSha256
+    );
+    // Terminal journal phases cannot be interpreted as new transaction
+    // authority when external writers replace matching target bytes later.
+    if (record.phase === 'ROLLED_BACK') {
+      return {
+        status: allBefore ? 'not_applied' : 'uncertain',
+        evidence: [evidence('workspace_edit_reconciliation', 'info',
+          allBefore
+            ? 'A rolled-back transaction remains terminal with exact original target hashes.'
+            : 'Rolled-back target bytes changed after recovery; journal remains terminal and no edit was replayed.',
+          { planId: record.planId })]
+      };
+    }
+    if ((record.phase === 'COMMITTED' || record.phase === 'COMMITTED_CLEANUP') && !allAfter) {
+      return {
+        status: 'uncertain',
+        evidence: [evidence('workspace_edit_reconciliation', 'info',
+          'Committed edit target hashes changed; no rollback or new completion was inferred.',
+          { planId: record.planId })]
+      };
+    }
     if (allAfter) {
       const cleanup = { ...record, phase: 'COMMITTED_CLEANUP' as const, updatedAt: this.#now() };
       await this.#writeRecord(cleanup);
@@ -448,9 +497,6 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
       };
     }
 
-    const allBefore = states.every((item) =>
-      item.target.kind === 'regular' && item.target.sha256 === item.file.beforeSha256
-    );
     if (allBefore) {
       await this.#cleanupRolledBack(record);
       const rolledBack = { ...record, phase: 'ROLLED_BACK' as const, updatedAt: this.#now() };

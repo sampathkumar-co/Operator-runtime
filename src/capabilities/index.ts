@@ -17,6 +17,7 @@ export * from './windows-uia.ts';
 export * from './sandboxed-compute.ts';
 export * from './perception.ts';
 export * from './workspace-edit-transaction.ts';
+export * from './verified-workspace-edit.ts';
 export * from './workspace-lsp-edit.ts';
 export * from './workspace-edit-rollback.ts';
 
