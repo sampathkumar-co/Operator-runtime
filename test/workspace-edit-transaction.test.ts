@@ -542,3 +542,32 @@ test('C06/C08 a held coordinator lock fences editing before its first journal wr
   assert.equal(result.ok, true, result.error?.message);
   assert.equal(await fs.readFile(target, 'utf8'), 'const guarded = 2;\n');
 });
+
+
+test('C06/C08 unknown coordinator ownership rejects edits before dispatch and reconciles uncertain', async t => {
+  const { root, stateDir } = await fixture(t);
+  const initial = 'const fenced = 1;\n';
+  await fs.writeFile(path.join(root, 'fenced.ts'), initial);
+  const plan = createMultiFileEditPlan({ files: [{
+    path: 'fenced.ts', expectedSha256: digest(initial),
+    edits: [{ start: initial.indexOf('1'), end: initial.indexOf('1') + 1, replacement: '2' }]
+  }] });
+  const a = action('unknown-coordinator', root, plan);
+  const provider = new WorkspaceEditTransactionProvider({
+    allowedRoots: [root], stateDir, windowsPathLeaseExecutable: WINDOWS_PATH_LEASE_EXECUTABLE
+  });
+  const lock = workspaceEditTransactionCoordinatorPath(stateDir) + '.lock';
+  await fs.mkdir(path.dirname(lock), { recursive: true });
+  await fs.writeFile(lock, 'unknown-owner');
+  const result = await provider.execute(a);
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'WORKSPACE_EDIT_COORDINATOR_UNAVAILABLE');
+  assert.equal(result.error?.executionPhase, 'pre_dispatch');
+  assert.equal(result.error?.sideEffectState, 'none');
+  assert.equal(await fs.readFile(path.join(root, 'fenced.ts'), 'utf8'), initial);
+  await assert.rejects(fs.access(workspaceEditTransactionJournalPath(stateDir, a.id)));
+  const recovered = await provider.reconcile({ action: a });
+  assert.equal(recovered.status, 'uncertain');
+  assert.equal(await fs.readFile(path.join(root, 'fenced.ts'), 'utf8'), initial);
+  await fs.rm(lock);
+});
