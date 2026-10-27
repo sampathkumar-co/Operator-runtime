@@ -78,3 +78,27 @@ test('C03/C07 requested SPA hash route needs a matching independently observed r
   assert.equal(verifyGoalOutcomeTruth(task).ok, true,
     'document-only goals remain compatible with in-document hash navigation');
 });
+
+
+test('C03/C07 matching browser URL cannot certify a non-causal or untrusted observation', () => {
+  const cases: Array<(task: ReturnType<typeof navigationFixture>) => void> = [
+    task => { task.execution!.records[0]!.risk = 'write'; },
+    task => { task.execution!.records[0]!.finishedAt = undefined; },
+    task => { task.execution!.records[0]!.finishedAt = T(225); },
+    task => { task.execution!.records[0]!.startedAt = T(270); },
+    task => { if (task.execution!.records[0]!.observation?.schemaVersion === 2)
+      task.execution!.records[0]!.observation.epistemicStatus = 'UNKNOWN'; },
+    task => { if (task.execution!.records[0]!.observation?.schemaVersion === 2)
+      task.execution!.records[0]!.observation.ambiguous = true; },
+    task => { if (task.execution!.records[0]!.observation?.schemaVersion === 2)
+      task.execution!.records[0]!.observation.capability = 'git.status'; }
+  ];
+  for (const [index, mutate] of cases.entries()) {
+    const task = navigationFixture(T(250));
+    mutate(task);
+    assert.equal(verifyGoalOutcomeTruth(task).ok, false,
+      'browser observation without causal read proof: case ' + index);
+  }
+  assert.equal(verifyGoalOutcomeTruth(navigationFixture(T(250))).ok, true,
+    'same matched URL stays verifiable from a completed known read');
+});
