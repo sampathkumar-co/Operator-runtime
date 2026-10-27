@@ -250,7 +250,7 @@ test('C06 hidden scope metadata and sparse qualification arrays cannot validate'
   assert.throws(() => validateDeveloperChangeQualificationPlan(symbolic),
     (error: any) => error?.code === 'DEVELOPER_QUALIFICATION_PLAN_INVALID');
   const sparse = structuredClone(valid);
-  delete sparse.steps[0];
+  Reflect.deleteProperty(sparse.steps, '0');
   assert.throws(() => validateDeveloperChangeQualificationPlan(sparse),
     (error: any) => error?.code === 'DEVELOPER_QUALIFICATION_PLAN_INVALID');
 });
