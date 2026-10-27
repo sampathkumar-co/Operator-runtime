@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { RelayResultStore } from '../src/core/relay-result-store.ts';
+import { PipelineLatencyRecorder } from '../src/core/pipeline-latency.ts';
 
 async function temp(t: test.TestContext): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-results-'));
@@ -168,4 +169,61 @@ test('C09 result wait rejects coercible timeout values before registering listen
     );
   }
   assert.equal(coerced, 0);
+});
+
+test('C11 injected recorder observes a durable relay result wait without altering its identity or result', async t => {
+  const state = await temp(t);
+  const recorder = new PipelineLatencyRecorder({ enabled: true, capacity: 8 });
+  const store = new RelayResultStore(state, { latencyRecorder: recorder });
+  const deviceId = crypto.randomUUID();
+  const deliveryId = crypto.randomUUID();
+  const awaiting = store.waitFor(deviceId, 1, deliveryId, 1000);
+  const saved = await store.put(deviceId, 1, deliveryId, { ok: true, output: 'synthetic' });
+  const actual = await awaiting;
+  assert.equal(actual?.resultSha256, saved.result.resultSha256);
+  assert.equal(actual?.deliveryId, deliveryId);
+  assert.deepEqual(actual?.result, { ok: true, output: 'synthetic' });
+  const spans = recorder.snapshot();
+  assert.equal(spans.length, 1);
+  assert.equal(spans[0]?.stage, 'relay.result_wait');
+  assert.equal(spans[0]?.origin, 'relay-server');
+  assert.equal(spans[0]?.result, 'ok');
+  assert.equal(spans[0]?.traceId.length, 64);
+  const text = JSON.stringify(spans);
+  assert.equal(text.includes(deviceId), false);
+  assert.equal(text.includes(deliveryId), false);
+  assert.equal(text.includes('synthetic'), false);
+});
+
+test('C11 disabled injected recorder and unchanged default relay wait produce identical results', async t => {
+  const state = await temp(t);
+  const disabled = new PipelineLatencyRecorder({ enabled: false });
+  const instrumented = new RelayResultStore(state, { latencyRecorder: disabled });
+  const regular = new RelayResultStore(state);
+  const deviceId = crypto.randomUUID();
+  const deliveryId = crypto.randomUUID();
+  await regular.put(deviceId, 1, deliveryId, { ok: true });
+  const [one,two] = await Promise.all([
+    instrumented.waitFor(deviceId, 1, deliveryId, 1000),
+    regular.waitFor(deviceId, 1, deliveryId, 1000)
+  ]);
+  assert.deepEqual(one,two);
+  assert.deepEqual(disabled.snapshot(),[]);
+});
+
+test('C11 telemetry does not widen abort or mismatched delivery wait authority', async t => {
+  const state = await temp(t);
+  const recorder = new PipelineLatencyRecorder({ enabled: true });
+  const store = new RelayResultStore(state, { latencyRecorder: recorder });
+  const deviceId = crypto.randomUUID();
+  const deliveryId = crypto.randomUUID();
+  const badDelivery = crypto.randomUUID();
+  await store.put(deviceId, 1, deliveryId, { ok: true });
+  assert.equal(await store.waitFor(deviceId, 1, badDelivery, 20), null);
+  const abort = new AbortController();
+  abort.abort();
+  assert.equal(await store.waitFor(deviceId, 1, deliveryId, 1000, abort.signal), null);
+  // Early aborted calls do not register waiters or incur new observability.
+  assert.equal(recorder.snapshot().length,1);
+  assert.equal((await store.get(deviceId, 1))?.deliveryId, deliveryId);
 });

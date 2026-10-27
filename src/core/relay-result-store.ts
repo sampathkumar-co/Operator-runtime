@@ -4,6 +4,7 @@ import { OperatorError } from './errors.ts';
 import { withDurableStateLock } from './durable-state-lock.ts';
 import type { ControlPlaneStore } from './control-plane-store.ts';
 import type { RelayDeliveryAuthority } from './relay-delivery-store.ts';
+import type { PipelineLatencyRecorder } from './pipeline-latency.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const MAX_STREAMS = 10_000;
@@ -44,17 +45,19 @@ export class RelayResultStore {
   #retentionMs: number;
   #shared?: ControlPlaneStore;
   #sharedNamespace: string;
+  #latencyRecorder?: PipelineLatencyRecorder;
   #waiters = new Map<string, Set<ResultWaiter>>();
   #waiterCount = 0;
   #pollTimer?: ReturnType<typeof setInterval>;
   #pollInFlight = false;
 
-  constructor(stateDir: string, options: { clock?: () => Date; retentionMs?: number; sharedStore?: ControlPlaneStore; sharedNamespace?: string } = {}) {
+  constructor(stateDir: string, options: { clock?: () => Date; retentionMs?: number; sharedStore?: ControlPlaneStore; sharedNamespace?: string; latencyRecorder?: PipelineLatencyRecorder } = {}) {
     this.#file = path.join(path.resolve(stateDir), 'relay-results.json');
     this.#clock = options.clock ?? (() => new Date());
     this.#retentionMs = boundedRetention(options.retentionMs);
     this.#shared = options.sharedStore;
     this.#sharedNamespace = validSharedNamespace(options.sharedNamespace ?? 'relay-result-streams');
+    this.#latencyRecorder = options.latencyRecorder;
   }
 
   async put(deviceIdInput: string, seqInput: number, deliveryIdInput: string, resultInput: JsonObject, idempotencyKeyInput?: string, replayAuthorityInput?: RelayDeliveryAuthority): Promise<{ result: StoredRelayResult; duplicate: boolean }> {
@@ -120,7 +123,7 @@ export class RelayResultStore {
     if (signal?.aborted) return null;
     if (this.#waiterCount >= MAX_WAITERS) throw new OperatorError('RELAY_RESULT_WAITER_LIMIT', 'Relay result waiter limit reached.', { retryable: true });
     const key = `${deviceId}:${seq}`;
-    return await new Promise<StoredRelayResult | null>((resolve, reject) => {
+    const awaitResult = () => new Promise<StoredRelayResult | null>((resolve, reject) => {
       let settled = false;
       const finish = (result: StoredRelayResult | null) => {
         if (settled) return;
@@ -157,6 +160,15 @@ export class RelayResultStore {
       if (signal?.aborted) return aborted();
       this.#startPolling();
     });
+    // Explicitly injected telemetry only. With no recorder configured, keep
+    // the exact original wait semantics and avoid trace-ID computation.
+    if (!this.#latencyRecorder || !this.#latencyRecorder.enabled) return await awaitResult();
+    // The per-process HMAC never exposes raw device/action/delivery identity,
+    // and the recorder cannot affect result commit, identity or ACK authority.
+    return await this.#latencyRecorder.measure({
+      stage: 'relay.result_wait', origin: 'relay-server',
+      traceId: deviceId + ':' + seq + ':' + deliveryId
+    }, awaitResult);
   }
 
   async findByIdempotencyKey(idempotencyKeyInput: string): Promise<{ deviceId: string; result: StoredRelayResult } | null> {
