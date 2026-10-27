@@ -196,3 +196,61 @@ test('read-only formatter does not require post-format reindex flag', () => {
   assert.equal(plan.reindexAfterFormatting, false);
   assert.deepEqual(plan.steps.map((step) => step.commandId), ['format-check', 'lint']);
 });
+
+
+test('C06 registry validation never executes command id/kind accessor or coercion code', () => {
+  let invoked = 0;
+  const getter = Object.defineProperty({ id: 'unit', risk: 'read' }, 'kind', {
+    enumerable: true, get() { invoked++; throw Error('unexpected accessor call'); }
+  });
+  assert.throws(() => createDeveloperChangeQualificationPlan({
+    editPlan: editPlan(),
+    trustedCommandInspection: inspection([getter as Record<string, unknown>])
+  }), (error: any) => error?.code === 'DEVELOPER_QUALIFICATION_REGISTRY_INVALID');
+  const coercible = { id: { toString() { invoked++; return 'unit'; } }, kind: 'test', risk: 'read' };
+  assert.throws(() => createDeveloperChangeQualificationPlan({
+    editPlan: editPlan(),
+    trustedCommandInspection: inspection([coercible])
+  }), (error: any) => error?.code === 'DEVELOPER_QUALIFICATION_REGISTRY_INVALID');
+  assert.equal(invoked, 0);
+});
+
+test('C06 qualification rejects untrusted plan getters and coercible path/step identities', () => {
+  const valid = createDeveloperChangeQualificationPlan({
+    editPlan: editPlan(), trustedCommandInspection: inspection(standardCommands)
+  });
+  let invoked = 0;
+  const forged = structuredClone(valid);
+  Object.defineProperty(forged.steps[0], 'commandId', {
+    enumerable: true, get() { invoked++; throw Error('must never execute'); }
+  });
+  assert.throws(() => validateDeveloperChangeQualificationPlan(forged),
+    (error: any) => error?.code === 'DEVELOPER_QUALIFICATION_PLAN_INVALID');
+  const coercible = structuredClone(valid);
+  coercible.changedPaths[0] = { toString() { invoked++; return 'src/value.ts'; } } as any;
+  assert.throws(() => validateDeveloperChangeQualificationPlan(coercible),
+    (error: any) => error?.code === 'DEVELOPER_QUALIFICATION_PLAN_INVALID');
+  const scope = structuredClone(valid);
+  scope.projectRoot = [scope.projectRoot] as any;
+  assert.throws(() => validateDeveloperChangeQualificationPlan(scope),
+    (error: any) => error?.code === 'DEVELOPER_QUALIFICATION_PLAN_INVALID');
+  assert.equal(invoked, 0);
+});
+
+test('C06 hidden scope metadata and sparse qualification arrays cannot validate', () => {
+  const valid = createDeveloperChangeQualificationPlan({
+    editPlan: editPlan(), trustedCommandInspection: inspection(standardCommands)
+  });
+  const hidden = structuredClone(valid);
+  Object.defineProperty(hidden, 'executeAnything', { value: true, enumerable: false });
+  assert.throws(() => validateDeveloperChangeQualificationPlan(hidden),
+    (error: any) => error?.code === 'DEVELOPER_QUALIFICATION_PLAN_INVALID');
+  const symbolic = structuredClone(valid);
+  Object.assign(symbolic, { [Symbol('permission')]: true });
+  assert.throws(() => validateDeveloperChangeQualificationPlan(symbolic),
+    (error: any) => error?.code === 'DEVELOPER_QUALIFICATION_PLAN_INVALID');
+  const sparse = structuredClone(valid);
+  delete sparse.steps[0];
+  assert.throws(() => validateDeveloperChangeQualificationPlan(sparse),
+    (error: any) => error?.code === 'DEVELOPER_QUALIFICATION_PLAN_INVALID');
+});
