@@ -250,3 +250,53 @@ test('C08/C09 shared relay-result namespace rejects nonliteral values without co
   assert.ok(new RelayResultStore(stateDir));
   assert.ok(new RelayResultStore(stateDir, { sharedNamespace: 'relay-result-streams/devices' }));
 });
+
+
+test('C09 opt-in result commit spans measure durable completion without changing ACK authority', async t => {
+  const stateDir = await temp(t);
+  const recorder = new PipelineLatencyRecorder({ enabled: true });
+  const deviceId = crypto.randomUUID();
+  const deliveryId = crypto.randomUUID();
+  const store = new RelayResultStore(stateDir, {
+    latencyRecorder: recorder, traceResultCommits: true
+  });
+  const first = await store.put(deviceId, 1, deliveryId, { ok: true, sensitive: 'NOT_FOR_TELEMETRY' });
+  assert.equal(first.duplicate, false);
+  const same = await store.put(deviceId, 1, deliveryId, { ok: true, sensitive: 'NOT_FOR_TELEMETRY' });
+  assert.equal(same.duplicate, true);
+  await assert.rejects(
+    store.put(deviceId, 1, deliveryId, { ok: false, sensitive: 'NOT_FOR_TELEMETRY' }),
+    (error: any) => error?.code === 'RELAY_RESULT_CONFLICT'
+  );
+  const spans = recorder.snapshot();
+  assert.equal(spans.length, 3);
+  assert.deepEqual(spans.map(span => span.stage),
+    ['relay.result_commit', 'relay.result_commit', 'relay.result_commit']);
+  assert.deepEqual(spans.map(span => span.result), ['ok', 'ok', 'failed']);
+  assert.ok(spans.every(span => span.origin === 'relay-server' &&
+    span.traceId === spans[0]!.traceId && span.durationMs >= 0));
+  const json = JSON.stringify(spans);
+  for (const secret of [deviceId, deliveryId, 'NOT_FOR_TELEMETRY']) {
+    assert.equal(json.includes(secret), false, 'telemetry must exclude ' + secret);
+  }
+  assert.deepEqual((await store.get(deviceId, 1))?.result,
+    { ok: true, sensitive: 'NOT_FOR_TELEMETRY' },
+    'failed conflict must not overwrite the committed receipt');
+  assert.equal(recorder.summarize().find(span => span.stage === 'relay.result_commit')?.count, 3);
+});
+
+test('C09 result-commit instrumentation is inert unless independently opted in', async t => {
+  const stateDir = await temp(t);
+  const recorder = new PipelineLatencyRecorder({ enabled: true });
+  const defaultStore = new RelayResultStore(stateDir, { latencyRecorder: recorder });
+  const deviceId = crypto.randomUUID();
+  await defaultStore.put(deviceId, 1, crypto.randomUUID(), { ok: true });
+  assert.deepEqual(recorder.snapshot(), []);
+  const disabled = new PipelineLatencyRecorder({ enabled: false });
+  const disabledStore = new RelayResultStore(stateDir, {
+    latencyRecorder: disabled, traceResultCommits: true
+  });
+  await disabledStore.put(deviceId, 2, crypto.randomUUID(), { ok: true });
+  assert.deepEqual(disabled.snapshot(), []);
+  assert.equal((await defaultStore.get(deviceId, 2))?.result?.ok, true);
+});
