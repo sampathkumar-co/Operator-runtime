@@ -86,6 +86,30 @@ export class VerifiedWorkspaceEditProvider implements CapabilityProvider {
         return remapFailure(action, editResult, started, 'VERIFIED_WORKSPACE_EDIT_APPLY_FAILED');
       }
 
+      const transactionOutput = editResult.output as
+        { pendingVerification?: unknown; reconciled?: unknown } | undefined;
+      if (transactionOutput?.pendingVerification !== true) {
+        // This exact action is already committed. Do not run verifiers again
+        // or call finalizeDeferred on an already-cleaned transaction. The
+        // underlying deferred API denies reuse of a non-verifier-fenced edit.
+        if (transactionOutput?.reconciled !== true) {
+          throw new OperatorError('VERIFIED_WORKSPACE_EDIT_STATE_UNCERTAIN',
+            'Deferred edit returned neither a verification hold nor a durable completed receipt.');
+        }
+        return {
+          ok: true, capability: action.capability, provider: this.name,
+          output: {
+            planId: parsed.plan.id, alreadyCompleted: true,
+            verificationPassed: true, finalizationPassed: true,
+            transaction: sanitizedTransactionOutput(editResult.output)
+          },
+          evidence: [evidence('workspace_edit_verified_reconciliation', 'pass',
+            'Exact previously verifier-fenced transaction already completed; no commands or edits replayed.',
+            { planId: parsed.plan.id })],
+          durationMs: Math.round(performance.now() - started)
+        };
+      }
+
       const verification: VerificationSummary[] = [];
       for (let index = 0; index < commands.length; index += 1) {
         if (context.signal?.aborted) {
