@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import test from 'node:test';
 import { createTask } from '../src/core/task.ts';
 import { verifyGoalOutcomeTruth } from '../src/core/task-verifier.ts';
+import { postgresSelectActionInput } from '../src/core/semantic-task-input.ts';
+import { canonicalJson } from '../src/core/action-identity.ts';
 
 function makeGoal(goal: Record<string, unknown>) {
   return createTask({
@@ -51,4 +54,66 @@ test('C07 PostgreSQL verifier preserves valid typed inputs for independent evide
   assert.equal(result.supported, true);
   assert.equal(result.ok, false);
   assert.match(result.detail, /result evidence does not match/);
+});
+
+
+test('C07 PostgreSQL result evidence must use literal machine-observed rows, limits and columns', () => {
+  const goal = {
+    kind: 'postgres-select', root: '/registered', profileId: 'local',
+    schema: 'public', table: 'items', columns: ['id'], limit: 25,
+    offset: 0, timeoutMs: 5000
+  };
+  const task = makeGoal(goal);
+  const input = postgresSelectActionInput({
+    root: goal.root, profileId: goal.profileId, schema: goal.schema,
+    table: goal.table, columns: goal.columns, filters: [], orderBy: [],
+    limit: goal.limit, offset: goal.offset, timeoutMs: goal.timeoutMs
+  });
+  const inputHash = crypto.createHash('sha256').update(canonicalJson(input)).digest('hex');
+  const observedState: Record<string, unknown> = {
+    profileId: 'local', schema: 'public', table: 'items',
+    limit: 25, offset: 0, rowCount: 1, columns: ['id']
+  };
+  task.execution!.records.push({
+    stepKey: 'select-postgres-rows', actionId: 'observed-select',
+    capability: 'postgres.select', risk: 'read', inputHash,
+    attempt: 0, state: 'SUCCEEDED',
+    startedAt: '2026-10-26T10:00:00.000Z',
+    finishedAt: '2026-10-26T10:00:00.200Z',
+    evidence: [],
+    observation: {
+      schemaVersion: 2, channel: 'semantic', domain: 'database',
+      provider: 'synthetic', capability: 'postgres.select', entityId: 'database:fixture',
+      observedAt: '2026-10-26T10:00:00.100Z',
+      stateVersion: 'a'.repeat(64), importantState: observedState,
+      epistemicStatus: 'KNOWN', epistemicReason: '', ambiguous: false,
+      confidence: 1, evidenceRefs: ['b'.repeat(64)]
+    }
+  });
+  assert.equal(verifyGoalOutcomeTruth(task).ok, true, 'genuine bounded numeric result still verifies');
+
+  let calls = 0;
+  const coercedOne = { valueOf() { calls++; return 1; }, toString() { calls++; return '1'; } };
+  const coercedId = { toString() { calls++; return 'id'; } };
+  const invalidStates = [
+    { rowCount: '1' }, { rowCount: coercedOne },
+    { limit: '25' }, { limit: coercedOne }, { offset: '0' },
+    { offset: [0] }, { columns: [coercedId] },
+    { columns: [['id']] }, { columns: Array(1) }
+  ];
+  for (const change of invalidStates) {
+    Object.assign(observedState, { profileId: 'local', schema: 'public', table: 'items',
+      limit: 25, offset: 0, rowCount: 1, columns: ['id'] }, change);
+    assert.equal(verifyGoalOutcomeTruth(task).ok, false,
+      'coerced or sparse database observations must not verify the SELECT');
+  }
+  const getterColumns: unknown[] = [];
+  Object.defineProperty(getterColumns, '0', {
+    enumerable: true, get() { calls++; return 'id'; }
+  });
+  getterColumns.length = 1;
+  observedState.columns = getterColumns;
+  assert.equal(verifyGoalOutcomeTruth(task).ok, false,
+    'an accessor-backed column entry is not trustworthy');
+  assert.equal(calls, 0, 'no untrusted valueOf, toString or getter may execute');
 });
