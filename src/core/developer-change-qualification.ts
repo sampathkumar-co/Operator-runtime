@@ -226,74 +226,62 @@ function validateTrustedCommandInspection(result: ActionResult): {
   projectRoot: string;
   commands: TrustedCommandSummary[];
 } {
-  if (
-    !result ||
-    result.ok !== true ||
-    result.capability !== 'project.command.inspect' ||
-    result.provider !== 'project.command.trusted' ||
-    !result.evidence.some((item) => item.kind === 'command_registry' && item.status === 'pass')
-  ) {
-    throw new OperatorError(
-      'DEVELOPER_QUALIFICATION_REGISTRY_UNTRUSTED',
-      'Qualification planning requires a successful trusted project-command inspection result.'
-    );
+  const receipt = inertRecord(result, 'DEVELOPER_QUALIFICATION_REGISTRY_UNTRUSTED', 'command receipt');
+  const evidence = inertArray(receipt.evidence, 10_000,
+    'DEVELOPER_QUALIFICATION_REGISTRY_UNTRUSTED', 'command evidence');
+  const proof = evidence.some(item => {
+    const event = inertRecord(item, 'DEVELOPER_QUALIFICATION_REGISTRY_UNTRUSTED', 'command evidence entry');
+    return event.kind === 'command_registry' && event.status === 'pass';
+  });
+  if (receipt.ok !== true || receipt.capability !== 'project.command.inspect' ||
+      receipt.provider !== 'project.command.trusted' || !proof) {
+    throw new OperatorError('DEVELOPER_QUALIFICATION_REGISTRY_UNTRUSTED',
+      'Qualification planning requires a successful trusted project-command inspection result.');
   }
-
-  const output = result.output as {
-    projectRoot?: unknown;
-    registryConfigured?: unknown;
-    commands?: unknown;
-  } | undefined;
-  const projectRoot = String(output?.projectRoot ?? '');
-  if (!path.isAbsolute(projectRoot)) {
-    throw new OperatorError('DEVELOPER_QUALIFICATION_REGISTRY_INVALID', 'Trusted command inspection projectRoot is invalid.');
+  const output = inertRecord(receipt.output, 'DEVELOPER_QUALIFICATION_REGISTRY_INVALID', 'command registry');
+  if (typeof output.projectRoot !== 'string' || !path.isAbsolute(output.projectRoot)) {
+    throw new OperatorError('DEVELOPER_QUALIFICATION_REGISTRY_INVALID',
+      'Trusted command inspection projectRoot is invalid.');
   }
-  if (output?.registryConfigured !== true || !Array.isArray(output.commands) || output.commands.length > MAX_COMMANDS) {
-    throw new OperatorError('DEVELOPER_QUALIFICATION_REGISTRY_INVALID', 'Trusted command inspection registry payload is invalid.');
+  if (output.registryConfigured !== true) {
+    throw new OperatorError('DEVELOPER_QUALIFICATION_REGISTRY_INVALID',
+      'Trusted command registry was not configured.');
   }
-
+  const entries = inertArray(output.commands, MAX_COMMANDS,
+    'DEVELOPER_QUALIFICATION_REGISTRY_INVALID', 'registered commands');
   const seen = new Set<string>();
   const commands: TrustedCommandSummary[] = [];
-  for (const item of output.commands) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      throw new OperatorError('DEVELOPER_QUALIFICATION_REGISTRY_INVALID', 'Trusted command entry is invalid.');
-    }
-    const raw = item as Record<string, unknown>;
-    const id = String(raw.id ?? '');
-    if (!COMMAND_ID.test(id) || seen.has(id)) {
-      throw new OperatorError('DEVELOPER_QUALIFICATION_REGISTRY_INVALID', 'Trusted command id is invalid or duplicated.');
+  for (const entry of entries) {
+    const raw = inertRecord(entry, 'DEVELOPER_QUALIFICATION_REGISTRY_INVALID', 'trusted command');
+    const id = raw.id;
+    if (typeof id !== 'string' || !COMMAND_ID.test(id) || seen.has(id)) {
+      throw new OperatorError('DEVELOPER_QUALIFICATION_REGISTRY_INVALID',
+        'Trusted command id is invalid or duplicated.');
     }
     seen.add(id);
-
-    const kind = String(raw.kind ?? '');
+    const kind = raw.kind;
+    if (typeof kind !== 'string') {
+      throw new OperatorError('DEVELOPER_QUALIFICATION_REGISTRY_INVALID',
+        'Trusted command kind must be literal text.');
+    }
     if (!KIND_ORDER.includes(kind as DeveloperQualificationKind)) {
-      // dev/database/custom commands are intentionally ignored. They are
-      // not implicit qualification authority.
+      // Developer servers, database tasks and custom commands never become
+      // implied post-edit verification authority.
       continue;
     }
-    const risk = String(raw.risk ?? '');
-    if (risk === 'external') {
-      // R3 workstation qualification must remain local/hermetic. External
-      // checks need an explicit higher-layer workflow and separate approval.
-      continue;
-    }
+    const risk = raw.risk;
+    if (risk === 'external') continue;
     if (risk !== 'read' && risk !== 'write') {
-      throw new OperatorError(
-        'DEVELOPER_QUALIFICATION_REGISTRY_INVALID',
-        'Qualification command risk must be read or write.'
-      );
+      throw new OperatorError('DEVELOPER_QUALIFICATION_REGISTRY_INVALID',
+        'Qualification command risk must be read or write.');
     }
-    commands.push({
-      id,
-      kind: kind as DeveloperQualificationKind,
-      risk
-    });
+    commands.push({ id, kind: kind as DeveloperQualificationKind, risk });
   }
   commands.sort((a, b) =>
     KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) ||
     a.id.localeCompare(b.id)
   );
-  return { projectRoot: path.resolve(projectRoot), commands };
+  return { projectRoot: path.resolve(output.projectRoot), commands };
 }
 
 function normalizeStep(input: DeveloperQualificationStep, expectedOrder: number): DeveloperQualificationStep {
