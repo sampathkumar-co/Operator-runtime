@@ -59,9 +59,22 @@ export async function inspectExplicitLocalSourceProvenance(config) {
   if (selectedRoot.split(/[\\/]+/).some(part => BLOCKED.has(part.toLowerCase()))) {
     invalid('protected state or secrets roots cannot be inventoried');
   }
+  // Inspect the entire ancestor chain: an apparently harmless selected path
+  // can enter .operator through a symlinked directory above that root.
+  const parsed = path.parse(selectedRoot);
+  let cursor = parsed.root;
+  const parts = selectedRoot.slice(parsed.root.length).split(path.sep).filter(Boolean);
+  for (const part of parts) {
+    cursor = path.join(cursor, part);
+    const ancestor = await fs.lstat(cursor);
+    if (ancestor.isSymbolicLink()) invalid('source root contains a symbolic link or junction');
+  }
   const rootStats = await fs.lstat(selectedRoot);
   if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) invalid('root must be an ordinary directory');
   const realRoot = await fs.realpath(selectedRoot);
+  if (realRoot.split(/[\\/]+/).some(part => BLOCKED.has(part.toLowerCase()))) {
+    invalid('physically resolved source root enters protected recovery or secrets state');
+  }
   const seen = new Set();
   const entries = [];
   for (const raw of config.relativePaths) {
