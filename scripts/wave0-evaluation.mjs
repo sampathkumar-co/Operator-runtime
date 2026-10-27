@@ -126,9 +126,9 @@ export function buildWave0EvaluationReport({ sourceCommit, records = [], preregi
   if (preregistered !== null) {
     requireInertEvaluationObject(preregistered, fail, 'preregistered campaign');
     requireDenseEvaluationArray(preregistered.expectedScenarioIds, 50, 10000,
-      fail, 'preregistered scenarios');
+      fail, 'preregistered suite scenarios');
     requireDenseEvaluationArray(preregistered.expectedSeeds, 3, 1000,
-      fail, 'preregistered seeds');
+      fail, 'preregistered suite seeds');
   }
   if (typeof sourceCommit !== 'string' || !COMMIT.test(sourceCommit)) fail('sourceCommit must be exact 40-digit git SHA');
   if (!Array.isArray(records) || records.length > 10000) fail('runs must be a bounded array');
