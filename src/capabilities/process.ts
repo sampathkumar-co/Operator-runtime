@@ -370,7 +370,18 @@ export class ProcessProvider implements CapabilityProvider {
         return failure(action, this.name, started, 'DEVELOPER_RUNTIME_SESSION_INVALID', 'Developer Session ID must be a literal string.');
       }
       const developerSessionId = action.input.developerSessionId as string | undefined;
-      const ports = normalizeDeclaredPorts(action.input.ports);
+      let ports: number[];
+      try {
+        ports = normalizeDeclaredPorts(action.input.ports);
+      } catch (error) {
+        // Invalid caller declarations are pre-dispatch provider failures, not
+        // uncaught exceptions or a reason to create a terminal session.
+        return failure(action, this.name, started, new OperatorError(
+          'DEVELOPER_RUNTIME_PORT_INVALID',
+          error instanceof OperatorError ? error.message : 'Declared ports are invalid.',
+          { retryable: false, details: { sideEffectState: 'none' } }
+        ));
+      }
       if (ports.length > 0 && !developerSessionId) {
         return failure(action, this.name, started, 'DEVELOPER_RUNTIME_SESSION_REQUIRED', 'Declared ports require developerSessionId so ownership can survive restart.');
       }
@@ -1031,7 +1042,11 @@ function failure(action: ActionRequest, provider: string, started: number, codeO
 }
 
 function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
-  const parsed = Number(value ?? fallback);
+  // Preserve primitive numeric/string inputs, but never invoke valueOf or
+  // toString hooks on untrusted objects, arrays, symbols or boxed numbers.
+  // Provider bounds stay as before and unknown values take the safe default.
+  const parsed = typeof value === 'number' || typeof value === 'string'
+    ? Number(value) : fallback;
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(Math.max(Math.trunc(parsed), min), max);
 }
@@ -1041,10 +1056,12 @@ function normalizeDeclaredPorts(value: unknown): number[] {
   if (!Array.isArray(value) || value.length > 128) {
     throw new OperatorError('DEVELOPER_RUNTIME_PORT_INVALID', 'ports must be an array with at most 128 entries.');
   }
-  const ports = value.map((item) => {
-    const port = Number(item);
-    if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
-      throw new OperatorError('DEVELOPER_RUNTIME_PORT_INVALID', 'Declared ports must be integers from 1 to 65535.');
+  // Array.from visits sparse array holes as undefined, which must also fail.
+  const ports = Array.from(value, (port) => {
+    // Do not coerce model/caller JSON values: Number(object) can run a
+    // hostile valueOf hook, and strings/arrays/bools are not port integers.
+    if (typeof port !== 'number' || !Number.isSafeInteger(port) || port < 1 || port > 65535) {
+      throw new OperatorError('DEVELOPER_RUNTIME_PORT_INVALID', 'Declared ports must be literal integers from 1 to 65535.');
     }
     return port;
   });
