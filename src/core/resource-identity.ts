@@ -41,7 +41,14 @@ export function validateResourceExtractorCoverage(): void {
 validateResourceExtractorCoverage();
 
 function requiredSegment(value: unknown, fallback: string): string {
-  const raw = String(value ?? fallback).trim().toLowerCase();
+  // Resource identities are authority-bearing lock keys. Coercing an object
+  // invokes caller hooks and may lock a different browser/profile namespace.
+  if (value === undefined || value === null) return escapeSegment(fallback);
+  if (typeof value !== 'string' || value.length > 256) {
+    throw new OperatorError('RESOURCE_TARGET_INVALID',
+      'Resource namespace must be a bounded literal string.');
+  }
+  const raw = value.trim().toLowerCase();
   return escapeSegment(raw || fallback);
 }
 
@@ -192,7 +199,7 @@ export async function resolvePhysicalResourceKeysForAction(action: ActionRequest
 
   if (action.capability.startsWith('postgres.')) {
     const rootPath = [...keys].find((key) => key.startsWith('fs-path:'));
-    if (rootPath) keys.add(`database:${rootPath.slice('fs-path:'.length)}/profile:${escapeSegment(String(input.profileId ?? 'profiles').toLowerCase())}`);
+    if (rootPath) keys.add(`database:${rootPath.slice('fs-path:'.length)}/profile:${requiredSegment(input.profileId, 'profiles')}`);
   }
 
   if (action.capability === 'process.inspect' || action.capability === 'process.manage') {
