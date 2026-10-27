@@ -168,7 +168,7 @@ export class RelayResultStore {
     return await this.#latencyRecorder.measure({
       stage: 'relay.result_wait', origin: 'relay-server',
       traceId: deviceId + ':' + seq + ':' + deliveryId
-    }, awaitResult);
+    }, awaitResult, value => value !== null);
   }
 
   async findByIdempotencyKey(idempotencyKeyInput: string): Promise<{ deviceId: string; result: StoredRelayResult } | null> {
