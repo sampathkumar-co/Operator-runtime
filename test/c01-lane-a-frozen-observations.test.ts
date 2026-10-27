@@ -20,7 +20,7 @@ function config(overrides: Record<string, unknown> = {}) {
   return {
     sourceCommit, model: 'example_model', modelConfigDigest: digest,
     runnerDigest: 'c'.repeat(64), fixtures: [makeCase()],
-    decide: async () => ({ decision: expected, costMicros: 0 }),
+    decide: async () => JSON.stringify({ decision: expected, costMicros: 0 }),
     ...overrides
   };
 }
@@ -39,7 +39,7 @@ test('C01 Lane A scores a frozen model-only decision with no Mecord dispatch or 
       assert.equal(input.acceptableDecisionsJson, undefined, 'answer key never sent to callback');
       assert.equal(input.oracleDigest, undefined);
       observed.push(input.observation.controls[0].id);
-      return { decision: { targetId: 'submit', operation: 'click' }, costMicros: 5 };
+      return JSON.stringify({ decision: { targetId: 'submit', operation: 'click' }, costMicros: 5 });
     }
   }));
   assert.equal(calls, 1);
@@ -57,7 +57,7 @@ test('C01 Lane A scores a frozen model-only decision with no Mecord dispatch or 
 
 test('C01 frozen oracle rejects a wrong target even if a model declares it done', async () => {
   const result = await runLaneAFrozenDecisions(config({
-    decide: async () => ({ decision: { operation: 'done' }, costMicros: 0 })
+    decide: async () => JSON.stringify({ decision: { operation: 'done' }, costMicros: 0 })
   }));
   assert.equal(result.records[0]?.claimedSuccess, true);
   assert.equal(result.records[0]?.verifiedSuccess, false);
