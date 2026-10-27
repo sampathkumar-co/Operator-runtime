@@ -136,7 +136,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
         return successful(action, inspected, started);
       }
       if (operation === 'workspace.worktree.inspect') {
-        const inspected = await this.#manager.inspect(sessionId);
+        const inspected = await this.#manager.inspectReadOnly(sessionId);
         exactRepository(inspected, repositoryRoot);
         return successful(action, inspected, started);
       }
@@ -172,7 +172,8 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
 
   async reconcile(request: ProviderReconciliationRequest): Promise<ProviderReconciliationResult> {
     const action = request.action;
-    if (!this.supports(action) || action.capability === 'workspace.worktree.inspect') {
+    if (!this.supports(action) || action.capability === 'workspace.worktree.inspect' ||
+        action.risk !== RISKS[action.capability as WorktreeOperation]) {
       return { status: 'uncertain', evidence: [evidence('developer_worktree_reconciliation', 'info',
         'Only a create or release can be reconciled through the owned worktree receipt.')] };
     }
@@ -192,9 +193,11 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
       } else if (action.capability === 'workspace.worktree.release') {
         requiredDigest(literalField(action.input, 'expectedFingerprint'), 'expectedFingerprint', [64]);
         if (inspected.record.phase === 'RELEASED' && !inspected.exists) {
-          return { status: 'completed', result: successful(action, inspected, 0),
-            evidence: [evidence('developer_worktree_reconciliation', 'pass',
-              'Owned terminal worktree release is durably recorded and absent.')] };
+          // The terminal record does not persist the fingerprint that
+          // authorized release. Absence alone cannot bind an arbitrary
+          // release action to that particular previous mutation.
+          return { status: 'uncertain', evidence: [evidence('developer_worktree_reconciliation', 'info',
+            'Terminal release is absent but not provably bound to this requested fingerprint.')] };
         }
       }
     } catch {
