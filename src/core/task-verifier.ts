@@ -304,7 +304,7 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
       && (!expectedRouteDigest || target.routeDigest === expectedRouteDigest)
       && (!expectedTargetId || target.id === expectedTargetId)
       && (expectedTargetId || target.type === undefined || target.type === 'page'));
-    const ok = Boolean(record && expectedDigest && matched);
+    const ok = Boolean(causalIndependentRead(record) && expectedDigest && matched);
     return outcome(true, ok, ok
       ? 'A fresh browser observation proves the requested logical destination without trusting planner completion text.'
       : 'No fresh browser observation proves the requested destination and target identity.', versions(record));
@@ -568,6 +568,21 @@ function evaluateQualityGate(records: TaskActionRecord[], state: Record<string, 
   return outcome(true, ok, ok
     ? `All ${checks.length} compiled trusted quality checks have successful durable machine evidence.`
     : 'At least one compiled trusted quality check lacks successful durable machine evidence.', mergeRecordVersions(used));
+}
+
+/** Browser goal truth must come from a completed, independent machine read.
+ * A matching digest inside an unknown, ambiguous or future-dated record is
+ * not proof of the observed browser destination. */
+function causalIndependentRead(record: TaskActionRecord | undefined): boolean {
+  const observed = record?.observation;
+  if (!record || record.state !== 'SUCCEEDED' || record.risk !== 'read' ||
+      observed?.schemaVersion !== 2 || observed.capability !== record.capability ||
+      observed.epistemicStatus !== 'KNOWN' || observed.ambiguous !== false) return false;
+  const started = Date.parse(record.startedAt);
+  const finished = Date.parse(record.finishedAt ?? '');
+  const captured = Date.parse(observed.observedAt);
+  return Number.isFinite(started) && Number.isFinite(finished) &&
+    Number.isFinite(captured) && started <= captured && captured <= finished;
 }
 
 // Only the terminal attempt for an identity can attest an outcome. Never
