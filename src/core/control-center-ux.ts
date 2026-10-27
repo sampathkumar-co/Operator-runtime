@@ -286,6 +286,20 @@ function recoveryItem(candidate: RecoveryCandidateInput): RecoveryCenterItem {
   // Contradictory adjudication must never be presented as an approved recovery
   // action. If reconciliation says no effect but the local runtime says one
   // exists, neither retry nor rollback is justified by this projection.
+  if (candidate.verificationStatus === 'passed' &&
+      (candidate.sideEffectState === 'none' ||
+       candidate.reconciliationStatus === 'not_applied')) {
+    // Independent completion and "nothing happened" are incompatible
+    // recovery claims. Never invite a second dispatch to resolve them.
+    return {
+      ...base,
+      disposition: 'BLOCKED',
+      recommendedAction: 'ESCALATE',
+      requiresFreshApproval: false,
+      reason: 'Passed verification conflicts with an asserted no-effect state; independent reconciliation is required before any retry.'
+    };
+  }
+
   if (candidate.reconciliationStatus === 'not_applied' && candidate.sideEffectState === 'known') {
     return {
       ...base,
