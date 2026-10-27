@@ -264,19 +264,32 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
     const executable = await this.#resolveExecutable();
     const dataDir = this.#managedDataDir();
     const args = buildManagedBrowserArgs(dataDir, { headless: this.#options.dedicatedProfileOnly });
-    await fs.mkdir(dataDir, { recursive: true, mode: 0o700 });
     if (this.#options.dedicatedProfileOnly) {
-      const info = await fs.lstat(dataDir);
-      if (info.isSymbolicLink()) {
-        throw new OperatorError('BROWSER_DEDICATED_PROFILE_SYMLINK', 'Dedicated Chrome profile must not be a symbolic link.');
+      // The owner must provision a distinct directory in advance. Never mkdir
+      // through a symlinked parent and accidentally modify protected profiles.
+      // Realpath checks also catch aliases/junctions that bypass lexical checks.
+      let profile;
+      try {
+        profile = await fs.lstat(dataDir);
+      } catch {
+        throw new OperatorError('BROWSER_DEDICATED_PROFILE_NOT_PROVISIONED',
+          'Dedicated browser profile directory must already exist and be owner-provisioned.');
       }
+      if (profile.isSymbolicLink() || !profile.isDirectory()) {
+        throw new OperatorError('BROWSER_DEDICATED_PROFILE_SYMLINK',
+          'Dedicated Chrome profile must be a real directory, not a symlink or file.');
+      }
+      const actualProfilePath = await fs.realpath(dataDir);
+      assertDedicatedProfileOptions({ ...this.#options, dataDir: actualProfilePath });
+    } else {
+      await fs.mkdir(dataDir, { recursive: true, mode: 0o700 });
     }
     const portFile = path.join(dataDir, 'DevToolsActivePort');
     if (this.#options.dedicatedProfileOnly) {
-      // A stale or live DevToolsActivePort from another process is NOT proof
-      // of our authority to delete or attach to that browser.
+      // Use lstat, not stat: dangling symlinks must not be mistaken for absent
+      // ownership files. Never remove an existing port file owned elsewhere.
       try {
-        await fs.stat(portFile);
+        await fs.lstat(portFile);
         throw new OperatorError('BROWSER_DEDICATED_PROFILE_IN_USE',
           'Dedicated browser profile already has DevToolsActivePort; refuse to overwrite a potentially active owner.');
       } catch (error) {
