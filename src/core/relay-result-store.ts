@@ -46,12 +46,13 @@ export class RelayResultStore {
   #shared?: ControlPlaneStore;
   #sharedNamespace: string;
   #latencyRecorder?: PipelineLatencyRecorder;
+  #traceResultCommits: boolean;
   #waiters = new Map<string, Set<ResultWaiter>>();
   #waiterCount = 0;
   #pollTimer?: ReturnType<typeof setInterval>;
   #pollInFlight = false;
 
-  constructor(stateDir: string, options: { clock?: () => Date; retentionMs?: number; sharedStore?: ControlPlaneStore; sharedNamespace?: string; latencyRecorder?: PipelineLatencyRecorder } = {}) {
+  constructor(stateDir: string, options: { clock?: () => Date; retentionMs?: number; sharedStore?: ControlPlaneStore; sharedNamespace?: string; latencyRecorder?: PipelineLatencyRecorder; traceResultCommits?: boolean } = {}) {
     this.#file = path.join(path.resolve(stateDir), 'relay-results.json');
     this.#clock = options.clock ?? (() => new Date());
     this.#retentionMs = boundedRetention(options.retentionMs);
@@ -59,6 +60,7 @@ export class RelayResultStore {
     this.#sharedNamespace = validSharedNamespace(options.sharedNamespace === undefined
       ? 'relay-result-streams' : options.sharedNamespace);
     this.#latencyRecorder = options.latencyRecorder;
+    this.#traceResultCommits = options.traceResultCommits === true;
   }
 
   async put(deviceIdInput: string, seqInput: number, deliveryIdInput: string, resultInput: JsonObject, idempotencyKeyInput?: string, replayAuthorityInput?: RelayDeliveryAuthority): Promise<{ result: StoredRelayResult; duplicate: boolean }> {
@@ -70,7 +72,10 @@ export class RelayResultStore {
     if (replayAuthority && !idempotencyKey) throw new OperatorError('RELAY_RESULT_AUTHORITY_INVALID', 'Replay authority requires an idempotency key.');
     const result = safeResult(resultInput);
     const resultSha256 = hashResult(result);
-    const stored = await this.#mutate((state) => {
+    // Commit measurement deliberately ends only after the storage write or
+    // shared-store CAS resolves. ACK, notification and execution authority
+    // are completely outside this optional instrumentation.
+    const commit = () => this.#mutate((state) => {
       pruneExpired(state, this.#clock().getTime(), this.#retentionMs);
       let stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
       if (!stream) {
@@ -100,6 +105,12 @@ export class RelayResultStore {
       stream.results.sort((a, b) => a.seq - b.seq);
       return { result: clone(stored), duplicate: false };
     });
+    const stored = this.#traceResultCommits && this.#latencyRecorder?.enabled
+      ? await this.#latencyRecorder.measure({
+          stage: 'relay.result_commit', origin: 'relay-server',
+          traceId: deviceId + ':' + seq + ':' + deliveryId
+        }, commit)
+      : await commit();
     this.#notify(deviceId, seq, stored.result);
     return stored;
   }
