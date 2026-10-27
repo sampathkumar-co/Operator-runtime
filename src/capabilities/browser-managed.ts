@@ -391,7 +391,8 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
 export class ManagedBrowserProvider implements CapabilityProvider {
   readonly name = 'browser.managed';
   #dedicatedProfileOnly: boolean;
-  #dedicatedBindInFlight?: Promise<void>;
+  #dedicatedInitInFlight?: Promise<void>;
+  #dedicatedStopped = false;
   #delegate: CapabilityProvider;
   #launcher: BrowserEndpointLauncher;
   #endpoint: string;
@@ -415,12 +416,31 @@ export class ManagedBrowserProvider implements CapabilityProvider {
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     if (this.#dedicatedProfileOnly) {
-      // Establish process ownership before *any* read or mutation. Never route to
-      // 9222, discovered profiles or a previously running unowned CDP server.
-      let endpoint: string;
+      const stopped = (): ActionResult => ({
+        ok: false, capability: action.capability, provider: this.name,
+        evidence: [evidence('browser_ownership', 'fail',
+          'Dedicated Chromium was stopped before dispatch; no action was attempted.')],
+        error: { code: 'BROWSER_DEDICATED_STOPPED',
+          message: 'Dedicated browser is stopped; create a new provider for further work.',
+          retryable: false, sideEffectState: 'none', executionPhase: 'pre_dispatch' },
+        durationMs: Math.round(performance.now() - started)
+      });
+      if (this.#dedicatedStopped) return stopped();
       try {
-        endpoint = await this.#launcher.ensureEndpoint();
+        // The entire ownership startup AND delegate binding are single-flight.
+        // Shutdown waits for this boundary and prevents subsequent dispatch.
+        if (!this.#dedicatedInitInFlight) {
+          const inFlight = this.#bindDedicatedEndpoint();
+          this.#dedicatedInitInFlight = inFlight;
+          void inFlight.finally(() => {
+            if (this.#dedicatedInitInFlight === inFlight) {
+              this.#dedicatedInitInFlight = undefined;
+            }
+          }).catch(() => undefined);
+        }
+        await this.#dedicatedInitInFlight;
       } catch (error) {
+        if (this.#dedicatedStopped) return stopped();
         const op = error instanceof OperatorError ? error :
           new OperatorError('BROWSER_DEDICATED_LAUNCH_FAILED',
             'Dedicated browser could not establish an owned process.', { retryable: false });
@@ -431,24 +451,9 @@ export class ManagedBrowserProvider implements CapabilityProvider {
           error: { code: op.code, message: op.message, retryable: false, sideEffectState: 'none' },
           durationMs: Math.round(performance.now() - started) };
       }
-      if (endpoint !== this.#endpoint) {
-        if (!this.#dedicatedBindInFlight) {
-          const binding = (async () => {
-            if (endpoint !== this.#endpoint) {
-              await this.#delegate.close?.();
-              this.#endpoint = endpoint;
-              this.#delegate = new BrowserCdpProvider(endpoint);
-            }
-          })();
-          this.#dedicatedBindInFlight = binding;
-          void binding.finally(() => {
-            if (this.#dedicatedBindInFlight === binding) this.#dedicatedBindInFlight = undefined;
-          }).catch(() => undefined);
-        }
-        await this.#dedicatedBindInFlight;
-      }
-      // Delegate failures remain authoritative. Never reclassify a possibly
-      // dispatched mutation as sideEffectState=none or implicitly replay it.
+      if (this.#dedicatedStopped) return stopped();
+      // No await occurs between the Stop fence and dispatch. Any already
+      // dispatched action remains subject to canonical cancellation/uncertainty.
       const result = await this.#delegate.execute(action, context);
       return { ...result, provider: this.name };
     }
@@ -526,9 +531,21 @@ export class ManagedBrowserProvider implements CapabilityProvider {
     await this.#closeOwnedResources();
   }
 
+  async #bindDedicatedEndpoint(): Promise<void> {
+    const endpoint = await this.#launcher.ensureEndpoint();
+    if (this.#dedicatedStopped || endpoint === this.#endpoint) return;
+    await this.#delegate.close?.();
+    if (this.#dedicatedStopped) return;
+    this.#endpoint = endpoint;
+    this.#delegate = new BrowserCdpProvider(endpoint);
+  }
+
   async #closeOwnedResources(): Promise<void> {
-    if (this.#dedicatedProfileOnly && this.#dedicatedBindInFlight) {
-      await this.#dedicatedBindInFlight.catch(() => undefined);
+    if (this.#dedicatedProfileOnly) {
+      this.#dedicatedStopped = true;
+      // The startup gate includes both launch and delegate replacement.
+      // Waiting here cannot leave a new delegate dispatching after shutdown.
+      await this.#dedicatedInitInFlight?.catch(() => undefined);
     }
     const results = await Promise.allSettled([
       (async () => this.#delegate.close?.())(),
