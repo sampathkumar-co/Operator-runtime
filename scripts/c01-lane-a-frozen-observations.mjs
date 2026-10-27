@@ -122,15 +122,19 @@ export async function runLaneAFrozenDecisions({
           timer = setTimeout(() => { expired = true; controller.abort(); reject(new Error('MODEL_DEADLINE')); }, timeoutMs);
         })
       ]);
-      // A model provider returns untrusted JSON text, never an executable JS
-      // object. Parsing here avoids getters/proxies in injected adapter output.
-      const payload = parseBoundedJson(output, 4096, 'model decision receipt');
-      if (!own(payload, ['decision', 'costMicros']) ||
-          Object.keys(payload).length !== 2 || !Number.isSafeInteger(payload.costMicros) ||
-          payload.costMicros < 0) invalid('model cost/decision receipt invalid');
-      costMicros = payload.costMicros;
-      modelAnswer = decision(payload.decision);
-      failureStage = item.accepted.has(modelAnswer) ? 'none' : 'model';
+      // Model syntax/contracts are scored separately from model reasoning and
+      // transport faults. The callback must yield inert bounded JSON text.
+      try {
+        const payload = parseBoundedJson(output, 4096, 'model decision receipt');
+        if (!own(payload, ['decision', 'costMicros']) ||
+            Object.keys(payload).length !== 2 || !Number.isSafeInteger(payload.costMicros) ||
+            payload.costMicros < 0) invalid('model cost/decision receipt invalid');
+        costMicros = payload.costMicros;
+        modelAnswer = decision(payload.decision);
+        failureStage = item.accepted.has(modelAnswer) ? 'none' : 'model';
+      } catch {
+        failureStage = 'schema';
+      }
     } catch {
       failureStage = expired ? 'timing' : 'unattributed';
     } finally {
