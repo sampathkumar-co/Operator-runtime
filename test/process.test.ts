@@ -573,3 +573,32 @@ test('C06 trusted terminal invocation and managed session refuse coercible argum
     input: { operation: ['list'] }, provenance: { kind: 'runtime' }
   } as any), /terminal.session operation/);
 });
+
+
+test('C06 developer process port declarations reject coercion before any session or executable launch', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-ports-literal-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'] });
+  t.after(() => provider.close());
+  let coerced = 0;
+  const attacker = {
+    valueOf() { coerced++; return 8080; },
+    toString() { coerced++; return '8080'; }
+  };
+  const badPorts: unknown[] = [
+    ['8080'], [[8080]], [true], [attacker], [new Number(8080)],
+    [1.5], [0], [65536], [Number.NaN], [Infinity],
+    Array.from({ length: 129 }, () => 8080), '8080'
+  ];
+  for (const [index, ports] of badPorts.entries()) {
+    const result = await provider.execute({
+      id: 'bad-port-' + index, capability: 'terminal.session', risk: 'destructive',
+      input: { operation: 'start', executable: 'node', args: ['-e', 'process.exit(0)'], cwd: root, ports },
+      provenance: { kind: 'runtime' }
+    } as any);
+    assert.equal(result.ok, false, 'case ' + index);
+    assert.equal(result.error?.code, 'DEVELOPER_RUNTIME_PORT_INVALID', 'case ' + index);
+    assert.equal(result.error?.sideEffectState, 'none', 'invalid port must fail before process start');
+  }
+  assert.equal(coerced, 0, 'caller-provided port conversion hooks must never execute');
+});
