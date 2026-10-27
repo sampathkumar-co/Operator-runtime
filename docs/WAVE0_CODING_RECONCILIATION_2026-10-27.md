@@ -11,7 +11,7 @@
 | C00-03 | EXISTING SOURCE | Historical #359 benchmark-control integration excluded, #342 needs measured comparison, #368 source-only adaptations. |
 | C00-04 | EXISTING SOURCE | 11 legacy defects classified, not all repaired or independently accepted. |
 | C00-05 | EXISTING SOURCE | Release-truth docs exist; current candidate remains unreleased. |
-| C00-06 | NEW READ-ONLY AUDITOR / ORIGINAL EVIDENCE NOT RUN | `scripts/c00-local-source-provenance.mjs` can pseudonymously hash *explicitly selected* files, refusing protected `.operator`, secrets, symlinks and traversal. No lost historical controller has been recovered, no source ownership or provenance was independently authenticated. |
+| C00-06 | NEW READ-ONLY AUDITOR / ORIGINAL EVIDENCE NOT RUN | `scripts/c00-local-source-provenance.mjs` can pseudonymously hash *explicitly selected* files, refusing protected `.operator`, secret destinations, unsafe symlink aliases and traversal. No lost historical controller has been recovered, no source ownership or provenance was independently authenticated. |
 | C00-07 | EXISTING SOURCE-PINNED CI | Native/helper/doctor and platform qualification pertains to the stable pinned SHA, not this Wave 0 branch. |
 | C00-08 | EXISTING SOURCE | Versioned intent, goal, action, observation, verification and authority contracts. |
 | C00-09 | EXISTING CI GATE | PR evidence contract including physical NOT_RUN and exact head. |
