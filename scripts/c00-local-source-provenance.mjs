@@ -59,15 +59,19 @@ export async function inspectExplicitLocalSourceProvenance(config) {
   if (selectedRoot.split(/[\\/]+/).some(part => BLOCKED.has(part.toLowerCase()))) {
     invalid('protected state or secrets roots cannot be inventoried');
   }
-  // Inspect the entire ancestor chain: an apparently harmless selected path
-  // can enter .operator through a symlinked directory above that root.
+  // Resolve each ancestor before trusting a source root. A symlink to
+  // .operator must be rejected, but ordinary platform aliases (macOS /var
+  // -> /private/var) are legal when their destination remains unprotected.
   const parsed = path.parse(selectedRoot);
   let cursor = parsed.root;
   const parts = selectedRoot.slice(parsed.root.length).split(path.sep).filter(Boolean);
   for (const part of parts) {
     cursor = path.join(cursor, part);
-    const ancestor = await fs.lstat(cursor);
-    if (ancestor.isSymbolicLink()) invalid('source root contains a symbolic link or junction');
+    const canonicalAncestor = await fs.realpath(cursor);
+    if (canonicalAncestor.split(/[\\/]+/).some(segment =>
+        BLOCKED.has(segment.toLowerCase()))) {
+      invalid('source ancestor resolves into protected recovery or secret state');
+    }
   }
   const rootStats = await fs.lstat(selectedRoot);
   if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) invalid('root must be an ordinary directory');
