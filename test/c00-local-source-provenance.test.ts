@@ -100,6 +100,26 @@ test('C00 protected source roots cannot be reached through an ancestor alias',as
     '{"protected":true}','protected evidence remains unchanged');
 });
 
+test('C00 permits a harmless canonicalized ancestor symlink, but no protected hop',async t=>{
+  const root=await fixture(t);
+  await fs.mkdir(path.join(root,'src','inner'));
+  await fs.writeFile(path.join(root,'src','inner','file.ts'),'export const safe = true;\\n');
+  const alias=path.join(root,'safe_alias');
+  try {await fs.symlink(path.join(root,'src'),alias,'dir');}
+  catch(error){
+    if(['EPERM','EACCES'].includes((error as NodeJS.ErrnoException).code??'')){
+      return t.skip('OS symlink privilege unavailable');
+    }
+    throw error;
+  }
+  const result=await inspectExplicitLocalSourceProvenance({
+    root:path.join(alias,'inner'),
+    relativePaths:['file.ts'],referenceDigests:{},hmacKey:'d'.repeat(64)
+  });
+  assert.equal(result.inspected,1);
+  assert.equal(result.originalDeviceReceipts,'NOT_TOUCHED');
+});
+
 test('C00 without independent source reference never declares a unique recovered controller',async t=>{
   const root=await fixture(t);
   const response=await inspectExplicitLocalSourceProvenance({
