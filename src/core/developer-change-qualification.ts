@@ -173,7 +173,7 @@ export function validateDeveloperChangeQualificationPlan(
   if ((typeof plan.editPlanId !== 'string' || !/^[0-9a-f]{64}$/.test(plan.editPlanId))) {
     throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', 'editPlanId is invalid.');
   }
-  if (!path.isAbsolute(plan.projectRoot)) {
+  if (typeof plan.projectRoot !== 'string' || !path.isAbsolute(plan.projectRoot)) {
     throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', 'projectRoot must be absolute.');
   }
   if (!Array.isArray(plan.changedPaths) || plan.changedPaths.length < 1) {
@@ -297,30 +297,28 @@ function validateTrustedCommandInspection(result: ActionResult): {
 }
 
 function normalizeStep(input: DeveloperQualificationStep, expectedOrder: number): DeveloperQualificationStep {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', 'Qualification step is invalid.');
-  }
-  if (input.order !== expectedOrder) {
+  const step = inertRecord(input, 'DEVELOPER_QUALIFICATION_PLAN_INVALID', 'qualification step') as unknown as DeveloperQualificationStep;
+  if (step.order !== expectedOrder) {
     throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', 'Qualification step order is not contiguous.');
   }
-  if (!COMMAND_ID.test(String(input.commandId ?? ''))) {
+  if (typeof step.commandId !== 'string' || !COMMAND_ID.test(step.commandId)) {
     throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', 'Qualification commandId is invalid.');
   }
-  if (!KIND_ORDER.includes(input.kind)) {
+  if (!KIND_ORDER.includes(step.kind)) {
     throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', 'Qualification kind is invalid.');
   }
-  if (input.risk !== 'read' && input.risk !== 'write') {
+  if (step.risk !== 'read' && step.risk !== 'write') {
     throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', 'Qualification risk is invalid.');
   }
-  const reason = String(input.reason ?? '');
-  if (!reason || Buffer.byteLength(reason, 'utf8') > 2048 || reason.includes('\0')) {
+  const reason = step.reason;
+  if (typeof reason !== 'string' || !reason || Buffer.byteLength(reason, 'utf8') > 2048 || reason.includes('\0')) {
     throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', 'Qualification reason is invalid.');
   }
   return {
     order: expectedOrder,
-    commandId: input.commandId,
-    kind: input.kind,
-    risk: input.risk,
+    commandId: step.commandId,
+    kind: step.kind,
+    risk: step.risk,
     reason
   };
 }
