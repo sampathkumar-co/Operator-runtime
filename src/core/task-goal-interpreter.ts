@@ -25,8 +25,52 @@ function invalid(message: string): never {
   throw new OperatorError('TASK_PROPOSAL_INVALID', message);
 }
 function record(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) invalid(label + ' must be a JSON object.');
-  return value as Record<string, unknown>;
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
+    invalid(label + ' must be a plain inert JSON object.');
+  }
+  const copy: Record<string, unknown> = Object.create(null);
+  const keys = Reflect.ownKeys(value);
+  if (keys.length > 32) invalid(label + ' has too many fields.');
+  for (const key of keys) {
+    if (typeof key !== 'string') invalid(label + ' contains an untrusted symbolic field.');
+    const entry = Object.getOwnPropertyDescriptor(value, key);
+    if (!entry || !entry.enumerable || !('value' in entry)) {
+      invalid(label + ' contains an executable or hidden field.');
+    }
+    copy[key] = entry.value;
+  }
+  return copy;
+}
+/** Do not read client/model arrays through an inherited iterator or accessor. */
+function literalArray(value: unknown, min: number, max: number, label: string): unknown[] {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype ||
+      value.length < min || value.length > max ||
+      Reflect.ownKeys(value).length !== value.length + 1) invalid(label + ' must be a bounded dense array.');
+  const result: unknown[] = [];
+  for (let i = 0; i < value.length; i++) {
+    const slot = Object.getOwnPropertyDescriptor(value, String(i));
+    if (!slot || !slot.enumerable || !('value' in slot)) {
+      invalid(label + ' contains an executable or missing array entry.');
+    }
+    result.push(slot.value);
+  }
+  return result;
+}
+function approvedScopes(input: TaskGoalProposalRequest): TaskGoalProposalRequest {
+  const request = record(input, 'Proposal request');
+  const approvedRoots = literalArray(request.approvedRoots, 0, 12, 'approvedRoots')
+    .map(root => {
+      if (typeof root !== 'string' || !path.isAbsolute(root) ||
+          root.length > 4096 || root.includes('\\0')) invalid('Approved roots must be literal absolute paths.');
+      return path.resolve(root);
+    });
+  const approvedBrowserOrigins = literalArray(request.approvedBrowserOrigins, 0, 12, 'approvedBrowserOrigins')
+    .map(origin);
+  if (approvedRoots.length + approvedBrowserOrigins.length < 1) {
+    throw new OperatorError('TASK_PROPOSAL_SCOPE_REQUIRED', 'An explicit approved root or browser origin is required.');
+  }
+  return { objective: boundedString(request.objective, 4096, 'objective'), approvedRoots, approvedBrowserOrigins };
 }
 function exactKeys(object: Record<string, unknown>, allowed: string[], label: string): void {
   for (const key of Object.keys(object)) if (!allowed.includes(key)) invalid(label + ' contains an unsupported field.');
@@ -45,8 +89,9 @@ function origin(raw: unknown): string {
   return url.origin;
 }
 function withinRoot(candidate: string, root: string): boolean {
-  const relative = path.relative(root, candidate);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  // Model text cannot authorize a previously unseen descendant/symlink path.
+  // Exactly selected project roots remain subject to normal runtime checks.
+  return candidate === root;
 }
 
 /** Validate a single model-suggested action. Deliberately no file edits, shells or arbitrary UI interaction. */
@@ -82,6 +127,7 @@ function validateAtomicGoal(value: unknown, input: TaskGoalProposalRequest): Mod
 
 /** A model response is a user-reviewed proposal. The model never authorizes execution. */
 export function validateTaskGoalProposal(value: unknown, input: TaskGoalProposalRequest): TaskGoalProposal {
+  const scope = approvedScopes(input);
   const response = record(value, 'Proposal');
   exactKeys(response, ['goal', 'successConditions'], 'Proposal');
   const rawGoal = record(response.goal, 'Proposal goal');
@@ -91,7 +137,7 @@ export function validateTaskGoalProposal(value: unknown, input: TaskGoalProposal
     if (!Array.isArray(rawGoal.steps) || rawGoal.steps.length < 2 || rawGoal.steps.length > 4) {
       invalid('Model workflows must contain 2-4 independent, typed atomic actions.');
     }
-    const steps = rawGoal.steps.map(entry => validateAtomicGoal(entry, input));
+    const steps = literalArray(rawGoal.steps, 2, 4, 'steps').map(entry => validateAtomicGoal(entry, scope));
     // Avoid repeated actions that could otherwise execute redundantly after user confirmation.
     if (new Set(steps.map(step => JSON.stringify(step))).size !== steps.length) {
       invalid('Model workflows cannot contain duplicate steps.');
@@ -100,27 +146,27 @@ export function validateTaskGoalProposal(value: unknown, input: TaskGoalProposal
   } else if (rawGoal.kind === 'project-quality-gate') {
     exactKeys(rawGoal, ['kind', 'root', 'checks', 'requireAll'], 'Project quality gate');
     const root = path.resolve(boundedString(rawGoal.root, 4096, 'quality-gate root'));
-    if (!input.approvedRoots.some(approvedRoot => withinRoot(root, path.resolve(approvedRoot)))) {
+    if (!scope.approvedRoots.some(approvedRoot => withinRoot(root, path.resolve(approvedRoot)))) {
       throw new OperatorError('TASK_PROPOSAL_SCOPE_DENIED', 'Model-proposed quality-gate root was not explicitly approved.');
     }
     if (!Array.isArray(rawGoal.checks) || rawGoal.checks.length < 2 || rawGoal.checks.length > 3 ||
-        rawGoal.checks.some(check => !['lint', 'test', 'build'].includes(String(check))) ||
-        new Set(rawGoal.checks).size !== rawGoal.checks.length ||
+        literalArray(rawGoal.checks, 2, 3, 'checks').some(check => typeof check !== 'string' || !['lint', 'test', 'build'].includes(check)) ||
+        new Set(literalArray(rawGoal.checks, 2, 3, 'checks')).size !== rawGoal.checks.length ||
         rawGoal.requireAll !== true) {
       invalid('Project quality gates require 2-3 unique lint/test/build checks and requireAll:true.');
     }
     goal = {
       kind: 'project-quality-gate', root,
-      checks: rawGoal.checks as Array<'lint' | 'test' | 'build'>,
+      checks: literalArray(rawGoal.checks, 2, 3, 'checks') as Array<'lint' | 'test' | 'build'>,
       requireAll: true
     };
   } else {
-    goal = validateAtomicGoal(rawGoal, input);
+    goal = validateAtomicGoal(rawGoal, scope);
   }
   if (!Array.isArray(response.successConditions) || response.successConditions.length < 1 || response.successConditions.length > 5) {
     invalid('Proposal requires 1-5 observable success conditions.');
   }
-  const successConditions = response.successConditions.map((entry, i) => boundedString(entry, 512, 'successConditions[' + i + ']'));
+  const successConditions = literalArray(response.successConditions, 1, 5, 'successConditions').map((entry, i) => boundedString(entry, 512, 'successConditions[' + i + ']'));
   return { goal, successConditions };
 }
 
