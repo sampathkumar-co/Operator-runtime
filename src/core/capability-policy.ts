@@ -78,12 +78,25 @@ export function registerExtensionCapabilityRisk(input: {
   // Extension identities are an authorization boundary. String(object)
   // executes caller-defined toString/valueOf and can impersonate namespace
   // ownership; only literal source-contract strings are valid.
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    throw new PolicyError('CAPABILITY_EXTENSION_NAMESPACE_INVALID', 'Extension risk registration must be an object.');
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      (Object.getPrototypeOf(input) !== Object.prototype &&
+       Object.getPrototypeOf(input) !== null)) {
+    throw new PolicyError('CAPABILITY_EXTENSION_NAMESPACE_INVALID', 'Extension risk registration must be an inert plain object.');
   }
-  const capability = typeof input.capability === 'string' ? input.capability : '';
-  const extensionId = typeof input.extensionId === 'string' ? input.extensionId : '';
-  const owner = typeof input.owner === 'string' ? input.owner : '';
+  // Reading input.extensionId, input.capability or input.rule directly can
+  // execute getters. Only own enumerable data descriptors may establish a
+  // canonical risk authority registration.
+  const descriptor = (key: 'capability' | 'extensionId' | 'owner' | 'rule'): unknown => {
+    const field = Object.getOwnPropertyDescriptor(input, key);
+    return field?.enumerable && 'value' in field ? field.value : undefined;
+  };
+  const capabilityInput = descriptor('capability');
+  const extensionIdInput = descriptor('extensionId');
+  const ownerInput = descriptor('owner');
+  const riskInput = descriptor('rule');
+  const capability = typeof capabilityInput === 'string' ? capabilityInput : '';
+  const extensionId = typeof extensionIdInput === 'string' ? extensionIdInput : '';
+  const owner = typeof ownerInput === 'string' ? ownerInput : '';
   const expectedPrefix = `ext.${extensionId}.`;
   if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(extensionId)) {
     throw new PolicyError('CAPABILITY_EXTENSION_NAMESPACE_INVALID', 'Extension id is invalid for risk registration.');
@@ -94,18 +107,18 @@ export function registerExtensionCapabilityRisk(input: {
   if (isBuiltInCapability(capability)) {
     throw new PolicyError('CAPABILITY_EXTENSION_SHADOW_DENIED', 'Extension capability cannot shadow a built-in capability.');
   }
-  if (!['read','write','external','system','destructive','dynamic'].includes(input.rule)) {
+  if (!['read','write','external','system','destructive','dynamic'].includes(riskInput as string)) {
     throw new PolicyError('CAPABILITY_EXTENSION_RISK_INVALID', 'Extension capability risk rule is invalid.');
   }
   if (!/^[0-9a-f]{64}$/.test(owner)) {
     throw new PolicyError('CAPABILITY_EXTENSION_OWNER_INVALID', 'Extension risk owner must be a SHA-256 identity.');
   }
   const existing = EXTENSION_CAPABILITY_RISK_RULES.get(capability);
-  if (existing && (existing.rule !== input.rule || existing.owner !== owner)) {
+  if (existing && (existing.rule !== riskInput || existing.owner !== owner)) {
     throw new PolicyError('CAPABILITY_EXTENSION_RISK_CONFLICT', 'Extension capability risk policy is already owned by another package.');
   }
   if (existing) existing.leases += 1;
-  else EXTENSION_CAPABILITY_RISK_RULES.set(capability, { rule: input.rule, owner, leases: 1 });
+  else EXTENSION_CAPABILITY_RISK_RULES.set(capability, { rule: riskInput as CapabilityRiskRule, owner, leases: 1 });
   let released = false;
   return () => {
     if (released) return;
