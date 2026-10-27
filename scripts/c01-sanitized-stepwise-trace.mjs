@@ -48,6 +48,10 @@ function recordStep(value,index){
  * evaluation report. It cannot establish physical release acceptance.
  */
 export function createSanitizedEvaluationTrace(input) {
+ requireInertEvaluationObject(input, deny, 'step trace input');
+ requireDenseEvaluationArray(input.steps, 1, 1000, deny, 'step receipts');
+ for (const step of input.steps) requireInertEvaluationObject(step, deny, 'step receipt');
+ requireInertEvaluationObject(input.record, deny, 'scorer record');
  if(!input||typeof input!=='object'||typeof input.sourceCommit!=='string'||!SHA.test(input.sourceCommit)||
     !textId(input.runId)||typeof input.suiteDigest!=='string'||!DIGEST.test(input.suiteDigest)||
     !Array.isArray(input.steps)||input.steps.length<1||input.steps.length>1000||
@@ -56,8 +60,6 @@ export function createSanitizedEvaluationTrace(input) {
  }
  const run=validateWave0Record(input.record,input.sourceCommit);
  if(run.id!==input.runId||!LANES.has(run.lane))deny('Step trace run identity or lane differs from scorer record.');
- requireDenseEvaluationArray(input.steps, 1, 1000, deny, 'step receipts');
- for (const step of input.steps) requireInertEvaluationObject(step, deny, 'step receipt');
  const steps=input.steps.map(recordStep);
  // Uncertain effect persists across any number of observations. Only an
  // explicit positive reconciliation step can clear it before new dispatch.
