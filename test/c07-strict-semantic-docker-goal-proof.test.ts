@@ -140,3 +140,56 @@ test('C07 file-change Git evidence requires inert literal path hashes rather tha
   gitObservation.importantState = { gitPathHashes: [expectedGitHash.toUpperCase()] };
   assert.equal(verifyGoalOutcomeTruth(task).ok, false, 'digest casing must match machine proof contract');
 });
+
+
+test('C07 sparse, accessor-backed and prototype-overridden Docker service goals cannot certify lifecycle completion', () => {
+  let accessed = 0;
+  const attacks: unknown[] = [
+    Array(1),
+    Array.from({ length: 51 }, () => 'web'),
+    Object.assign(['web'], { hidden: 'ignored' }),
+    ['web', undefined],
+    [''],
+    ['web\0hidden']
+  ];
+  const accessor: unknown[] = [];
+  Object.defineProperty(accessor, '0', {
+    enumerable: true, get() { accessed++; return 'web'; }
+  });
+  accessor.length = 1;
+  attacks.push(accessor);
+  const overridden = ['web'] as any;
+  overridden.every = () => { accessed++; return true; };
+  attacks.push(overridden);
+  for (const [index, services] of attacks.entries()) {
+    const task = fixture();
+    goal(task).services = services;
+    assert.equal(verifyGoalOutcomeTruth(task).ok, false,
+      'malformed Docker services must not certify: ' + index);
+  }
+  assert.equal(accessed, 0, 'Docker goal verification must not execute getters or overridden methods');
+  assert.equal(verifyGoalOutcomeTruth(fixture()).ok, true,
+    'ordinary explicit service array stays valid');
+});
+
+test('C07 Docker lifecycle requires causal known inspection of the exact provider capability', () => {
+  const cases: Array<(task: TaskCapsule) => void> = [
+    task => { task.execution!.records[0]!.risk = 'write'; },
+    task => { task.execution!.records[0]!.capability = 'file.info'; },
+    task => { task.execution!.records[0]!.finishedAt = undefined; },
+    task => { task.execution!.records[0]!.finishedAt = '2026-10-25T10:00:00.050Z'; },
+    task => { task.execution!.records[0]!.startedAt = '2026-10-25T10:00:00.125Z'; },
+    task => { const obs = task.execution!.records[0]!.observation;
+      if (obs?.schemaVersion === 2) obs.epistemicStatus = 'UNKNOWN'; },
+    task => { const obs = task.execution!.records[0]!.observation;
+      if (obs?.schemaVersion === 2) obs.ambiguous = true; }
+  ];
+  for (const [index, mutate] of cases.entries()) {
+    const task = fixture();
+    mutate(task);
+    assert.equal(verifyGoalOutcomeTruth(task).ok, false,
+      'untrusted Docker inspect receipt case ' + index);
+  }
+  assert.equal(verifyGoalOutcomeTruth(fixture()).ok, true,
+    'completed exact known read still proves requested Docker state');
+});
