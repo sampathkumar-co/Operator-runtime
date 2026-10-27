@@ -78,6 +78,15 @@ test('C01 frozen dataset revision must be a literal commit, not an executable id
   assert.equal(conversions,0);
 });
 
+test('C01 task manifest rejects names which its own report cannot score',()=>{
+  for(const id of ['folder/task_001','namespace:task_001']){
+    const input=fixture();
+    input.dataset.taskIds[0]=id;
+    assert.throws(()=>validateFrozen125CampaignManifest(input),
+      /C01_CAMPAIGN_MANIFEST_INVALID/);
+  }
+});
+
 test('C01 evaluation report refuses sparse or getter-backed records before scoring coverage',()=>{
   const blank=Array(2);
   assert.throws(()=>buildWave0EvaluationReport({sourceCommit:source,records:blank}),
