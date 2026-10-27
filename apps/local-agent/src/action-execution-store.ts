@@ -153,6 +153,20 @@ export class LocalActionExecutionStore {
     return found ? clone(found) : null;
   }
 
+  /** Local metadata review only. Never updates, acknowledges or adjudicates receipts. */
+  async listOperatorPendingReceipts(limit = 200): Promise<LocalActionExecutionRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 256) {
+      throw new OperatorError('ACTION_EXECUTION_ACTION_MISMATCH', 'Invalid recovery review limit.');
+    }
+    // Serialize against this process's writes; this read is NOT a cross-process
+    // snapshot proof and must never be treated as recovery authority.
+    await this.#queue;
+    const state = await this.#read();
+    return state.records.filter(entry => entry.status === 'processing')
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+      .slice(0, limit).map(clone);
+  }
+
   async lookup(action: ActionRequest, authority?: ApprovalAuthorityContext): Promise<
     | { status: 'missing' }
     | { status: 'processing'; record: LocalActionExecutionRecord }
