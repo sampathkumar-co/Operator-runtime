@@ -343,11 +343,11 @@ function qualificationReason(
 }
 
 function uniqueRelativePaths(input: unknown, label: string): string[] {
-  if (!Array.isArray(input) || input.length > 10_000) {
-    throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', label + ' is invalid.');
-  }
-  const values = input.map((item) => {
-    const value = String(item ?? '');
+  const values = inertArray(input, 10_000, 'DEVELOPER_QUALIFICATION_PLAN_INVALID', label).map((item) => {
+    if (typeof item !== 'string') {
+      throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', label + ' requires literal string paths.');
+    }
+    const value = item;
     if (!value || value.includes('\0') || value.includes('\\')) {
       throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', label + ' contains an invalid path.');
     }
