@@ -406,7 +406,7 @@ export class TaskOrchestrator {
       // cannot overwrite the final charge after a later callback completes.
       let reservationQueue: Promise<void> = Promise.resolve();
       let reservationPersistenceFailed = false;
-      const reserveModelBudget = async (maxTokens: number): Promise<void> => {
+      const makeBudgetReservation = (budgetSignal: AbortSignal) => async (maxTokens: number): Promise<void> => {
         if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 100_000) {
           throw new OperatorError('TASK_MODEL_BUDGET_INVALID', 'Model token reservation must be a positive bounded integer.');
         }
@@ -415,7 +415,7 @@ export class TaskOrchestrator {
         reservationQueue = new Promise<void>(resolve => { release = resolve; });
         await prior;
         try {
-          if (planningSignal.aborted) {
+          if (budgetSignal.aborted) {
             throw new OperatorError('TASK_PLANNER_ABORTED', 'Stopped planner cannot reserve another model call.');
           }
           if (reservationPersistenceFailed) {
@@ -437,7 +437,7 @@ export class TaskOrchestrator {
             reservationPersistenceFailed = true;
             throw error;
           }
-          if (control || planningSignal.aborted) {
+          if (control || budgetSignal.aborted) {
             reservationPersistenceFailed = true;
             throw new OperatorError('TASK_PLANNER_ABORTED', 'Model budget reserved but execution was stopped before model dispatch.');
           }
@@ -445,6 +445,7 @@ export class TaskOrchestrator {
           release();
         }
       };
+      const reserveModelBudget = makeBudgetReservation(planningSignal);
       const context: TaskPlannerContext = {
         task,
         goal,
@@ -577,20 +578,44 @@ export class TaskOrchestrator {
       }));
       if (this.#planningInfluence) {
         let influence: TaskPlanningInfluence | undefined;
+        // Planner callbacks are revoked after next/repair. Advisory inference
+        // receives a distinct Stop/Pause fence and a newly bound durable
+        // reservation callback; it cannot inherit the old planner's authority.
+        const advisoryController = new AbortController();
+        this.#planningControllers.set(task.id, advisoryController);
+        const advisorySignal = AbortSignal.any([signal, advisoryController.signal]);
+        const advisory = this.#planningInfluence;
         try {
-          influence = await this.#planningInfluence.review({
-            proposalDigest,
-            task: structuredClone(task),
-            goal: structuredClone(goal),
-            decision: structuredClone(decision),
-            risk,
-            budget: structuredClone(budget),
-            recentEvents: structuredClone(recentEvents),
-            intelligence: structuredClone(intelligence),
-            decisionBudget: structuredClone(decisionBudget)
-          });
+          influence = await boundedPlannerCall(
+            () => advisory.review({
+              proposalDigest,
+              task: structuredClone(task),
+              goal: structuredClone(goal),
+              decision: structuredClone(decision),
+              risk,
+              budget: structuredClone(budget),
+              recentEvents: structuredClone(recentEvents),
+              intelligence: structuredClone(intelligence),
+              decisionBudget: structuredClone(decisionBudget),
+              signal: advisorySignal,
+              reserveModelBudget: makeBudgetReservation(advisorySignal)
+            }),
+            Math.max(1, activeDeadline - this.#monotonicNow()),
+            advisorySignal
+          );
         } catch (error) {
+          if (advisorySignal.aborted) {
+            const requested = this.#controlRequests.get(task.id);
+            if (requested) return await this.#setControlState(task.id, requested);
+            const controlled = await this.#store.get(task.id);
+            if (controlled.state === 'PAUSED' || controlled.state === 'CANCELLED') return controlled;
+          }
           return await this.#fail(task, 'TASK_ADAPTIVE_CONTROL_FAILED', error instanceof Error ? error.message : String(error), assertLease);
+        } finally {
+          // Revoke even a hung provider's captured budget callback immediately
+          // when its advisory phase settles or times out.
+          advisoryController.abort('TASK_ADVISORY_SETTLED');
+          this.#planningControllers.delete(task.id);
         }
         if (influence) {
           task.evidence.push(evidence('adaptive_planning_influence', 'info', 'Adaptive planning recommendation was evaluated without granting execution authority.', {
