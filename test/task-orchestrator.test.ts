@@ -1657,3 +1657,91 @@ test('C05/C08 custom planner fallback cannot restart an uncertain failed write',
   assert.ok(stopped.evidence.some(item => item.kind === 'strategy_reconcile'));
   assert.equal((await new TaskStore(state).get(task.id)).state, 'BLOCKED');
 });
+
+
+
+test('C05 optional advisory receives a fresh durably charged reservation separate from revoked planner budget', async (t) => {
+  if (!supportedGitAvailable()) { t.skip('supported Git executable is unavailable'); return; }
+  const root = await tempDir(t, 'operator-task-advisory-budget-root-');
+  const state = await tempDir(t, 'operator-task-advisory-budget-state-');
+  const { execFile } = await import('node:child_process');
+  await new Promise<void>((resolve, reject) =>
+    execFile('git', ['init', '--quiet'], { cwd: root }, (error) => error ? reject(error) : resolve()));
+  let observed = 0;
+  let savedReservation: ((tokens: number) => Promise<void>) | undefined;
+  let savedSignal: AbortSignal | undefined;
+  const store = new TaskStore(state);
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(filesystem(root)).register(new GitProvider({ allowedRoots: [root] })),
+    store, permissions: permissions(root, ['file.list', 'file.create', 'file.read', 'git.status']),
+    planningInfluence: {
+      async review(request) {
+        observed++;
+        assert.equal(request.signal?.aborted, false);
+        assert.equal(typeof request.reserveModelBudget, 'function');
+        if (!savedReservation) {
+          savedReservation = request.reserveModelBudget;
+          savedSignal = request.signal;
+          await request.reserveModelBudget!(80);
+        }
+        return undefined;
+      }
+    }
+  });
+  const submitted = await orchestrator.submit({
+    objective: 'Use one bounded advisory reservation before a verified file goal.',
+    authorizedScope: [root],
+    successConditions: ['exact source file and Git observed state verified'],
+    goal: { kind: 'controlled-file-change', root, path: 'advisor.txt', content: 'verified\n' }
+  });
+  const completed = await orchestrator.run(submitted.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.ok(observed >= 1);
+  assert.equal(completed.execution?.modelCallCount, 1);
+  assert.equal(completed.execution?.modelReservedTokens, 80);
+  assert.equal(savedSignal?.aborted, true);
+  assert.equal(await fs.readFile(path.join(root, 'advisor.txt'), 'utf8'), 'verified\n');
+  const durable = await new TaskStore(state).get(submitted.id);
+  assert.equal(durable.execution?.modelCallCount, 1);
+  assert.equal(durable.execution?.modelReservedTokens, 80);
+  await assert.rejects(() => savedReservation!(80),
+    (error: any) => error?.code === 'TASK_PLANNER_ABORTED');
+});
+
+test('C05 Pause fences a hung advisory and revokes captured budget authority before dispatch', async (t) => {
+  const root = await tempDir(t, 'operator-task-advisory-stop-root-');
+  const state = await tempDir(t, 'operator-task-advisory-stop-state-');
+  let entered!: () => void;
+  const atAdvisor = new Promise<void>(resolve => { entered = resolve; });
+  let oldReserve: ((tokens: number) => Promise<void>) | undefined;
+  let oldSignal: AbortSignal | undefined;
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(filesystem(root)),
+    store: new TaskStore(state),
+    permissions: permissions(root, ['file.list', 'file.create', 'file.read']),
+    planningInfluence: {
+      async review(request) {
+        oldReserve = request.reserveModelBudget;
+        oldSignal = request.signal;
+        entered();
+        return await new Promise(() => {}); // A provider ignoring AbortSignal must not stall Pause.
+      }
+    }
+  });
+  const submitted = await orchestrator.submit({
+    objective: 'Pause during advisory before any write.',
+    authorizedScope: [root],
+    successConditions: ['pause and no provider dispatch'],
+    goal: { kind: 'controlled-file-change', root, path: 'not-created.txt', content: 'never' }
+  });
+  const running = orchestrator.run(submitted.id);
+  await atAdvisor;
+  const paused = await orchestrator.pause(submitted.id);
+  assert.equal(paused.state, 'PAUSED');
+  assert.equal((await running).state, 'PAUSED');
+  assert.equal(oldSignal?.aborted, true);
+  await assert.rejects(() => oldReserve!(64),
+    (error: any) => error?.code === 'TASK_PLANNER_ABORTED');
+  await assert.rejects(() => fs.stat(path.join(root, 'not-created.txt')),
+    (error: any) => error?.code === 'ENOENT');
+});
