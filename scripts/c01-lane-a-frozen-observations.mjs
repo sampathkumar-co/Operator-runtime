@@ -139,7 +139,7 @@ export async function runLaneAFrozenDecisions({
     }
     const verifiedSuccess = failureStage === 'none';
     const receipt = {
-      id: 'lane_a_' + item.scenarioId + '_' + item.scenarioVersion + '_' + item.seed,
+      id: 'lane_a_' + sha256(JSON.stringify([item.scenarioId, item.scenarioVersion, item.seed])).slice(0, 32),
       lane: 'A', arm: 'model_only', sourceCommit, scenarioId: item.scenarioId,
       scenarioVersion: item.scenarioVersion, seed: item.seed, model, provider: 'none',
       runnerDigest, modelConfigDigest, environmentDigest: item.environmentDigest,
