@@ -140,3 +140,48 @@ test('C07 file-change Git evidence requires inert literal path hashes rather tha
   gitObservation.importantState = { gitPathHashes: [expectedGitHash.toUpperCase()] };
   assert.equal(verifyGoalOutcomeTruth(task).ok, false, 'digest casing must match machine proof contract');
 });
+
+
+test('C06/C07 file and Git receipts must each be causal independent known reads', () => {
+  const task = fixture();
+  task.execution!.plannerState.goal = {
+    kind: 'controlled-file-change', root: '/fixture', path: '/fixture/a.ts', content: 'exact bytes'
+  };
+  const first = task.execution!.records[0]!;
+  const observation = first.observation;
+  if (observation?.schemaVersion !== 2) throw Error('Expected v2 observation');
+  const record = (stepKey: string, capability: string, state: Record<string, unknown>) => ({
+    ...first, stepKey, actionId: stepKey, capability,
+    observation: { ...observation, capability, importantState: state }
+  });
+  const expected = [
+    record('verify-file', 'file.info', { sha256: digest('exact bytes') }),
+    record('inspect-git', 'git.status', { gitPathHashes: [digest('a.ts')] })
+  ];
+  task.execution!.records = expected;
+  assert.equal(verifyGoalOutcomeTruth(task).ok, true, 'valid exact file and Git proof remains true');
+  const mutations: Array<(index: number) => void> = [
+    i => { task.execution!.records[i]!.risk = 'write'; },
+    i => { task.execution!.records[i]!.finishedAt = undefined; },
+    i => { task.execution!.records[i]!.startedAt = '2026-10-25T10:00:00.130Z'; },
+    i => { task.execution!.records[i]!.finishedAt = '2026-10-25T10:00:00.050Z'; },
+    i => { const obs = task.execution!.records[i]!.observation;
+      if (obs?.schemaVersion === 2) obs.epistemicStatus = 'UNKNOWN'; },
+    i => { const obs = task.execution!.records[i]!.observation;
+      if (obs?.schemaVersion === 2) obs.ambiguous = true; },
+    i => { const obs = task.execution!.records[i]!.observation;
+      if (obs?.schemaVersion === 2) obs.capability = 'other.inspect'; }
+  ];
+  for (const index of [0, 1]) {
+    for (const [caseId, mutate] of mutations.entries()) {
+      task.execution!.records = structuredClone(expected);
+      mutate(index);
+      assert.equal(verifyGoalOutcomeTruth(task).ok, false,
+        'file/Git receipt ' + index + ' invalid case ' + caseId);
+    }
+  }
+  task.execution!.records = structuredClone(expected);
+  (task.execution!.plannerState.goal as Record<string, unknown>).path = '/outside/a.ts';
+  assert.equal(verifyGoalOutcomeTruth(task).ok, false,
+    'a target outside declared workspace root is not exact local Git proof');
+});
