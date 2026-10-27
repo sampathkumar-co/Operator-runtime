@@ -57,6 +57,9 @@ test('C05 invalid model ids, oversized prompts and forbidden token requests neve
   });
   for (const bad of [
     { modelId: 'https://evil.example/model' },
+    { modelId: 'hf.co//bad' },
+    { modelId: '/model:latest' },
+    { modelId: 'namespace/model:' },
     { modelId: 'model name with spaces' },
     { prompt: 'x'.repeat(17 * 1024) },
     { maxOutputTokens: 100_000 },
@@ -66,6 +69,9 @@ test('C05 invalid model ids, oversized prompts and forbidden token requests neve
       (e: any) => e?.code === 'TASK_LOCAL_MODEL_CONFIG_INVALID');
   }
   assert.equal(fetched, 0);
+  const good = await generator.generate({ ...request(), modelId: 'hf.co/owner/model:Q4_K_M' });
+  assert.deepEqual(JSON.parse(good.text), proposal);
+  assert.equal(fetched, 1);
 });
 
 test('C05 already-cancelled model request fails before fetch and without unhandled rejection', async () => {
