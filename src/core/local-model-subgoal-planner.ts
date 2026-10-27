@@ -69,7 +69,7 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
 
   constructor(options: { model: string; fetchFn?: typeof fetch; now?: () => number; ranker?: ReadySubgoalRanker; composer?: DynamicSubgoalComposer; enableLoopbackComposition?: boolean }) {
     if (typeof options.model !== 'string' ||
-      !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(options.model)) {
+      !/^(?=.{1,128}$)[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(options.model)) {
       invalid('Local planner model identifier is invalid.');
     }
     if (options.ranker !== undefined && typeof options.ranker?.select !== 'function') {
@@ -160,9 +160,12 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
       throw new OperatorError('TASK_MODEL_BUDGET_UNAVAILABLE',
         'Local model scheduling requires the canonical durable pre-call reservation authority.');
     }
-    await context.reserveModelBudget(Buffer.byteLength(prompt, 'utf8') + 64);
+    if (!context.signal) {
+      throw new OperatorError('TASK_PLANNER_ABORTED', 'Model ordering requires the current task Stop fence.');
+    }
     const selected = await this.#select(prompt, ready.length, context.signal,
-      Math.min(8_000, Math.max(1, Math.floor(context.budget.activeDeadlineMsRemaining))));
+      Math.min(8_000, Math.max(1, Math.floor(context.budget.activeDeadlineMsRemaining))),
+      context.reserveModelBudget, Buffer.byteLength(prompt, 'utf8') + 64);
     // Late model outputs after Pause/Cancel must not mutate shared planner state.
     if (context.signal?.aborted) {
       throw new OperatorError('TASK_PLANNER_ABORTED', 'Canceled subgoal selection was discarded.');
@@ -251,10 +254,13 @@ export class LocalModelAutonomousWorkflowPlanner implements TaskPlanner {
       throw new OperatorError('TASK_MODEL_BUDGET_UNAVAILABLE',
         'Dynamic composition requires the canonical durable pre-call reservation authority.');
     }
-    await context.reserveModelBudget(Buffer.byteLength(prompt, 'utf8') + 128);
+    if (!context.signal) {
+      throw new OperatorError('TASK_PLANNER_ABORTED', 'Dynamic composition requires the current task Stop fence.');
+    }
     const proposal = await this.#requestComposition(
       prompt, targets.length, schemas.length, observationRef, context.signal,
-      Math.min(8_000, Math.max(1, Math.floor(context.budget.activeDeadlineMsRemaining)))
+      Math.min(8_000, Math.max(1, Math.floor(context.budget.activeDeadlineMsRemaining))),
+      context.reserveModelBudget, Buffer.byteLength(prompt, 'utf8') + 128
     );
     if (context.signal?.aborted) {
       throw new OperatorError('TASK_PLANNER_ABORTED', 'Canceled dynamic composition was discarded.');
