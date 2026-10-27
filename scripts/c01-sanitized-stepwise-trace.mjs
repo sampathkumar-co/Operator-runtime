@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { validateWave0Record } from './wave0-evaluation.mjs';
+import { requireDenseEvaluationArray, requireInertEvaluationObject } from './c01-inert-evaluation-input.mjs';
 
 const SHA=/^[0-9a-f]{40}$/;
 const DIGEST=/^[0-9a-f]{64}$/;
@@ -55,6 +56,8 @@ export function createSanitizedEvaluationTrace(input) {
  }
  const run=validateWave0Record(input.record,input.sourceCommit);
  if(run.id!==input.runId||!LANES.has(run.lane))deny('Step trace run identity or lane differs from scorer record.');
+ requireDenseEvaluationArray(input.steps, 1, 1000, deny, 'step receipts');
+ for (const step of input.steps) requireInertEvaluationObject(step, deny, 'step receipt');
  const steps=input.steps.map(recordStep);
  // Uncertain effect persists across any number of observations. Only an
  // explicit positive reconciliation step can clear it before new dispatch.
