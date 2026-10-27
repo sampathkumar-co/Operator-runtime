@@ -795,12 +795,22 @@ test('local action deadline reconciles durable receipt without replaying mutatio
   });
 
   const running = runner.run();
-  await Promise.race([
-    acked,
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('local action receipt recovery ack timeout')), 4_000))
-  ]);
-  runner.stop();
-  await running;
+  let ackWatchdog: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      acked,
+      new Promise<never>((_, reject) => {
+        ackWatchdog = setTimeout(() => reject(new Error('local action receipt recovery ack timeout')), 4_000);
+      })
+    ]);
+  } finally {
+    // An ACK timeout must not leave a relay runner holding state-file locks
+    // when t.after removes the disposable directory. This is cleanup only:
+    // the timeout still fails the test and uncertain writes are never retried.
+    if (ackWatchdog) clearTimeout(ackWatchdog);
+    runner.stop();
+    await running;
+  }
 
   assert.equal(executions, 1, 'timed-out destructive request must not execute twice');
   assert.equal(socketCreations, 1, 'receipt reconciliation should recover before a healthy relay transport is replaced');
