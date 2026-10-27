@@ -428,7 +428,8 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
     const stringFields = ['root', 'profileId', 'table'] as const;
     const optionalStrings = ['schema'] as const;
     const numericFields = ['limit', 'offset', 'timeoutMs'] as const;
-    const valid = stringFields.every(key => typeof goal[key] === 'string' && (goal[key] as string).length > 0)
+    const valid = inertPostgresGoalFields(goal) &&
+      stringFields.every(key => typeof goal[key] === 'string' && (goal[key] as string).length > 0)
       && optionalStrings.every(key => goal[key] === undefined || (typeof goal[key] === 'string' && (goal[key] as string).length > 0))
       && numericFields.every(key => goal[key] === undefined || (typeof goal[key] === 'number' && Number.isSafeInteger(goal[key]) && (goal[key] as number) >= 0))
       && (goal.columns === undefined || (Array.isArray(goal.columns) && goal.columns.every(value => typeof value === 'string' && value.length > 0)))
@@ -766,6 +767,54 @@ function exactObservedDockerServices(value: unknown): Array<{ service: string; s
     services.push({ service: service.value, states: normalized });
   }
   return services;
+}
+
+/** Verify goal descriptors before Array.every, map or canonicalJson can touch them.
+ * Sparse arrays, extra array methods and accessor properties are not
+ * trustworthy typed SQL goal operands even when they serialize innocently.
+ */
+function inertPostgresGoalFields(goal: Record<string, unknown>): boolean {
+  if (Object.getPrototypeOf(goal) !== Object.prototype &&
+      Object.getPrototypeOf(goal) !== null) return false;
+  const fields = ['root', 'profileId', 'schema', 'table', 'columns',
+    'filters', 'orderBy', 'limit', 'offset', 'timeoutMs'] as const;
+  for (const name of fields) {
+    const descriptor = Object.getOwnPropertyDescriptor(goal, name);
+    if (descriptor && (!descriptor.enumerable || !('value' in descriptor))) return false;
+    if ((name === 'columns' || name === 'filters' || name === 'orderBy') &&
+        descriptor?.value !== undefined &&
+        (!Array.isArray(descriptor.value) ||
+         !inertPostgresGoalNode(descriptor.value, 0))) return false;
+  }
+  return true;
+}
+function inertPostgresGoalNode(value: unknown, depth: number): boolean {
+  if (value === null) return true;
+  if (typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (!value || typeof value !== 'object' || depth > 5) return false;
+  if (Array.isArray(value)) {
+    if (value.length > 100 ||
+        Object.getPrototypeOf(value) !== Array.prototype ||
+        Reflect.ownKeys(value).length !== value.length + 1) return false;
+    for (let i = 0; i < value.length; i++) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(i));
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor) ||
+          !inertPostgresGoalNode(descriptor.value, depth + 1)) return false;
+    }
+    return true;
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype &&
+      Object.getPrototypeOf(value) !== null) return false;
+  const fields = Reflect.ownKeys(value);
+  if (fields.length > 32) return false;
+  for (const key of fields) {
+    if (typeof key !== 'string') return false;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor) ||
+        !inertPostgresGoalNode(descriptor.value, depth + 1)) return false;
+  }
+  return true;
 }
 
 function exactObservedPostgresColumns(value: unknown): string[] {
