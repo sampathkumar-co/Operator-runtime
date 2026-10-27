@@ -4,6 +4,7 @@ import { requireDenseEvaluationArray, requireInertEvaluationObject } from './c01
 const SHA256 = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
 const NAME = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/;
+const SCENARIO_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function invalid(reason) { throw new Error('C01_CAMPAIGN_MANIFEST_INVALID: ' + reason); }
 function text(value, max, label) {
@@ -46,7 +47,10 @@ export function validateFrozen125CampaignManifest(input) {
   hash(dataset.fixtureBuildDigest,'fixture build');
   hash(dataset.independentOracleDigest,'independent scorer definition');
   requireDenseEvaluationArray(dataset.taskIds,125,125,invalid,'all 125 task identities');
-  for (const id of dataset.taskIds) name(id,'task identity');
+  for (const id of dataset.taskIds) {
+    text(id,128,'task identity');
+    if (!SCENARIO_ID.test(id)) invalid('task identity must match scorer scenario ID policy');
+  }
   if (new Set(dataset.taskIds).size !== 125) invalid('duplicate or missing benchmark task identity');
 
   requireDenseEvaluationArray(input.seeds,3,32,invalid,'frozen seeds');
