@@ -139,6 +139,10 @@ export interface TaskPlanningInfluenceRequest {
   recentEvents: TaskPlannerEvent[];
   intelligence: TaskIntelligenceContext;
   decisionBudget: TaskDecisionBudget;
+  /** Source-level advisory support requires a fresh Stop fence, not prior planner authority. */
+  signal?: AbortSignal;
+  /** Caller must durably charge potential inference BEFORE any model request. */
+  reserveModelBudget?: (maxTokens: number) => Promise<void>;
 }
 
 export interface TaskPlanningInfluenceProvider {
