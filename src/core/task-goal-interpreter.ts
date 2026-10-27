@@ -189,6 +189,12 @@ export class LoopbackOllamaTaskGoalInterpreter implements TaskGoalInterpreter {
   }
 
   async propose(input: TaskGoalProposalRequest): Promise<unknown> {
+    // Reject before constructing timeout/cancellation promises: rejecting an
+    // already-aborted signal before Promise.race attaches handlers can cause
+    // an uncaught rejection even when the caller catches this method.
+    if (input.signal?.aborted) {
+      throw new OperatorError('TASK_MODEL_CANCELLED', 'Local task proposal was canceled.');
+    }
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let detach: (() => void) | undefined;
@@ -212,7 +218,6 @@ export class LoopbackOllamaTaskGoalInterpreter implements TaskGoalInterpreter {
       }
     });
     try {
-      if (input.signal?.aborted) throw new OperatorError('TASK_MODEL_CANCELLED', 'Local task proposal was canceled.');
       // Some model transports and mocked fetches ignore AbortSignal; the outer
       // deadline/cancellation race prevents any late reply from being consumed.
       return await Promise.race([this.#generate(input, controller.signal), deadline, cancelled]);
