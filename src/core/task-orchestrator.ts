@@ -523,6 +523,23 @@ export class TaskOrchestrator {
       }
 
       const inputHash = sha256(canonicalJson(decision.input));
+      // An observed write with NO_PROGRESS is not permission to mutate the
+      // same target again under a new attempt ID. A distinct bounded recovery
+      // action remains possible, but the identical failed mutation is fenced.
+      const priorKnownNoProgress = current.records.find(record =>
+        record.state === 'FAILED' && record.risk !== 'read' &&
+        record.sideEffectState === 'known' && /NO_PROGRESS/i.test(record.errorCode ?? '') &&
+        record.capability === decision.capability && record.stepKey === decision.key &&
+        record.inputHash === inputHash
+      );
+      if (priorKnownNoProgress) {
+        await this.#recordRejectedDecision(task, decision, 'TASK_NO_PROGRESS_REPLAY_DENIED',
+          'A known-effect no-progress mutation cannot be replayed with identical step identity and input.', {
+            retryAllowed: false, reobserveAllowed: true, replanAllowed: true
+          }, assertLease);
+        return await this.#fail(task, 'TASK_NO_PROGRESS_REPLAY_DENIED',
+          'Planner repeated a known-effect no-progress mutation without a distinct recovery action.', assertLease);
+      }
       const previous = [...current.records].reverse().find((record) => record.stepKey === decision.key && record.inputHash === inputHash);
       const recoveryReplay = previous?.state === 'STARTED' ? previous : undefined;
       if (!recoveryReplay && detectPlannerLoop(current.records, decision.key, inputHash)) {
@@ -1130,6 +1147,24 @@ export class TaskOrchestrator {
         return task;
       }
       await this.#recordLearning(task, result, 'failed', learningContext);
+      // A no-progress fallback must never outrank authoritative side-effect
+      // truth. Other failure classes retain their existing observed-state
+      // recovery (TARGET_EXISTS, stale browser target, executor error) so this
+      // guard does not silently break safe independent reconciliation.
+      if (risk !== 'read' && (latestRecord.sideEffectState ?? 'uncertain') === 'uncertain' &&
+          /NO_PROGRESS/i.test(failureDecision.code)) {
+        latestRecord.state = 'BLOCKED';
+        setNodeState(task, latestNode.id, 'BLOCKED');
+        task.state = 'BLOCKED';
+        task.evidence.push(evidence('strategy_reconcile', 'info',
+          'Blocked planner fallback because the previous mutation has uncertain effects.', {
+            code: failureDecision.code, strategy: failureDecision.strategy,
+            actionId: latestRecord.actionId, risk,
+            sideEffectState: latestRecord.sideEffectState ?? 'uncertain'
+          }));
+        await this.#persistRunState(task, assertLease);
+        return task;
+      }
       if (planner.fallback?.(postActionContext, decision, observation)) {
         latestRecord.state = 'FAILED';
         setNodeState(task, latestNode.id, 'SKIPPED');
@@ -1179,6 +1214,26 @@ export class TaskOrchestrator {
         continue;
       }
       if (failureDecision.strategy === 'replan') {
+        // A no-progress observation after a potentially dispatched mutation does
+        // NOT prove the effect was absent. Replanning cannot be a backdoor for
+        // replaying an uncertain side effect under a fresh action identity.
+        // A *known* effect may still be followed by a different bounded
+        // recovery action under the existing independent policy checks.
+        if (!retrySafe && (latestRecord.sideEffectState ?? 'uncertain') === 'uncertain') {
+          latestRecord.state = 'BLOCKED';
+          setNodeState(task, latestNode.id, 'BLOCKED');
+          task.state = 'BLOCKED';
+          task.evidence.push(evidence('strategy_reconcile', 'info', 'Blocked no-progress replanning because the prior write has known or uncertain effects; independent reconciliation is required.', {
+            code: failureDecision.code,
+            class: failureDecision.class,
+            strategy: failureDecision.strategy,
+            actionId: latestRecord.actionId,
+            risk,
+            sideEffectState: latestRecord.sideEffectState ?? 'uncertain'
+          }));
+          await this.#persistRunState(task, assertLease);
+          return task;
+        }
         setNodeState(task, latestNode.id, 'SKIPPED');
         task.evidence.push(evidence('strategy_replan', 'info', 'Returned control to the planner after a completed action produced no meaningful progress; the same mutation is not blindly retried.', {
           code: failureDecision.code,
@@ -1251,6 +1306,14 @@ export class TaskOrchestrator {
         throw new OperatorError('TASK_TERMINAL', 'Task cancellation is already in progress.');
       }
       if (!['PAUSED', 'BLOCKED'].includes(task.state)) throw new OperatorError('TASK_NOT_RESUMABLE', 'Only paused or blocked tasks can resume.');
+      // A BLOCKED action with uncertain external effects cannot be replayed
+      // merely by issuing a task resume (even with new permission receipts).
+      // Reconciliation must first update the durable action/effect truth.
+      if (task.execution?.records.some(record => record.state === 'BLOCKED' &&
+          record.risk !== 'read' && record.sideEffectState === 'uncertain')) {
+        throw new OperatorError('TASK_RECONCILIATION_REQUIRED',
+          'An uncertain blocked mutation needs independent reconciliation before task resume.');
+      }
       if (this.#controlRequests.get(taskId) === 'PAUSED') this.#controlRequests.delete(taskId);
       task.state = 'PENDING';
       for (const node of task.nodes) if (node.state === 'BLOCKED') node.state = 'PENDING';
