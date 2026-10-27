@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   ManagedBrowserProvider,
   ManagedChromiumLauncher,
+  assertDedicatedResolvedProfileRoots,
   buildManagedBrowserArgs,
   candidateBrowserDataDirs,
   candidateBrowserPaths,
@@ -428,4 +429,47 @@ test('C03 strict owned profile refuses group/world readable POSIX browser data',
   await assert.rejects(launcher.ensureEndpoint(),
     (e: any) => e?.code === 'BROWSER_DEDICATED_PROFILE_PERMISSIONS');
   await launcher.close();
+});
+
+test('C03 canonical protected-root check rejects a symlink alias to existing user data', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-alias-scope-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const protectedDir = path.join(parent, 'real-protected');
+  const profile = path.join(protectedDir, 'existing-profile');
+  const alias = path.join(parent, 'protected-alias');
+  await fs.mkdir(profile, { recursive: true });
+  try {
+    await fs.symlink(protectedDir, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (e) {
+    if (['EPERM', 'EACCES', 'ENOTSUP'].includes((e as NodeJS.ErrnoException).code ?? '')) {
+      t.skip('Directory symlink unavailable on runner'); return;
+    }
+    throw e;
+  }
+  await assert.rejects(assertDedicatedResolvedProfileRoots(profile, [alias]),
+    (e: any) => e?.code === 'BROWSER_DEDICATED_PROFILE_FORBIDDEN');
+  await assert.doesNotReject(assertDedicatedResolvedProfileRoots(
+    path.join(parent, 'safe-target'), [alias]).catch((e: any) => {
+    // The safe target does not exist: this must not be falsely certified.
+    if (e?.code !== 'ENOENT') throw e;
+  }));
+});
+
+test('C03 dedicated browser refuses dispatch after emergency Stop and close', async (t) => {
+  const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-owned-stopped-'));
+  t.after(() => fs.rm(profile, { recursive: true, force: true }));
+  const provider = new ManagedBrowserProvider({
+    dedicatedProfileOnly: true, dataDir: profile
+  });
+  await provider.emergencyStop();
+  const result = await provider.execute({
+    id: 'post-stop-browser-read',
+    capability: 'browser.inspect', risk: 'read', input: {},
+    provenance: { kind: 'runtime' }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'BROWSER_DEDICATED_STOPPED');
+  assert.equal(result.error?.sideEffectState, 'none');
+  assert.equal(result.error?.executionPhase, 'pre_dispatch');
+  await provider.close();
 });
