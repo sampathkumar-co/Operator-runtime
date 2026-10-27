@@ -156,3 +156,25 @@ test('C04 UIA durable process identity requires a literal numeric process ID', (
   }));
   assert.equal((exact.importantState.uiaElements as any[])[0]?.processId, 1500);
 });
+
+
+test('C03/C07 machine observation distinguishes SPA hash routes without retaining raw URLs', () => {
+  const req = action('browser.inspect', {});
+  const url = 'https://example.test/checkout?token=SECRET-ROUTE-78#/payment';
+  const a = normalizeMachineObservation(req, result('browser.inspect', 'browser.cdp', {
+    tabs: [{ id: 'tab-1', type: 'page', url }]
+  }));
+  const b = normalizeMachineObservation(req, result('browser.inspect', 'browser.cdp', {
+    tabs: [{ id: 'tab-1', type: 'page', url: url.replace('#/payment', '#/cart') }]
+  }));
+  const ai = (a.importantState.browserTargets as Array<Record<string, unknown>>)[0]!;
+  const bi = (b.importantState.browserTargets as Array<Record<string, unknown>>)[0]!;
+  assert.equal(ai.destinationDigest, bi.destinationDigest, 'document identity remains equal');
+  assert.match(String(ai.routeDigest), /^[0-9a-f]{64}$/);
+  assert.notEqual(ai.routeDigest, bi.routeDigest, 'SPA route is part of the outcome identity');
+  assert.doesNotMatch(JSON.stringify(a), /SECRET-ROUTE-78|payment|checkout/);
+  const withoutHash = normalizeMachineObservation(req, result('browser.inspect', 'browser.cdp', {
+    tabs: [{ id: 'tab-1', type: 'page', url: 'https://example.test/checkout' }]
+  }));
+  assert.equal('routeDigest' in (withoutHash.importantState.browserTargets as any[])[0], false);
+});

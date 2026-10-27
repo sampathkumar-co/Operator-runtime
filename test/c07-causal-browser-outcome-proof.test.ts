@@ -57,3 +57,24 @@ test('C07 later failed verification supersedes earlier valid destination proof',
   });
   assert.equal(verifyGoalOutcomeTruth(task).ok,false);
 });
+
+
+test('C03/C07 requested SPA hash route needs a matching independently observed route digest', () => {
+  const task = navigationFixture(T(250));
+  const goal = task.execution!.plannerState.goal as Record<string, unknown>;
+  goal.url = 'https://example.test/checkout#/payment';
+  const snapshot = task.execution!.records[0]!.observation;
+  if (snapshot?.schemaVersion !== 2) throw Error('expected v2 browser observation');
+  assert.equal(verifyGoalOutcomeTruth(task).ok, false,
+    'document-level digest alone cannot prove an explicitly requested hash route');
+  const targets = snapshot.importantState.browserTargets as Array<Record<string, unknown>>;
+  targets[0]!.routeDigest = sha256('https://example.test/checkout#/cart');
+  assert.equal(verifyGoalOutcomeTruth(task).ok, false,
+    'matching document with wrong SPA route is not goal completion');
+  targets[0]!.routeDigest = sha256('https://example.test/checkout#/payment');
+  assert.equal(verifyGoalOutcomeTruth(task).ok, true,
+    'exact observed SPA route plus document digest proves navigation');
+  goal.url = 'https://example.test/checkout';
+  assert.equal(verifyGoalOutcomeTruth(task).ok, true,
+    'document-only goals remain compatible with in-document hash navigation');
+});

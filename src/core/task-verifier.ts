@@ -297,9 +297,11 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
     const record = lastSucceededAny(records, [`${prefix}verify-browser`, `${prefix}inspect-browser`]);
     const state = observationState(record);
     const expectedDigest = typeof goal.url === 'string' ? browserDestinationDigest(goal.url) : undefined;
+    const expectedRouteDigest = typeof goal.url === 'string' ? browserRouteDigest(goal.url) : undefined;
     const expectedTargetId = typeof goal.targetId === 'string' ? goal.targetId : undefined;
     const targets = Array.isArray(state.browserTargets) ? state.browserTargets.map(asRecord) : [];
     const matched = targets.some((target) => target.destinationDigest === expectedDigest
+      && (!expectedRouteDigest || target.routeDigest === expectedRouteDigest)
       && (!expectedTargetId || target.id === expectedTargetId)
       && (expectedTargetId || target.type === undefined || target.type === 'page'));
     const ok = Boolean(record && expectedDigest && matched);
@@ -686,6 +688,16 @@ function exactObservedDigestList(value: unknown): string[] {
   return result;
 }
 
+/** An explicit hash-route is part of the SPA destination, but raw paths,
+ * queries and fragments must not appear in durable machine observations. */
+function browserRouteDigest(raw: string): string | undefined {
+  try {
+    const parsed = new URL(raw);
+    if (!parsed.hash) return undefined;
+    const pathname = parsed.pathname === '/' ? '/' : parsed.pathname.replace(/\/$/, '');
+    return sha256(`${parsed.origin}${pathname}${parsed.search}${parsed.hash}`);
+  } catch { return undefined; }
+}
 function sha256(value: string): string {
   return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
 }
