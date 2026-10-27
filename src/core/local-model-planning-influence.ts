@@ -93,8 +93,8 @@ export class LoopbackOllamaPlanningInfluence implements TaskPlanningInfluencePro
 
     const remain = boundedCounter(request.budget.remainingSteps);
     const iterations = boundedCounter(request.budget.plannerIterations);
-    const deadlineMs = boundedCounter(request.budget.activeDeadlineMsRemaining, 600_000);
-    if ((request.risk !== 'read' && request.risk !== 'write') ||
+    const deadlineMs = boundedCounter(request.budget.activeDeadlineMsRemaining, 60 * 60_000);
+    if (!['read', 'write', 'external', 'system', 'destructive'].includes(request.risk) ||
         typeof request.reserveModelBudget !== 'function' ||
         !request.signal || typeof request.signal.aborted !== 'boolean' ||
         typeof request.signal.addEventListener !== 'function') {
@@ -113,12 +113,10 @@ export class LoopbackOllamaPlanningInfluence implements TaskPlanningInfluencePro
     });
     const maxTokens = 80;
     const estimatedPromptTokens = Math.ceil(Buffer.byteLength(prompt, 'utf8') / 4);
-    await request.reserveModelBudget(estimatedPromptTokens + maxTokens);
-    if (request.signal.aborted) throw new OperatorError('TASK_MODEL_INFLUENCE_ABORTED', 'Planning stopped after budget reservation.');
-
     const controller = new AbortController();
     const signal = AbortSignal.any([request.signal, controller.signal]);
     const durationMs = Math.min(8_000, deadlineMs);
+    const begunAt = performance.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
@@ -133,6 +131,20 @@ export class LoopbackOllamaPlanningInfluence implements TaskPlanningInfluencePro
       if (request.signal!.aborted) onAbort!();
     });
     try {
+      // The deadline and Stop race MUST also enclose durable reservation.
+      // A late or indefinitely hung callback cannot subsequently send any
+      // model prompt, even when it ignores AbortSignal.
+      await Promise.race([
+        request.reserveModelBudget(estimatedPromptTokens + maxTokens),
+        timeout,
+        cancelled
+      ]);
+      if (signal.aborted) {
+        throw new OperatorError('TASK_MODEL_INFLUENCE_ABORTED', 'Planning stopped after reservation.');
+      }
+      if (performance.now() - begunAt >= durationMs) {
+        throw new OperatorError('TASK_MODEL_INFLUENCE_TIMEOUT', 'Planning expired while reserving model budget.');
+      }
       const response = await Promise.race([
         this.#generator.generate({ modelId: this.#model, prompt, maxOutputTokens: maxTokens, signal }),
         timeout,
