@@ -8,7 +8,7 @@ A Chromium CDP endpoint can be supplied by a user or discovered from an existing
 
 When the caller explicitly chooses **dedicatedProfileOnly: true**, the ManagedChromiumLauncher:
 
-1. Requires a caller-specified **absolute, pre-provisioned real directory** outside normal Chrome/Edge user profiles and the protected .operator state tree. It never creates the directory automatically; the owner must provision and protect it first.
+1. Requires a caller-specified **absolute, pre-provisioned real directory** outside normal Chrome/Edge user profiles and the protected .operator state tree. It never creates the directory automatically; the owner must provision and protect it first (on POSIX, ownership by the current user and no group/other permissions are required; Windows ACL acceptance remains a separate physical gate).
 2. Rejects configured endpoints, discoveryDataDirs, custom launchers/delegates, and autoLaunch: false. It never trusts an externally discovered port as proof of ownership.
 3. Creates an independently spawned **headless** child with a separate profile and an ephemeral CDP port.
 4. Reuses the endpoint only while its own child is alive; closes its own child before a fresh launch.
