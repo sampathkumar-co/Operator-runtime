@@ -277,8 +277,12 @@ test('npm PR CI covers all generated-runtime TypeScript source trees', async () 
   ].sort(), 'source roots changed: update npm PR CI coverage and review the build contract');
   const prPaths = workflow.split('  pull_request:\n    paths:\n')[1]?.split('\npermissions:')[0] ?? '';
   for (const root of roots) {
-    assert.ok(prPaths.includes("      - '" + root + "/**'") ||
-      (root === 'apps/local-agent/src' && prPaths.includes("      - 'apps/local-agent/**'")),
+    const components = root.split('/');
+    // An ancestor glob such as packages/adaptive-intelligence/** is strictly
+    // broader than /src/** and intentionally includes package metadata.
+    const coveringPaths = components.map((_, i) =>
+      "      - '" + components.slice(0, i + 1).join('/') + "/**'");
+    assert.ok(coveringPaths.some(pattern => prPaths.includes(pattern)),
       'npm PR CI must cover generated-runtime source root: ' + root);
   }
 });
