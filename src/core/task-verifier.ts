@@ -377,12 +377,23 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
     // String(array/object) must not turn a forged service or state into a
     // genuine successful Docker lifecycle observation.
     const validOperation = goal.operation === 'start' || goal.operation === 'stop' || goal.operation === 'restart';
-    const services = Array.isArray(goal.services) && goal.services.length > 0 &&
-      goal.services.every((service) => typeof service === 'string' && service.length > 0)
-      ? goal.services as string[] : [];
+    // Array.every() skips holes. A sparse array of requested services could
+    // otherwise vacuously certify a Docker lifecycle operation.
+    const services = exactRequestedDockerServices(goal.services);
     const expectedState = goal.operation === 'stop' ? 'exited' : 'running';
     const observed = Array.isArray(state.services) ? state.services.map(asRecord) : [];
-    const ok = Boolean(record && validOperation && state.scope === 'project' && services.length > 0 && services.every((service) => {
+    const observedRead = (() => {
+      const receipt = record?.observation;
+      if (!record || record.risk !== 'read' || record.capability !== 'docker.inspect' ||
+          receipt?.schemaVersion !== 2 || receipt.capability !== record.capability ||
+          receipt.epistemicStatus !== 'KNOWN' || receipt.ambiguous !== false) return false;
+      const start = Date.parse(record.startedAt);
+      const finish = Date.parse(record.finishedAt ?? '');
+      const seen = Date.parse(receipt.observedAt);
+      return Number.isFinite(start) && Number.isFinite(finish) && Number.isFinite(seen) &&
+        start <= seen && seen <= finish;
+    })();
+    const ok = Boolean(observedRead && validOperation && state.scope === 'project' && services.length > 0 && services.every((service) => {
       const item = observed.find((candidate) => candidate.service === service);
       const states = Array.isArray(item?.states) && item.states.length > 0 &&
         item.states.every((value) => typeof value === 'string')
@@ -659,6 +670,22 @@ function outcome(supported: boolean, ok: boolean, detail: string, stateVersions:
 }
 
 /** Snapshot only the exact inert digest list that git.status can emit. */
+/** A real Compose lifecycle goal must enumerate explicit inert service names. */
+function exactRequestedDockerServices(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 50 ||
+      Object.getPrototypeOf(value) !== Array.prototype ||
+      Reflect.ownKeys(value).length !== value.length + 1) return [];
+  const services: string[] = [];
+  for (let index = 0; index < value.length; index++) {
+    const item = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!item || !item.enumerable || !('value' in item) ||
+        typeof item.value !== 'string' || item.value.length === 0 ||
+        item.value.length > 256 || item.value.includes('\0')) return [];
+    services.push(item.value);
+  }
+  return services;
+}
+
 function exactObservedPostgresColumns(value: unknown): string[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 50 ||
       Object.getPrototypeOf(value) !== Array.prototype ||
