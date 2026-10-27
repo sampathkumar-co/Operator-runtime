@@ -168,3 +168,39 @@ test('C02 extension capability risk registration requires literal namespace and 
     (error: any) => error?.code === 'CAPABILITY_RISK_UNREGISTERED',
     'no risk registration survives the final owner lease release');
 });
+
+
+test('C02 extension risk registry cannot be influenced by accessor-backed or inherited authority fields', () => {
+  const capability = 'ext.safe_addon.inspect';
+  const valid = { capability, extensionId: 'safe_addon',
+    owner: 'b'.repeat(64), rule: 'read' };
+  let invoked = 0;
+  for (const key of ['capability', 'extensionId', 'owner', 'rule'] as const) {
+    const attempt: Record<string, unknown> = { ...valid };
+    Object.defineProperty(attempt, key, {
+      enumerable: true, get() { invoked++; return valid[key]; }
+    });
+    assert.throws(() => registerExtensionCapabilityRisk(attempt as any),
+      (error: any) => error?.code?.startsWith('CAPABILITY_EXTENSION_'),
+      'accessor-backed authority field ' + key);
+  }
+  const forged = Object.create({ extensionId: 'safe_addon' });
+  Object.assign(forged, { capability, owner: valid.owner, rule: 'read' });
+  assert.throws(() => registerExtensionCapabilityRisk(forged),
+    (error: any) => error?.code === 'CAPABILITY_EXTENSION_NAMESPACE_INVALID',
+    'inherited extension identity is not owned evidence');
+  assert.equal(invoked, 0, 'no identity getter executes while verifying registration');
+  assert.throws(() => capabilityRiskRule(capability),
+    (error: any) => error?.code === 'CAPABILITY_RISK_UNREGISTERED');
+
+  const release = registerExtensionCapabilityRisk({
+    ...valid, rule: 'read'
+  } as any);
+  try {
+    assert.equal(capabilityRiskRule(capability), 'read');
+  } finally {
+    release();
+  }
+  assert.throws(() => capabilityRiskRule(capability),
+    (error: any) => error?.code === 'CAPABILITY_RISK_UNREGISTERED');
+});
