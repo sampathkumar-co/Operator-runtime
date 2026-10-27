@@ -41,3 +41,11 @@ The opt-in dedicated launcher now serializes simultaneous ensureEndpoint() reque
 Real isolated Sampath Windows/Chrome smoke: **three concurrent cold-start browser.inspect operations** all returned success; then localhost navigation, explicitly authorized-scope tab focus, native mouse click and verified postcondition passed. The owned process and temporary profile were cleaned afterward. The concurrency smoke remains a manually executable release-gate test, not a hosted production certification.
 
 For safety, an old or unexpected DevToolsActivePort in the requested profile still fails closed rather than being silently erased. Product-level restart and profile reuse need explicit owner-provenance/lease handling before adopting persistent signed-in profiles. Do not reuse a standard Chrome or protected .operator directory.
+
+
+## Current-main hardening review
+
+- Ownership checking canonicalizes both the requested profile and any existing protected browser / `.operator` roots. A symlinked protected root cannot be bypassed by spelling its real target path.
+- Strict provider shutdown marks the instance stopped before awaiting in-flight startup and delegate binding. A pending cold-start must not dispatch a new action after Stop; future actions require a new provider.
+- On POSIX, profile owner UID and mode must exclude group and other access. On Windows, independent ACL and process containment verification remains **NOT_RUN**.
+- This optional mode is not automatically connected to the production runtime. Browser restarts, mixed-version relay, background performance, long-running concurrency, and physical Windows acceptance remain **NOT_CERTIFIED**.
