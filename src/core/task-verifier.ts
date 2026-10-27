@@ -265,7 +265,9 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
     const expectedSha = content === undefined ? undefined : sha256(content);
     const relative = root && target ? path.relative(root, target).replace(/\\/g, '/').replace(/^\.\//, '') : undefined;
     const expectedPathHash = relative ? sha256(relative) : undefined;
-    const gitPathHashes = Array.isArray(gitState.gitPathHashes) ? gitState.gitPathHashes.map(String) : [];
+    // A trusted git.status observation emits literal SHA-256 strings. Never
+    // coerce a forged object/getter into a matching proof of Git visibility.
+    const gitPathHashes = exactObservedDigestList(gitState.gitPathHashes);
     const ok = Boolean(fileRecord && gitRecord && expectedSha && expectedPathHash
       && fileState.sha256 === expectedSha && gitPathHashes.includes(expectedPathHash));
     return outcome(true, ok, ok
@@ -625,6 +627,21 @@ function browserDestinationDigest(raw: string): string | undefined {
 
 function outcome(supported: boolean, ok: boolean, detail: string, stateVersions: string[]): TaskOutcomeTruth {
   return { supported, ok, detail, stateVersions: [...new Set(stateVersions)].sort() };
+}
+
+/** Snapshot only the exact inert digest list that git.status can emit. */
+function exactObservedDigestList(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 500 ||
+      Object.getPrototypeOf(value) !== Array.prototype ||
+      Reflect.ownKeys(value).length !== value.length + 1) return [];
+  const result: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor) ||
+        typeof descriptor.value !== 'string' || !/^[0-9a-f]{64}$/.test(descriptor.value)) return [];
+    result.push(descriptor.value);
+  }
+  return result;
 }
 
 function sha256(value: string): string {
