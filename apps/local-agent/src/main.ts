@@ -24,6 +24,7 @@ import { RelayEnrollmentClient } from './relay-enrollment.ts';
 import { DEVELOPER_RELAY_CAPABILITIES } from '../../../src/core/developer-relay-surface.ts';
 import { TaskOrchestrator } from '../../../src/core/task-orchestrator.ts';
 import { optionalLocalModelPlanners } from './local-model-planner-config.ts';
+import { optionalLocalPlanningInfluence } from './local-model-advisor-config.ts';
 import { TeamCoordinator } from '../../../src/core/team-coordinator.ts';
 import { ProcedureMemoryStore } from '../../../src/core/procedure-memory.ts';
 import { WorldModelStore } from '../../../src/core/world-model.ts';
@@ -485,8 +486,14 @@ const optionalModelPlanners = optionalLocalModelPlanners({
   composeEnabled: process.env.OPERATOR_LOCAL_SUBGOAL_DYNAMIC_COMPOSITION_OPT_IN
 });
 
+const optionalEventAdvisor = optionalLocalPlanningInfluence({
+  enabled: process.env.OPERATOR_LOCAL_ADVISORY_MODEL_OPT_IN,
+  modelId: process.env.OPERATOR_LOCAL_ADVISORY_MODEL_ID
+});
+
 const taskOrchestrator = new TaskOrchestrator({
   ...(optionalModelPlanners ? { planners: optionalModelPlanners } : {}),
+  ...(optionalEventAdvisor ? { planningInfluence: optionalEventAdvisor } : {}),
   runtime,
   store: tasks,
   permissions,
