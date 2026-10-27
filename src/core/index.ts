@@ -11,6 +11,7 @@ export * from './task.ts';
 export * from './task-store.ts';
 export * from './task-orchestrator.ts';
 export * from './task-plan.ts';
+export * from './task-goal-interpreter.ts';
 export * from './task-decision-budget.ts';
 export * from './performance-evidence.ts';
 export * from './team-coordinator.ts';
