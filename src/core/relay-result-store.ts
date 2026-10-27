@@ -56,7 +56,8 @@ export class RelayResultStore {
     this.#clock = options.clock ?? (() => new Date());
     this.#retentionMs = boundedRetention(options.retentionMs);
     this.#shared = options.sharedStore;
-    this.#sharedNamespace = validSharedNamespace(options.sharedNamespace ?? 'relay-result-streams');
+    this.#sharedNamespace = validSharedNamespace(options.sharedNamespace === undefined
+      ? 'relay-result-streams' : options.sharedNamespace);
     this.#latencyRecorder = options.latencyRecorder;
   }
 
