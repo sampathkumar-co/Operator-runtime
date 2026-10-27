@@ -47,8 +47,8 @@ function pseudo(key, value) {
 export async function inspectExplicitLocalSourceProvenance(config) {
   ownData(config, ['root','relativePaths','referenceDigests','hmacKey'], 'configuration');
   if (typeof config.root !== 'string' || !path.isAbsolute(config.root) ||
-      config.root.length > 32768 || !SHA.test(config.hmacKey) ||
-      typeof config.hmacKey !== 'string' || !Array.isArray(config.relativePaths) ||
+      config.root.length > 32768 || typeof config.hmacKey !== 'string' ||
+      !SHA.test(config.hmacKey) || !Array.isArray(config.relativePaths) ||
       config.relativePaths.length < 1 || config.relativePaths.length > 200 ||
       Reflect.ownKeys(config.relativePaths).length !== config.relativePaths.length + 1) {
     invalid('explicit root, private HMAC key and 1..200 dense source paths required');
