@@ -1042,7 +1042,11 @@ function failure(action: ActionRequest, provider: string, started: number, codeO
 }
 
 function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
-  const parsed = Number(value ?? fallback);
+  // Preserve primitive numeric/string inputs, but never invoke valueOf or
+  // toString hooks on untrusted objects, arrays, symbols or boxed numbers.
+  // Provider bounds stay as before and unknown values take the safe default.
+  const parsed = typeof value === 'number' || typeof value === 'string'
+    ? Number(value) : fallback;
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(Math.max(Math.trunc(parsed), min), max);
 }
