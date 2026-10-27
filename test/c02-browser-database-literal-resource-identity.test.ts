@@ -51,3 +51,27 @@ test('C02 valid browser and PostgreSQL literal resource identities keep existing
   const missing = resourceKeysForAction(req('postgres.inspect', { path: '/workspace' }));
   assert.equal(missing.some(key => key.includes('/profile:profiles')), true);
 });
+
+
+test('C02/C03 accessor-backed resource names cannot run host getters during lock extraction', async () => {
+  let calls = 0;
+  for (const key of ['sessionId', 'targetId', 'frameId', 'newTab']) {
+    const input: Record<string, unknown> = {
+      sessionId: 'source', targetId: 'tab', frameId: 'frame', newTab: false
+    };
+    Object.defineProperty(input, key, {
+      enumerable: true, get() { calls++; return key === 'newTab' ? false : 'source'; }
+    });
+    const action = req('browser.inspect', input);
+    assert.throws(() => resourceKeysForAction(action),
+      (error: any) => error?.code === 'RESOURCE_TARGET_INVALID');
+  }
+  const postgresInput: Record<string, unknown> = { path: '/workspace' };
+  Object.defineProperty(postgresInput, 'profileId', {
+    enumerable: true, get() { calls++; return 'production'; }
+  });
+  await assert.rejects(
+    resolvePhysicalResourceKeysForAction(req('postgres.select', postgresInput)),
+    (error: any) => error?.code === 'RESOURCE_TARGET_INVALID');
+  assert.equal(calls, 0, 'no untrusted getter executes while computing lock identity');
+});
