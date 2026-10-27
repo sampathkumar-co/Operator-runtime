@@ -238,3 +238,49 @@ test('C07 Docker lifecycle requires causal known inspection of the exact provide
   assert.equal(verifyGoalOutcomeTruth(fixture()).ok, true,
     'completed exact known read still proves requested Docker state');
 });
+
+
+test('C07 Docker observed service states reject holes, accessors and duplicated service identities', () => {
+  let invoked = 0;
+  const sparse = Array(1);
+  const getterStates: unknown[] = [];
+  Object.defineProperty(getterStates, '0', {
+    enumerable: true, get() { invoked++; return 'running'; }
+  });
+  getterStates.length = 1;
+  const getterService: Record<string, unknown> = { states: ['running'] };
+  Object.defineProperty(getterService, 'service', {
+    enumerable: true, get() { invoked++; return 'web'; }
+  });
+  const badResults: unknown[] = [
+    [{ service: 'web', states: sparse }],
+    [{ service: 'web', states: getterStates }],
+    [getterService],
+    [{ service: 'web', states: [['running']] }],
+    [{ service: 'web', states: ['running'] }, { service: 'web', states: ['exited'] }],
+    [undefined, { service: 'web', states: ['running'] }],
+    Array(1),
+    []
+  ];
+  for (const [index, services] of badResults.entries()) {
+    const task = fixture();
+    const observation = task.execution!.records[0]!.observation;
+    if (observation?.schemaVersion !== 2) throw Error('Fixture must provide v2 Docker machine observation');
+    observation.importantState = { scope: 'project', services };
+    assert.equal(verifyGoalOutcomeTruth(task).ok, false,
+      'invalid observed Docker service state case ' + index);
+  }
+  const getterOuter = fixture();
+  const observation = getterOuter.execution!.records[0]!.observation;
+  if (observation?.schemaVersion !== 2) throw Error('Fixture must provide v2 Docker machine observation');
+  const state: Record<string, unknown> = { scope: 'project' };
+  Object.defineProperty(state, 'services', {
+    enumerable: true, get() { invoked++; return [{ service: 'web', states: ['running'] }]; }
+  });
+  observation.importantState = state;
+  assert.equal(verifyGoalOutcomeTruth(getterOuter).ok, false,
+    'an accessor-backed top-level services field cannot certify state');
+  assert.equal(invoked, 0, 'observed service accessors must never execute during verification');
+  assert.equal(verifyGoalOutcomeTruth(fixture()).ok, true,
+    'legitimate explicit known Docker service state remains valid');
+});

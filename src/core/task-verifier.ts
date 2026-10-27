@@ -397,7 +397,10 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
     // otherwise vacuously certify a Docker lifecycle operation.
     const services = exactRequestedDockerServices(goal.services);
     const expectedState = goal.operation === 'stop' ? 'exited' : 'running';
-    const observed = Array.isArray(state.services) ? state.services.map(asRecord) : [];
+    const observed = exactObservedDockerServices(
+      Object.getOwnPropertyDescriptor(state, 'services')?.value
+    );
+    const observedScope = Object.getOwnPropertyDescriptor(state, 'scope')?.value;
     const observedRead = (() => {
       const receipt = record?.observation;
       if (!record || record.risk !== 'read' || record.capability !== 'docker.inspect' ||
@@ -409,13 +412,11 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
       return Number.isFinite(start) && Number.isFinite(finish) && Number.isFinite(seen) &&
         start <= seen && seen <= finish;
     })();
-    const ok = Boolean(observedRead && validOperation && state.scope === 'project' && services.length > 0 && services.every((service) => {
-      const item = observed.find((candidate) => candidate.service === service);
-      const states = Array.isArray(item?.states) && item.states.length > 0 &&
-        item.states.every((value) => typeof value === 'string')
-        ? item.states as string[] : [];
-      return states.length > 0 && states.every((value) => value === expectedState);
-    }));
+    const ok = Boolean(observedRead && validOperation && observedScope === 'project' &&
+      services.length > 0 && services.every((service) => {
+        const item = observed.find((candidate) => candidate.service === service);
+        return item !== undefined && item.states.every((value) => value === expectedState);
+      }));
     return outcome(true, ok, ok
       ? `Fresh project-scoped Docker inspection proves every requested service is ${expectedState}.`
       : `Fresh Docker inspection does not prove every requested service reached ${expectedState}.`, versions(record));
@@ -723,6 +724,46 @@ function exactRequestedDockerServices(value: unknown): string[] {
         typeof item.value !== 'string' || item.value.length === 0 ||
         item.value.length > 256 || item.value.includes('\0')) return [];
     services.push(item.value);
+  }
+  return services;
+}
+
+/** Require inert, unique, nonempty Docker service observations. Array.every()
+ * skips sparse indexes and can otherwise misreport nonexistent states as valid. */
+function exactObservedDockerServices(value: unknown): Array<{ service: string; states: string[] }> {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 1000 ||
+      Object.getPrototypeOf(value) !== Array.prototype ||
+      Reflect.ownKeys(value).length !== value.length + 1) return [];
+  const services: Array<{ service: string; states: string[] }> = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < value.length; index++) {
+    const entry = Object.getOwnPropertyDescriptor(value, String(index));
+    const raw = entry?.value;
+    if (!entry || !entry.enumerable || !('value' in entry) ||
+        !raw || typeof raw !== 'object' || Array.isArray(raw) ||
+        (Object.getPrototypeOf(raw) !== Object.prototype &&
+         Object.getPrototypeOf(raw) !== null)) return [];
+    const service = Object.getOwnPropertyDescriptor(raw, 'service');
+    const states = Object.getOwnPropertyDescriptor(raw, 'states');
+    if (!service || !service.enumerable || !('value' in service) ||
+        typeof service.value !== 'string' || service.value.length === 0 ||
+        service.value.length > 256 || service.value.includes('\0') ||
+        seen.has(service.value) || !states || !states.enumerable ||
+        !('value' in states)) return [];
+    const values = states.value;
+    if (!Array.isArray(values) || values.length < 1 || values.length > 128 ||
+        Object.getPrototypeOf(values) !== Array.prototype ||
+        Reflect.ownKeys(values).length !== values.length + 1) return [];
+    const normalized: string[] = [];
+    for (let stateIndex = 0; stateIndex < values.length; stateIndex++) {
+      const item = Object.getOwnPropertyDescriptor(values, String(stateIndex));
+      if (!item || !item.enumerable || !('value' in item) ||
+          typeof item.value !== 'string' || item.value.length === 0 ||
+          item.value.length > 128) return [];
+      normalized.push(item.value);
+    }
+    seen.add(service.value);
+    services.push({ service: service.value, states: normalized });
   }
   return services;
 }
