@@ -97,7 +97,8 @@ export async function runLaneAFrozenDecisions({
   if (model === 'scripted' || model === 'none') invalid('a named model is required');
   validDigest(modelConfigDigest, 'model configuration digest');
   validDigest(runnerDigest, 'runner digest');
-  requireFrozenEvaluationCases(fixtures, 1, 125, invalid, 'frozen fixtures',
+  requireFrozenEvaluationCases(fixtures, 1, 125,
+    reason => invalid('fixture has extra or executable fields: ' + reason), 'frozen fixtures',
     ['scenarioId', 'scenarioVersion', 'seed', 'observationJson', 'acceptableDecisionsJson']);
   if (typeof decide !== 'function') invalid('model-only decision callback required');
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 25 || timeoutMs > 30_000) invalid('timeout invalid');
