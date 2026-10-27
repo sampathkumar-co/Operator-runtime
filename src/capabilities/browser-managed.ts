@@ -279,6 +279,12 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
         throw new OperatorError('BROWSER_DEDICATED_PROFILE_SYMLINK',
           'Dedicated Chrome profile must be a real directory, not a symlink or file.');
       }
+      if (process.platform !== 'win32' &&
+          ((profile.mode & 0o077) !== 0 ||
+           (typeof process.getuid === 'function' && profile.uid !== process.getuid()))) {
+        throw new OperatorError('BROWSER_DEDICATED_PROFILE_PERMISSIONS',
+          'Dedicated browser profile must belong to the current user and deny group/other access.');
+      }
       const actualProfilePath = await fs.realpath(dataDir);
       assertDedicatedProfileOptions({ ...this.#options, dataDir: actualProfilePath });
     } else {
