@@ -33,6 +33,7 @@ import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
 import { renderControlCenter } from './control-center.ts';
 import { buildRedactedControlCenterDiagnostics } from '../../../src/core/control-center-diagnostic-export.ts';
+import { buildOriginalRecoveryReviewModel } from '../../../src/core/original-recovery-ux.ts';
 import { buildControlCenterRuntimeStatus } from '../../../src/core/control-center-runtime-status.ts';
 import { buildControlCenterTaskTimeline } from '../../../src/core/control-center-task-timeline.ts';
 import { projectDoctorOnboardingEvidence, type DoctorObservation } from '../../../src/core/control-center-doctor-evidence.ts';
@@ -866,6 +867,43 @@ export function createLocalAgentServer(options: {
         session: options.sessionApprovals?.summary() ?? { active: false },
         configured: Boolean(options.approvals)
       });
+      return;
+    }
+
+    // Original-device recovery is observational ONLY. A normal browser login,
+    // relay origin or enterprise context cannot substitute for the trusted
+    // local agent bearer. No website mutation/step-up route is installed here.
+    if (pathname === '/v1/control-center/original-recovery' && req.method === 'GET') {
+      if (relayRequest || !timingSafeTokenMatch(req.headers.authorization, options.token)) {
+        send(res, 403, { ok: false, error: { code: 'ORIGINAL_RECOVERY_LOCAL_AUTH_REQUIRED',
+          message: 'Original-device recovery metadata requires direct local bearer authority.' } });
+        return;
+      }
+      if (!options.actionExecutions || !options.agentKernel) {
+        send(res, 503, { ok: false, error: { code: 'ORIGINAL_RECOVERY_REVIEW_NOT_CONFIGURED',
+          message: 'Original action receipt and journal stores are not configured.' } });
+        return;
+      }
+      const rawLimit = requestUrl.searchParams.get('limit');
+      const limit = rawLimit === null ? 200 : /^(?:[1-9][0-9]{0,2})$/.test(rawLimit) ? Number(rawLimit) : NaN;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+        send(res, 400, { ok: false, error: { code: 'ORIGINAL_RECOVERY_REVIEW_LIMIT_INVALID',
+          message: 'Original-device recovery review limit must be between 1 and 200.' } });
+        return;
+      }
+      try {
+        // The two bounded snapshots are NOT a cross-process transaction and
+        // cannot be used to justify replay or signed owner adjudication.
+        const [pending, journal] = await Promise.all([
+          options.actionExecutions.listOperatorPendingReceipts(limit),
+          options.agentKernel.journal.list(1000)
+        ]);
+        send(res, 200, { ok: true, configured: true,
+          model: buildOriginalRecoveryReviewModel(pending, journal) });
+      } catch {
+        send(res, 409, { ok: false, error: { code: 'ORIGINAL_RECOVERY_REVIEW_UNAVAILABLE',
+          message: 'Authoritative recovery metadata is inconsistent or temporarily unavailable.' } });
+      }
       return;
     }
 
