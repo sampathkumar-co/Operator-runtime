@@ -39,12 +39,47 @@ const COMMAND_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const MAX_COMMANDS = 100;
 const KIND_ORDER: DeveloperQualificationKind[] = ['format', 'lint', 'test', 'build'];
 
+/** Snapshot runtime/SDK records without invoking own accessors or coercion hooks. */
+function inertRecord(input: unknown, code: string, label: string): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      (Object.getPrototypeOf(input) !== Object.prototype &&
+       Object.getPrototypeOf(input) !== null)) {
+    throw new OperatorError(code, label + ' must be a plain inert data object.');
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(input);
+  const copied: Record<string, unknown> = Object.create(null);
+  for (const key of Reflect.ownKeys(input)) {
+    if (typeof key !== 'string') throw new OperatorError(code, label + ' contains symbolic fields.');
+    const field = descriptors[key]!;
+    if (!field.enumerable || !('value' in field)) {
+      throw new OperatorError(code, label + ' contains executable or hidden fields.');
+    }
+    copied[key] = field.value;
+  }
+  return copied;
+}
+function inertArray(input: unknown, max: number, code: string, label: string): unknown[] {
+  if (!Array.isArray(input) || input.length > max) {
+    throw new OperatorError(code, label + ' must be a bounded array.');
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(input);
+  const keys = Reflect.ownKeys(input);
+  if (keys.length !== input.length + 1 ||
+      keys.some(key => typeof key !== 'string' ||
+        (key !== 'length' && (!/^(0|[1-9][0-9]*)$/.test(key) ||
+          !descriptors[key]?.enumerable || !('value' in descriptors[key]!))))) {
+    throw new OperatorError(code, label + ' has executable, sparse or hidden array entries.');
+  }
+  return Array.from({ length: input.length }, (_, i) => descriptors[String(i)]!.value);
+}
+
 export function createDeveloperChangeQualificationPlan(input: {
   editPlan: MultiFileEditPlan;
   trustedCommandInspection: ActionResult;
 }): DeveloperChangeQualificationPlan {
-  const editPlan = validateMultiFileEditPlan(input.editPlan);
-  const inspected = validateTrustedCommandInspection(input.trustedCommandInspection);
+  const request = inertRecord(input, 'DEVELOPER_QUALIFICATION_PLAN_INVALID', 'qualification request');
+  const editPlan = validateMultiFileEditPlan(request.editPlan as MultiFileEditPlan);
+  const inspected = validateTrustedCommandInspection(request.trustedCommandInspection as ActionResult);
   const explicit = new Set(editPlan.verification.trustedCommandIds);
 
   const selected = explicit.size > 0
