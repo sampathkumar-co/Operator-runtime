@@ -155,3 +155,51 @@ test('C05 model envelopes cannot run accessors or hide extra authority fields', 
   }), (error: any) => error?.code === 'TASK_PROPOSAL_INVALID');
   assert.equal(invoked, 0);
 });
+
+test('C05 standalone model preflight refuses executable or hidden owner scope before any getter runs', () => {
+  let invoked = 0;
+  for (const field of ['objective', 'approvedRoots', 'approvedBrowserOrigins'] as const) {
+    const untrusted = Object.defineProperty({ ...request }, field, {
+      enumerable: true,
+      get() { invoked++; throw new Error('owner scope accessor must never run'); }
+    }) as ModelGoalProposalRequest;
+    assert.throws(() => validateModelGoalProposal(proposed(navigation), untrusted),
+      (error: any) => error?.code === 'TASK_PROPOSAL_SCOPE_DENIED');
+  }
+  const hidden = Object.defineProperty({ ...request }, 'authorization', {
+    enumerable: false, value: 'grant-all'
+  });
+  const symbol = { ...request, [Symbol('hidden-owner-grant')]: true };
+  const inherited = Object.assign(Object.create({ inheritedAuthority: true }), request);
+  for (const scope of [hidden, symbol, inherited]) {
+    assert.throws(() => validateModelGoalProposal(proposed(navigation), scope as ModelGoalProposalRequest),
+      (error: any) => error?.code === 'TASK_PROPOSAL_SCOPE_DENIED');
+  }
+  assert.equal(invoked, 0);
+});
+
+test('C05 standalone scope arrays reject getters, sparse slots and extra hidden permissions', () => {
+  let invoked = 0;
+  const getterRoots = [root];
+  Object.defineProperty(getterRoots, '0', { enumerable: true, get() {
+    invoked++; throw new Error('approved root accessor must not run');
+  }});
+  const getterOrigins = ['https://approved.example'];
+  Object.defineProperty(getterOrigins, '0', { enumerable: true, get() {
+    invoked++; throw new Error('approved origin accessor must not run');
+  }});
+  const hiddenOrigins = Object.defineProperty(['https://approved.example'], 'writeAll', {
+    enumerable: false, value: true
+  });
+  for (const badRequest of [
+    { ...request, approvedRoots: getterRoots },
+    { ...request, approvedBrowserOrigins: getterOrigins },
+    { ...request, approvedBrowserOrigins: hiddenOrigins },
+    { ...request, approvedRoots: new Array(1) }
+  ]) {
+    assert.throws(() => validateModelGoalProposal(proposed(navigation), badRequest),
+      (error: any) => error?.code === 'TASK_PROPOSAL_INVALID');
+  }
+  assert.equal(invoked, 0);
+  assert.deepEqual(validateModelGoalProposal(proposed(navigation), request).goal, navigation);
+});

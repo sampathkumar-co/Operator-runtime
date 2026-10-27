@@ -90,20 +90,47 @@ function within(candidate: string, root: string): boolean {
   const rel = path.relative(root, candidate);
   return rel === '' || (rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel));
 }
+/** Capture each owner-scoped array element from one inert descriptor set. */
+function approvedScopeList(value: unknown, label: string): unknown[] {
+  exactList(value, 0, 12, label);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const copied: unknown[] = [];
+  for (let i = 0; i < value.length; i++) {
+    const slot = descriptors[String(i)];
+    if (!slot || !slot.enumerable || !('value' in slot)) {
+      invalid(label + ' contains an executable or missing scope slot.');
+    }
+    copied.push(slot.value);
+  }
+  return copied;
+}
 function scopes(input: ModelGoalProposalRequest) {
-  if (!input || typeof input !== 'object' || !Array.isArray(input.approvedRoots) ||
-      !Array.isArray(input.approvedBrowserOrigins) ||
-      input.approvedRoots.length > 12 || input.approvedBrowserOrigins.length > 12 ||
-      input.approvedRoots.length + input.approvedBrowserOrigins.length === 0) {
+  // This validator is also exposed as a standalone SDK function. Do not rely
+  // on the trusted intake's separate snapshot: a direct caller may supply
+  // getters/proxies or changing arrays that execute code on field access.
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      (Object.getPrototypeOf(input) !== Object.prototype && Object.getPrototypeOf(input) !== null)) {
+    denied('Provide a plain inert owner-approved model scope.');
+  }
+  const fields = Object.getOwnPropertyDescriptors(input);
+  const expected = ['objective', 'approvedRoots', 'approvedBrowserOrigins'] as const;
+  if (Reflect.ownKeys(input).length !== expected.length ||
+      expected.some(key => !Object.hasOwn(fields, key) ||
+        !fields[key]!.enumerable || !('value' in fields[key]!))) {
+    denied('Approved model scope must have only exact inert consent fields.');
+  }
+  const objective = fields.objective!.value;
+  const approvedRoots = fields.approvedRoots!.value;
+  const approvedBrowserOrigins = fields.approvedBrowserOrigins!.value;
+  if (!Array.isArray(approvedRoots) || !Array.isArray(approvedBrowserOrigins) ||
+      approvedRoots.length > 12 || approvedBrowserOrigins.length > 12 ||
+      approvedRoots.length + approvedBrowserOrigins.length === 0) {
     denied('Provide bounded explicit user-approved browser origins or project roots.');
   }
-  exactList(input.approvedRoots, 0, 12, 'approved project roots');
-  exactList(input.approvedBrowserOrigins, 0, 12, 'approved browser origins');
-  boundedText(input.objective, 4096, 'objective');
-  return {
-    roots: input.approvedRoots.map(approvedRoot),
-    origins: new Set(input.approvedBrowserOrigins.map(approvedOrigin))
-  };
+  const roots = approvedScopeList(approvedRoots, 'approved project roots').map(approvedRoot);
+  const origins = new Set(approvedScopeList(approvedBrowserOrigins, 'approved browser origins').map(approvedOrigin));
+  boundedText(objective, 4096, 'objective');
+  return { roots, origins };
 }
 type Scope = ReturnType<typeof scopes>;
 function atomic(value: unknown, scope: Scope): AtomicProposal {
