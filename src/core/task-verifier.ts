@@ -264,12 +264,28 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
     const target = typeof goal.path === 'string' ? goal.path : undefined;
     const expectedSha = content === undefined ? undefined : sha256(content);
     const relative = root && target ? path.relative(root, target).replace(/\\/g, '/').replace(/^\.\//, '') : undefined;
-    const expectedPathHash = relative ? sha256(relative) : undefined;
+    const expectedPathHash = relative && relative !== '..' && !relative.startsWith('../') &&
+      !path.isAbsolute(relative) ? sha256(relative) : undefined;
+    // Each receipt must be a completed read from its OWN exact capability;
+    // matching hashes alone cannot validate stale, ambiguous, non-read or
+    // out-of-window observations.
+    const knownRead = (record: TaskActionRecord | undefined): boolean => {
+      const observation = record?.observation;
+      if (!record || record.risk !== 'read' || record.state !== 'SUCCEEDED' ||
+          observation?.schemaVersion !== 2 || observation.capability !== record.capability ||
+          observation.epistemicStatus !== 'KNOWN' || observation.ambiguous !== false) return false;
+      const started = Date.parse(record.startedAt);
+      const finished = Date.parse(record.finishedAt ?? '');
+      const captured = Date.parse(observation.observedAt);
+      return Number.isFinite(started) && Number.isFinite(finished) &&
+        Number.isFinite(captured) && started <= captured && captured <= finished;
+    };
     // A trusted git.status observation emits literal SHA-256 strings. Never
     // coerce a forged object/getter into a matching proof of Git visibility.
     const gitPathHashes = exactObservedDigestList(gitState.gitPathHashes);
-    const ok = Boolean(fileRecord && gitRecord && expectedSha && expectedPathHash
-      && fileState.sha256 === expectedSha && gitPathHashes.includes(expectedPathHash));
+    const ok = Boolean(knownRead(fileRecord) && knownRead(gitRecord) &&
+      expectedSha && expectedPathHash && fileState.sha256 === expectedSha &&
+      gitPathHashes.includes(expectedPathHash));
     return outcome(true, ok, ok
       ? 'Exact requested file bytes and Git visibility are independently proven by fresh durable machine observations.'
       : 'Completion lacks either the exact file-content digest or fresh Git visibility for the requested path.', mergeRecordVersions([fileRecord, gitRecord]));
