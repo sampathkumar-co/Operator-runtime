@@ -225,5 +225,6 @@ test('C11 telemetry does not widen abort or mismatched delivery wait authority',
   assert.equal(await store.waitFor(deviceId, 1, deliveryId, 1000, abort.signal), null);
   // Early aborted calls do not register waiters or incur new observability.
   assert.equal(recorder.snapshot().length,1);
+  assert.equal(recorder.snapshot()[0]?.result, 'failed', 'unfulfilled wait must not be reported as success');
   assert.equal((await store.get(deviceId, 1))?.deliveryId, deliveryId);
 });

@@ -9,3 +9,5 @@ The injected recorder affects **only observation**. Exact delivery matching, onc
 Tests cover a real on-disk result commit after a pending wait, opt-in metadata, lack of secret/raw IDs, disabled/default equivalence, mismatched delivery refusal and aborted waits. This does not measure the full hosted-to-device pipeline and does not claim a real latency reduction.
 
 No original device, npm release, production relay, automatic file export or remote state was touched.
+
+A `waitFor` return of `null` (timeout, abort after registration, or unmatched delivery) is recorded as an **unfulfilled wait** (`result: failed`), not as a successful relay result. This is strictly a measurement label, not evidence that a dispatched device action failed or can be replayed. The action's original value or error, ACK authority, and fail-closed behavior are unchanged. Diagnostic classification failures are swallowed within the recorder and cannot turn successful execution into a rejected promise.
