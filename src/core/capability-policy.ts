@@ -75,9 +75,15 @@ export function registerExtensionCapabilityRisk(input: {
   extensionId: string;
   owner: string;
 }): () => void {
-  const capability = String(input.capability ?? '');
-  const extensionId = String(input.extensionId ?? '');
-  const owner = String(input.owner ?? '');
+  // Extension identities are an authorization boundary. String(object)
+  // executes caller-defined toString/valueOf and can impersonate namespace
+  // ownership; only literal source-contract strings are valid.
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new PolicyError('CAPABILITY_EXTENSION_NAMESPACE_INVALID', 'Extension risk registration must be an object.');
+  }
+  const capability = typeof input.capability === 'string' ? input.capability : '';
+  const extensionId = typeof input.extensionId === 'string' ? input.extensionId : '';
+  const owner = typeof input.owner === 'string' ? input.owner : '';
   const expectedPrefix = `ext.${extensionId}.`;
   if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(extensionId)) {
     throw new PolicyError('CAPABILITY_EXTENSION_NAMESPACE_INVALID', 'Extension id is invalid for risk registration.');
@@ -112,6 +118,9 @@ export function registerExtensionCapabilityRisk(input: {
 }
 
 export function capabilityRiskRule(capability: string): CapabilityRiskRule {
+  if (typeof capability !== 'string' || capability.length === 0 || capability.length > 256) {
+    throw new PolicyError('CAPABILITY_RISK_UNREGISTERED', 'Capability has no canonical risk policy.');
+  }
   // Inherited Object.prototype members such as "__proto__", "constructor"
   // and "toString" are not registered capability risk rules.
   const builtIn = Object.prototype.hasOwnProperty.call(CAPABILITY_RISK_RULES, capability)

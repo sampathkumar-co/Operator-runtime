@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { FilesystemProvider } from '../src/capabilities/filesystem.ts';
-import { CAPABILITY_RISK_RULES, capabilityRiskRule, isBuiltInCapability } from '../src/core/capability-policy.ts';
+import { CAPABILITY_RISK_RULES, capabilityRiskRule, isBuiltInCapability, registerExtensionCapabilityRisk } from '../src/core/capability-policy.ts';
 import { OperatorRuntime } from '../src/core/runtime.ts';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../src/core/types.ts';
 
@@ -119,4 +119,52 @@ test('prototype-chain names are not implicitly registered capability risk rules'
   }
   assert.equal(capabilityRiskRule('file.read'), 'read');
   assert.equal(capabilityRiskRule('browser.interact'), 'external');
+});
+
+
+test('C02 extension capability risk registration requires literal namespace and owner identities', () => {
+  const extensionId = 'reviewed_ext';
+  const owner = 'a'.repeat(64);
+  const capability = 'ext.reviewed_ext.read_file';
+  let conversions = 0;
+  const impersonator = {
+    toString() { conversions++; return extensionId; },
+    valueOf() { conversions++; return extensionId; }
+  };
+  const attempts: Array<[Record<string, unknown>, string]> = [
+    [{ capability: impersonator, extensionId, owner, rule: 'read' }, 'CAPABILITY_EXTENSION_NAMESPACE_INVALID'],
+    [{ capability, extensionId: impersonator, owner, rule: 'read' }, 'CAPABILITY_EXTENSION_NAMESPACE_INVALID'],
+    [{ capability, extensionId, owner: impersonator, rule: 'read' }, 'CAPABILITY_EXTENSION_OWNER_INVALID'],
+    [{ capability: [capability], extensionId, owner, rule: 'read' }, 'CAPABILITY_EXTENSION_NAMESPACE_INVALID'],
+    [{ capability, extensionId, owner: [owner], rule: 'read' }, 'CAPABILITY_EXTENSION_OWNER_INVALID'],
+    [{ capability, extensionId, owner, rule: ['read'] }, 'CAPABILITY_EXTENSION_RISK_INVALID']
+  ];
+  for (const [input, code] of attempts) {
+    assert.throws(() => registerExtensionCapabilityRisk(input as any),
+      (error: any) => error?.code === code, code);
+  }
+  assert.equal(conversions, 0, 'extension registration must never invoke caller conversions');
+  assert.throws(() => capabilityRiskRule(impersonator as any),
+    (error: any) => error?.code === 'CAPABILITY_RISK_UNREGISTERED');
+  assert.equal(conversions, 0, 'lookup must not coerce untrusted names');
+  assert.throws(() => capabilityRiskRule(capability),
+    (error: any) => error?.code === 'CAPABILITY_RISK_UNREGISTERED');
+
+  const releaseOne = registerExtensionCapabilityRisk({
+    capability, extensionId, owner, rule: 'read'
+  });
+  const releaseTwo = registerExtensionCapabilityRisk({
+    capability, extensionId, owner, rule: 'read'
+  });
+  try {
+    assert.equal(capabilityRiskRule(capability), 'read', 'literal registration is still authorized');
+    releaseOne();
+    assert.equal(capabilityRiskRule(capability), 'read', 'remaining lease retains the same scoped rule');
+  } finally {
+    releaseTwo();
+    releaseOne();
+  }
+  assert.throws(() => capabilityRiskRule(capability),
+    (error: any) => error?.code === 'CAPABILITY_RISK_UNREGISTERED',
+    'no risk registration survives the final owner lease release');
 });
