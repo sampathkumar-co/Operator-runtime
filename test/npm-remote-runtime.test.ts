@@ -277,8 +277,12 @@ test('npm PR CI covers all generated-runtime TypeScript source trees', async () 
   ].sort(), 'source roots changed: update npm PR CI coverage and review the build contract');
   const prPaths = workflow.split('  pull_request:\n    paths:\n')[1]?.split('\npermissions:')[0] ?? '';
   for (const root of roots) {
-    assert.ok(prPaths.includes("      - '" + root + "/**'") ||
-      (root === 'apps/local-agent/src' && prPaths.includes("      - 'apps/local-agent/**'")),
+    const components = root.split('/');
+    // An ancestor glob such as packages/adaptive-intelligence/** is strictly
+    // broader than /src/** and intentionally includes package metadata.
+    const coveringPaths = components.map((_, i) =>
+      "      - '" + components.slice(0, i + 1).join('/') + "/**'");
+    assert.ok(coveringPaths.some(pattern => prPaths.includes(pattern)),
       'npm PR CI must cover generated-runtime source root: ' + root);
   }
 });
@@ -602,4 +606,30 @@ test('C10 optional doctor does not probe system files on unsupported platforms o
   assert.equal(result.chrome,'NOT_CHECKED');
   assert.equal(result.edge,'NOT_CHECKED');
   assert.equal(Object.keys(result).some(key=>key.toLowerCase().includes('path')),false);
+});
+
+
+test('C00 npm PR trigger covers all tracked shipped runtime source roots and package metadata', async () => {
+  const workflow = await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8');
+  const builder = await fs.readFile(path.resolve('packages/mecord-connect/scripts/build-runtime-payload.mjs'), 'utf8');
+  const start = workflow.indexOf('  pull_request:');
+  const end = workflow.indexOf('\npermissions:', start);
+  assert.ok(start >= 0 && end > start, 'explicit PR path filters must exist');
+  const filters = workflow.slice(start, end);
+  const sourceRoots = [...builder.matchAll(/compileTrackedTree\('([^']+)'/g)].map(match => match[1]);
+  assert.ok(sourceRoots.length >= 4, 'builder must expose all expected shipped source trees');
+  for (const sourceRoot of sourceRoots) {
+    const parts = sourceRoot.split('/');
+    const coveringGlobs = parts.map((_, i) =>
+      "'" + parts.slice(0, i + 1).join('/') + "/**'");
+    assert.ok(coveringGlobs.some(pattern => filters.includes(pattern)),
+      'npm PR source CI is missing compiled source root ' + sourceRoot);
+    // For independently shipped packages, package.json, scripts and manifests
+    // are part of the reproducible build identity, not only src/**/*.ts.
+    if (parts[0] === 'packages' && parts.length >= 3) {
+      const packageRoot = parts.slice(0, 2).join('/');
+      assert.ok(filters.includes("'" + packageRoot + "/**'"),
+        'npm PR CI must cover shipped package metadata for ' + packageRoot);
+    }
+  }
 });

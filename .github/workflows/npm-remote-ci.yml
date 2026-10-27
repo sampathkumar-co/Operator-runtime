@@ -7,8 +7,9 @@ on:
   pull_request:
     paths:
       - 'packages/mecord-connect/**'
-      - 'packages/adaptive-intelligence/src/**'
-      - 'packages/verified-plan-runtime/src/**'
+      # Shipped TS and package metadata changes must both trigger PR source qualification.
+      - 'packages/adaptive-intelligence/**'
+      - 'packages/verified-plan-runtime/**'
       - 'apps/local-agent/**'
       - 'src/**'
       - 'native/windows-dpapi/**'
