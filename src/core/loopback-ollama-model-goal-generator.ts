@@ -4,7 +4,7 @@ import type {
 } from './bounded-model-goal-inference.ts';
 
 const OLLAMA_LOOPBACK_GENERATE = 'http://127.0.0.1:11434/api/generate';
-const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+const MODEL_ID = /^(?=.{1,128}$)[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?$/;
 const MAX_HTTP_BODY_BYTES = 64 * 1024;
 const MAX_MODEL_TEXT_BYTES = 32 * 1024;
 
