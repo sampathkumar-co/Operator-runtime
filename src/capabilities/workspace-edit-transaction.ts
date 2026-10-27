@@ -207,6 +207,12 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
       const existing = await this.#readRecord(action.id);
       if (existing) {
         assertRecordMatchesAction(existing, workspaceRoot, parsed.plan);
+        if (deferFinalization && existing.requiresVerification !== true) {
+          // A completed public transaction can never become a verified edit
+          // merely because a trusted caller reused its action identity.
+          throw new OperatorError('WORKSPACE_EDIT_VERIFICATION_FENCE_MISSING',
+            'Existing transaction lacks the durable pre-dispatch verification requirement.');
+        }
         if (deferFinalization && existing.requiresVerification === true &&
             existing.phase === 'VERIFICATION_PENDING') {
           // A restarted verifier can resume the SAME held bytes but cannot
@@ -383,10 +389,12 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
     // Held edits must NEVER be auto-finalized or auto-rolled-back by general
     // reconciliation: a restart does not prove required trusted verifiers ran.
     // It remains uncertain until the dedicated verifier continuation acts.
-    if (record.requiresVerification === true && (
-      record.phase === 'PREPARED' || record.phase === 'APPLYING' ||
-      record.phase === 'VERIFICATION_PENDING'
-    )) {
+    if (record.requiresVerification === true &&
+        record.phase !== 'COMMITTED_CLEANUP' && record.phase !== 'COMMITTED' &&
+        record.phase !== 'ROLLED_BACK') {
+      // Includes ROLLBACK_REQUIRED. A verifier that failed or was cancelled
+      // must never have its rollback-intent journal auto-committed just
+      // because target bytes still equal the post-edit digest.
       return {
         status: 'uncertain',
         evidence: [evidence('workspace_edit_verification_hold', 'info',
