@@ -132,3 +132,67 @@ test('user cancellation rejects uncooperative model and refuses a late proposal'
   complete(new Response(JSON.stringify({ response: JSON.stringify(browser) }), { status: 200 }));
 });
 
+
+
+test('C05 untrusted model proposal getter and coercible project command never execute', () => {
+  let invoked = 0;
+  const withGetter = Object.defineProperty({}, 'goal', {
+    enumerable: true, get() { invoked += 1; throw new Error('must never run'); }
+  });
+  assert.throws(() => validateTaskGoalProposal(withGetter, approved),
+    (e: any) => e?.code === 'TASK_PROPOSAL_INVALID');
+  const root = path.resolve('approved-project');
+  const goal = {
+    goal: { kind: 'trusted-project-command', root,
+      commandKind: { toString() { invoked += 1; return 'test'; } } },
+    successConditions: ['test exit observed']
+  };
+  assert.throws(() => validateTaskGoalProposal(goal, {
+    objective: 'Run trusted tests', approvedRoots: [root], approvedBrowserOrigins: []
+  }), (e: any) => e?.code === 'TASK_PROPOSAL_INVALID');
+  assert.equal(invoked, 0);
+});
+
+test('C05 proposal rejects inferred descendant roots and executable scope arrays', () => {
+  const root = path.resolve('approved-project');
+  const child = path.join(root, 'new-subproject');
+  assert.throws(() => validateTaskGoalProposal({
+    goal: { kind: 'trusted-project-command', root: child, commandKind: 'test' },
+    successConditions: ['exit observed']
+  }, { objective: 'Run test', approvedRoots: [root], approvedBrowserOrigins: [] }),
+  (e: any) => e?.code === 'TASK_PROPOSAL_SCOPE_DENIED');
+  let invoked = 0;
+  const scope = Object.defineProperty([root], '0', {
+    enumerable: true, configurable: true,
+    get() { invoked += 1; throw Error('must never access'); }
+  });
+  assert.throws(() => validateTaskGoalProposal({
+    goal: { kind: 'trusted-project-command', root, commandKind: 'test' },
+    successConditions: ['exit observed']
+  }, { objective: 'Run test', approvedRoots: scope, approvedBrowserOrigins: [] }),
+  (e: any) => e?.code === 'TASK_PROPOSAL_INVALID');
+  assert.equal(invoked, 0);
+});
+
+test('C05 model proposal requires dense inert checks, steps and observable conditions', () => {
+  const aliased = structuredClone(browser);
+  Object.defineProperty(aliased.successConditions, '0', {
+    enumerable: true, configurable: true,
+    get() { throw new Error('must never read'); }
+  });
+  assert.throws(() => validateTaskGoalProposal(aliased, approved),
+    (e: any) => e?.code === 'TASK_PROPOSAL_INVALID');
+  const suspicious = {
+    goal: { kind: 'semantic-workflow', steps: [
+      { kind: 'browser-navigation', url: 'https://example.test/1' },
+      { kind: 'browser-navigation', url: 'https://example.test/2' }
+    ] },
+    successConditions: ['each visited']
+  };
+  Object.defineProperty(suspicious.goal.steps, '1', {
+    enumerable: true, configurable: true,
+    get() { throw Error('must never read'); }
+  });
+  assert.throws(() => validateTaskGoalProposal(suspicious, approved),
+    (e: any) => e?.code === 'TASK_PROPOSAL_INVALID');
+});
