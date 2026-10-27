@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { buildWave0EvaluationReport } from './wave0-evaluation.mjs';
+import { requireFrozenEvaluationCases } from './c01-inert-evaluation-input.mjs';
 
 const SHA = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
@@ -96,7 +97,8 @@ export async function runLaneAFrozenDecisions({
   if (model === 'scripted' || model === 'none') invalid('a named model is required');
   validDigest(modelConfigDigest, 'model configuration digest');
   validDigest(runnerDigest, 'runner digest');
-  if (!Array.isArray(fixtures) || fixtures.length < 1 || fixtures.length > 125) invalid('fixture count invalid');
+  requireFrozenEvaluationCases(fixtures, 1, 125, invalid, 'frozen fixtures',
+    ['scenarioId', 'scenarioVersion', 'seed', 'observationJson', 'acceptableDecisionsJson']);
   if (typeof decide !== 'function') invalid('model-only decision callback required');
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 25 || timeoutMs > 30_000) invalid('timeout invalid');
   const cases = fixtures.map(checkCase);
