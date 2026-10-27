@@ -99,7 +99,8 @@ export class PipelineLatencyRecorder {
   }
   async measure<T>(
     info: { stage: PipelineStage; origin: PipelineOrigin; traceId?: string },
-    action: () => T | Promise<T>
+    action: () => T | Promise<T>,
+    classifySuccess?: (value: T) => boolean
   ): Promise<T> {
     if (!this.enabled) return await action();
     const checkedStage = stage(info.stage);
@@ -113,7 +114,18 @@ export class PipelineLatencyRecorder {
     const started = performance.now();
     let result: PipelineResult = 'ok';
     try {
-      return await this.#scope.run({ traceId, spanId }, action);
+      const value = await this.#scope.run({ traceId, spanId }, action);
+      if (classifySuccess) {
+        // A missing result can be a normal API return but is not a fulfilled
+        // stage. Classification is observation only: never change the value
+        // or turn a successful action into a thrown telemetry exception.
+        try {
+          if (classifySuccess(value) !== true) result = 'failed';
+        } catch {
+          result = 'failed';
+        }
+      }
+      return value;
     } catch (error) {
       result = 'failed';
       throw error;
