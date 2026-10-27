@@ -367,3 +367,30 @@ test('R3 retry of a verified committed edit returns durable success without reru
   assert.equal((retry.output as any).alreadyCompleted,true);
   assert.equal(await fs.readFile(path.join(root,'idempotent.ts'),'utf8'),'export const idempotent = 2;\n');
 });
+
+
+test('R3 terminal rollback receipt cannot be resurrected by externally restored post-edit bytes', async t => {
+  const {root,stateDir}=await fixture(t);
+  const original='const terminal = 1;\n';
+  const file=path.join(root,'terminal.ts');
+  await fs.writeFile(file,original);
+  const plan=createMultiFileEditPlan({files:[{
+    path:'terminal.ts',expectedSha256:digest(original),
+    edits:[{start:original.indexOf('1'),end:original.indexOf('1')+1,replacement:'2'}]
+  }]});
+  const internal:ActionRequest={
+    id:'rollback-terminal-reconcile',capability:'workspace.edit.transaction',risk:'write',
+    input:{workspaceRoot:root,plan},provenance:{kind:'trusted_policy',source:'synthetic'}
+  };
+  const tx=new WorkspaceEditTransactionProvider({allowedRoots:[root],stateDir});
+  assert.equal((await tx.executeDeferred(internal)).ok,true);
+  assert.equal((await tx.rollbackDeferred(internal)).ok,true);
+  await fs.writeFile(file,'const terminal = 2;\n'); // unrelated actor, not a trusted verifier
+  assert.equal((await tx.reconcile({action:internal})).status,'uncertain');
+  assert.equal(await fs.readFile(file,'utf8'),'const terminal = 2;\n');
+  const options={maxBytes:4*1024*1024,errorCode:'WORKSPACE_EDIT_TRANSACTION_CORRUPT',
+    invalidMessage:'Workspace edit transaction journal is invalid.'} as const;
+  const record=JSON.parse(await readDurableStateText(
+    workspaceEditTransactionJournalPath(stateDir,internal.id),options));
+  assert.equal(record.phase,'ROLLED_BACK','terminal rollback may not mutate into commit');
+});
