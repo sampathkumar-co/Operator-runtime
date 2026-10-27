@@ -374,3 +374,42 @@ test('C03 managed browser discovery refuses oversized forged CDP version respons
     `${port}\n/devtools/browser/test-browser\n`);
   assert.equal(await discoverDevToolsEndpoint([profileDir]), undefined);
 });
+
+
+test('C03 dedicated mode refuses unprovisioned profile without creating it', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-owned-unprovisioned-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const executable = path.join(parent, process.platform === 'win32' ? 'fake-chrome.exe' : 'fake-chrome');
+  await fs.writeFile(executable, 'not a real executable');
+  const missing = path.join(parent, 'absent', 'dedicated-profile');
+  const launcher = new ManagedChromiumLauncher({
+    dedicatedProfileOnly: true, dataDir: missing, executablePath: executable
+  });
+  await assert.rejects(launcher.ensureEndpoint(),
+    (e: any) => e?.code === 'BROWSER_DEDICATED_PROFILE_NOT_PROVISIONED');
+  await assert.rejects(fs.lstat(missing), (e: any) => e?.code === 'ENOENT');
+  await launcher.close();
+});
+
+test('C03 dedicated mode refuses dangling DevToolsActivePort without deleting link', async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-owned-dangling-port-'));
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const executable = path.join(dataDir, process.platform === 'win32' ? 'fake-chrome.exe' : 'fake-chrome');
+  await fs.writeFile(executable, 'not a real executable');
+  const port = path.join(dataDir, 'DevToolsActivePort');
+  try {
+    await fs.symlink(path.join(dataDir, 'nonexistent-target'), port, 'file');
+  } catch (e) {
+    if (['EPERM', 'EACCES', 'ENOTSUP'].includes((e as NodeJS.ErrnoException).code ?? '')) {
+      t.skip('File symlink creation unavailable on runner'); return;
+    }
+    throw e;
+  }
+  const launcher = new ManagedChromiumLauncher({
+    dedicatedProfileOnly: true, dataDir, executablePath: executable
+  });
+  await assert.rejects(launcher.ensureEndpoint(),
+    (e: any) => e?.code === 'BROWSER_DEDICATED_PROFILE_IN_USE');
+  assert.equal((await fs.lstat(port)).isSymbolicLink(), true);
+  await launcher.close();
+});
