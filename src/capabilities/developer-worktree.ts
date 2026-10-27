@@ -147,7 +147,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
 
       const expectedFingerprint = requiredDigest(
         literalField(action.input, 'expectedFingerprint'), 'expectedFingerprint', [64]);
-      const before = await this.#manager.inspect(sessionId);
+      const before = await this.#manager.inspectReadOnly(sessionId);
       await exactRepository(before, repositoryRoot);
       mutationEntered = true;
       const inspected = await this.#manager.release({ sessionId, expectedFingerprint });
@@ -184,7 +184,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
     try {
       const sessionId = requiredSession(literalField(action.input, 'sessionId'));
       const repositoryRoot = requiredPath(literalField(action.input, 'repositoryRoot'));
-      const inspected = await this.#manager.inspect(sessionId);
+      const inspected = await this.#manager.inspectReadOnly(sessionId);
       await exactRepository(inspected, repositoryRoot);
       if (action.capability === 'workspace.worktree.create') {
         const baseCommit = requiredDigest(literalField(action.input, 'baseCommit'), 'baseCommit', [40, 64]);
