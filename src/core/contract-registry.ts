@@ -70,6 +70,7 @@ export const CONTRACT_REGISTRY = Object.freeze([
   { name: 'autonomous-objective-certification', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'workspace-code-index', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
   { name: 'multi-file-edit-plan', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'developer-change-qualification-plan', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
   { name: 'workspace-edit-transaction', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'lsp-workspace-edit', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
   { name: 'workspace-semantic-intelligence', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
