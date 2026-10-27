@@ -31,6 +31,12 @@ test('C06 private worktree resource keys overlap Git on the same physical reposi
   });
   const keys = await privateDeveloperWorktreeResourceKeysForAction(action);
   assert.equal(keys.includes('developer-worktree:session:one'), true);
+  const punctuated = await privateDeveloperWorktreeResourceKeysForAction(req(
+    'workspace.worktree.inspect', 'read',
+    { sessionId: 'owner:device@one', repositoryRoot: root }
+  ));
+  assert.ok(punctuated.includes('developer-worktree:session:owner:device@one'),
+    'private scheduler key must exactly match the durable manager lease namespace');
   assert.ok(keys.some(key => key.startsWith('fs-path:')));
   const git = await resolvePhysicalResourceKeysForAction(req('git.status', 'read', { cwd: root }));
   assert.equal(overlap(keys, git), true,
