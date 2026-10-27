@@ -207,6 +207,19 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
       const existing = await this.#readRecord(action.id);
       if (existing) {
         assertRecordMatchesAction(existing, workspaceRoot, parsed.plan);
+        if (deferFinalization && existing.requiresVerification === true &&
+            existing.phase === 'VERIFICATION_PENDING') {
+          // A restarted verifier can resume the SAME held bytes but cannot
+          // repeat edit application or infer verification from matching hashes.
+          await this.#assertExactHeldPaths(existing);
+          return {
+            ok: true, capability: action.capability, provider: this.name,
+            output: { planId: existing.planId, pendingVerification: true, resumed: true },
+            evidence: [evidence('workspace_edit_verification_hold', 'info',
+              'Original held edit and backups match exact hashes; trusted verification must run again.')],
+            durationMs: Math.round(performance.now() - started)
+          };
+        }
         const reconciled = await this.#reconcileRecord(action, existing);
         if (reconciled.status === 'completed' && reconciled.result) return reconciled.result;
         if (reconciled.status === 'not_applied') {
@@ -324,8 +337,10 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
           code: op.code,
           message: op.message,
           retryable: op.retryable,
-          sideEffectState: op.code === 'WORKSPACE_EDIT_RECONCILIATION_REQUIRED' ? 'uncertain' : 'none',
-          executionPhase: 'pre_dispatch'
+          sideEffectState: op.code === 'WORKSPACE_EDIT_RECONCILIATION_REQUIRED' ||
+            op.code === 'WORKSPACE_EDIT_DEFERRED_UNCERTAIN' ? 'uncertain' : 'none',
+          executionPhase: op.code === 'WORKSPACE_EDIT_DEFERRED_UNCERTAIN' ||
+            op.code === 'WORKSPACE_EDIT_RECONCILIATION_REQUIRED' ? 'effect_observed' : 'pre_dispatch'
         },
         durationMs: Math.round(performance.now() - started)
       };
@@ -368,7 +383,10 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
     // Held edits must NEVER be auto-finalized or auto-rolled-back by general
     // reconciliation: a restart does not prove required trusted verifiers ran.
     // It remains uncertain until the dedicated verifier continuation acts.
-    if (record.requiresVerification === true && record.phase !== 'COMMITTED' && record.phase !== 'ROLLED_BACK') {
+    if (record.requiresVerification === true && (
+      record.phase === 'PREPARED' || record.phase === 'APPLYING' ||
+      record.phase === 'VERIFICATION_PENDING'
+    )) {
       return {
         status: 'uncertain',
         evidence: [evidence('workspace_edit_verification_hold', 'info',
