@@ -376,8 +376,11 @@ export class ProcessProvider implements CapabilityProvider {
       } catch (error) {
         // Invalid caller declarations are pre-dispatch provider failures, not
         // uncaught exceptions or a reason to create a terminal session.
-        return failure(action, this.name, started, error instanceof OperatorError
-          ? error : new OperatorError('DEVELOPER_RUNTIME_PORT_INVALID', 'Declared ports are invalid.'));
+        return failure(action, this.name, started, new OperatorError(
+          'DEVELOPER_RUNTIME_PORT_INVALID',
+          error instanceof OperatorError ? error.message : 'Declared ports are invalid.',
+          { retryable: false, details: { sideEffectState: 'none' } }
+        ));
       }
       if (ports.length > 0 && !developerSessionId) {
         return failure(action, this.name, started, 'DEVELOPER_RUNTIME_SESSION_REQUIRED', 'Declared ports require developerSessionId so ownership can survive restart.');
