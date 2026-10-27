@@ -420,9 +420,12 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
       timeoutMs: Number(goal.timeoutMs ?? 5_000)
     });
     const expectedColumns = Array.isArray(goal.columns) && goal.columns.length > 0 ? goal.columns.map(String) : ['*'];
-    const actualColumns = Array.isArray(state.columns) ? state.columns.map(String) : [];
-    const rowCount = Number(state.rowCount);
-    const limit = Number(goal.limit ?? 100);
+    // Machine-state normalization emits only literal numeric row counters
+    // and bounded column-name strings. Do not turn forged objects, strings
+    // or accessor properties into apparently valid database receipts.
+    const actualColumns = exactObservedPostgresColumns(state.columns);
+    const rowCount = state.rowCount;
+    const limit = goal.limit ?? 100;
     const expectedInputHash = sha256(canonicalJson(expectedInput));
     const predicates = {
       record: Boolean(record),
@@ -430,10 +433,12 @@ function evaluateAtomicGoal(goal: Record<string, unknown>, records: TaskActionRe
       profile: state.profileId === goal.profileId,
       schema: state.schema === (goal.schema ?? 'public'),
       table: state.table === goal.table,
-      limit: Number(state.limit) === limit,
-      offset: Number(state.offset) === Number(goal.offset ?? 0),
-      rowCount: Number.isSafeInteger(rowCount) && rowCount >= 0 && rowCount <= limit,
-      columns: canonicalJson(actualColumns) === canonicalJson(expectedColumns)
+      limit: typeof state.limit === 'number' && Number.isSafeInteger(state.limit) && state.limit === limit,
+      offset: typeof state.offset === 'number' && Number.isSafeInteger(state.offset) &&
+        state.offset === (goal.offset ?? 0),
+      rowCount: typeof rowCount === 'number' && Number.isSafeInteger(rowCount) &&
+        rowCount >= 0 && rowCount <= (limit as number),
+      columns: actualColumns.length > 0 && canonicalJson(actualColumns) === canonicalJson(expectedColumns)
     };
     const ok = Object.values(predicates).every(Boolean);
     const failedPredicates = Object.entries(predicates).filter(([, passed]) => !passed).map(([name]) => name);
@@ -630,6 +635,21 @@ function outcome(supported: boolean, ok: boolean, detail: string, stateVersions:
 }
 
 /** Snapshot only the exact inert digest list that git.status can emit. */
+function exactObservedPostgresColumns(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 50 ||
+      Object.getPrototypeOf(value) !== Array.prototype ||
+      Reflect.ownKeys(value).length !== value.length + 1) return [];
+  const columns: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor) ||
+        typeof descriptor.value !== 'string' ||
+        !(descriptor.value === '*' || /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/.test(descriptor.value))) return [];
+    columns.push(descriptor.value);
+  }
+  return columns;
+}
+
 function exactObservedDigestList(value: unknown): string[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > 500 ||
       Object.getPrototypeOf(value) !== Array.prototype ||
