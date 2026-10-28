@@ -141,9 +141,9 @@ jobs:
           }
           $metadata | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $artifact 'test-candidate.json') -Encoding utf8
           "## Non-publishing Mecord test candidate" >> $env:GITHUB_STEP_SUMMARY
-          "Source SHA: `$env:GITHUB_SHA`" >> $env:GITHUB_STEP_SUMMARY
-          "Version: `$env:MECORD_TEST_CANDIDATE_VERSION`" >> $env:GITHUB_STEP_SUMMARY
-          "Tarball SHA256: `$sha256`" >> $env:GITHUB_STEP_SUMMARY
+          "Source SHA: $env:GITHUB_SHA" >> $env:GITHUB_STEP_SUMMARY
+          "Version: $env:MECORD_TEST_CANDIDATE_VERSION" >> $env:GITHUB_STEP_SUMMARY
+          "Tarball SHA256: $sha256" >> $env:GITHUB_STEP_SUMMARY
           "Only disposable local installation + doctor tested. No device/VPS test, no npm registry publication." >> $env:GITHUB_STEP_SUMMARY
 
       - name: Save installable archive and source-bound checksum (no publish)
