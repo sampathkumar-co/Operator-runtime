@@ -169,7 +169,7 @@ export class CdpConnection {
 
   async #send(method: string, params: JsonMap, timeoutMs: number, sessionId?: string, signal?: AbortSignal): Promise<JsonMap> {
     if (signal?.aborted) throw aborted();
-    await this.#ready;
+    await waitForReadyOrAbort(this.#ready, signal);
     if (signal?.aborted) throw aborted();
     if (this.#closed || this.#socket.readyState !== WebSocket.OPEN) {
       throw new OperatorError('CDP_CONNECTION_CLOSED', 'Browser target connection is not open.', { retryable: true });
@@ -219,6 +219,23 @@ export class CdpConnection {
     this.#closed = true;
     try { this.#socket.close(); } catch { /* noop */ }
   }
+}
+
+async function waitForReadyOrAbort(ready: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) { await ready; return; }
+  if (signal.aborted) throw aborted();
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener('abort', onAbort);
+      reject(aborted());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    ready.then(
+      () => { signal.removeEventListener('abort', onAbort); resolve(); },
+      (error: unknown) => { signal.removeEventListener('abort', onAbort); reject(error); }
+    );
+    if (signal.aborted) onAbort();
+  });
 }
 
 function aborted(): OperatorError {
