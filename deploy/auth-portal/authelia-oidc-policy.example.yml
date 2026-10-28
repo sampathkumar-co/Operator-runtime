@@ -22,6 +22,27 @@ clients:
     consent_mode: 'implicit'
     require_pkce: true
     pkce_challenge_method: 'S256'
+    # ChatGPT must receive offline access so short-lived access tokens can
+    # be renewed without asking the user to sign in again in each new chat.
+    # Keep both known ChatGPT callbacks; never broaden developer authority.
+    redirect_uris:
+      - 'https://chatgpt.com/connector_platform_oauth_redirect'
+      - 'https://chatgpt.com/connector/oauth/8HymKNOT2aqK'
+    scopes:
+      - 'openid'
+      - 'offline_access'
+      - 'operator:read'
+      - 'operator:write'
+    audience:
+      - 'https://operator.splcart.in/mcp'
+    requested_audience_mode: 'explicit'
+    grant_types:
+      - 'authorization_code'
+      - 'refresh_token'
+    response_types:
+      - 'code'
+    token_endpoint_auth_method: 'none'
+    access_token_signed_response_alg: 'RS256'
 
   - client_id: 'splcart-operator-chatgpt-developer-v1'
     client_name: 'Mecord Connect Developer'
