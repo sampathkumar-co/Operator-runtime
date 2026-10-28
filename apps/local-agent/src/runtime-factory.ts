@@ -6,6 +6,33 @@ import { FilesystemProvider, GitProvider, GitCheckpointProvider, GitWriteProvide
 import { ProviderLearningStore } from '../../../src/core/provider-learning.ts';
 import { ArtifactStore } from '../../../src/core/artifact-store.ts';
 import type { PerceptionGraphStore } from '../../../src/core/perception-graph.ts';
+import type { BuiltInProviderDeclaration } from '../../../src/core/capability-conformance.ts';
+
+/** Exhaustive registration policy for providers owned by this runtime factory.
+ * Availability and physical correctness are intentionally not implied. */
+export const BUILT_IN_PROVIDER_DECLARATIONS = [
+  { name: 'system.native', registration: 'always' },
+  { name: 'filesystem.native', registration: 'always' },
+  { name: 'project.semantic', registration: 'always' },
+  { name: 'project.command.trusted', registration: 'always' },
+  { name: 'project.transaction.git', registration: 'always' },
+  { name: 'docker.local.semantic', registration: 'always' },
+  { name: 'compute.docker.isolated', registration: 'always' },
+  { name: 'postgres.psql.structured', registration: 'always' },
+  { name: 'vscode.cli.isolated', registration: 'always' },
+  { name: 'git.native', registration: 'always' },
+  { name: 'git.checkpoint.native', registration: 'always' },
+  { name: 'git.write.native', registration: 'always' },
+  { name: 'process.argv', registration: 'always' },
+  { name: 'browser.managed', registration: 'always' },
+  { name: 'workspace.edit.lsp.resolve', registration: 'always' },
+  { name: 'workspace.edit.transaction', registration: 'configured', configuration: 'stateDir' },
+  { name: 'workspace.edit.rollback', registration: 'configured', configuration: 'stateDir' },
+  { name: 'workspace.worktree.git', registration: 'default_off', configuration: 'developerWorktree.enabled' },
+  { name: 'perception.graph', registration: 'default_off', configuration: 'perception' },
+  { name: 'document-data', registration: 'always' },
+  { name: 'windows.uia', registration: 'always' }
+] as const satisfies readonly BuiltInProviderDeclaration[];
 
 export function createRuntime(config: {
   stateDir?: string;
@@ -89,6 +116,7 @@ export function createRuntime(config: {
       stateDir: config.stateDir,
       allowedRoots: config.allowedRoots,
       allowedExecutables: config.terminalAllowedExecutables ?? [],
+      windowsPathLeaseExecutable: config.windowsPathLeasePath,
       requiredRisk: 'destructive'
     }))
     .register(new ManagedBrowserProvider({

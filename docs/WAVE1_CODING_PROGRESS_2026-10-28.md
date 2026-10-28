@@ -13,6 +13,10 @@ This file records implemented work and precise residual uncertainty. It is **not
 - C06: Developer Worktree provider now advertises typed capability schemas; local factory uses *explicit*, default-off `developerWorktree: { enabled: true, worktreeRoot }`, requires durable `stateDir` and registered roots, and does not widen the nine public MCP tools. Destructive release still requires a fresh approval.
 - C06: Synthetic Git tests prove absent-provider denial, misrisk denial, out-of-root refusal, exact detached commit and clean worktree proof, inspect, destructive release approval, original repository preservation and conservative recovery.
 - Updated canonical risk and resource-lease fixtures to account for the new exact-risk operations.
+- C02: Added an exhaustive runtime-factory provider declaration census tied to the central conformance/router boundary. All 21 built-ins are accounted for; configured and explicit default-off providers are classified without treating a mock or source probe as physical certification. Adversarial coverage spans allow/deny, cancellation, malformed results, bounded untrusted errors, uncertainty/no replay, redaction, missing providers and source-bound recovery.
+- C04: Added an owner-session interactive UIA harness for the deterministic WinForms fixture. Every inspect/operate selector is bound to the disposable fixture PID, exercises focus/value/invoke/status and a wrong-process negative case, and never enumerates or targets unrelated windows. It is source-ready but was **NOT_RUN** because the native UIA binary is absent in this checkout.
+- C04: Native semantic operation receipts now bind operation, process, automation-id and before/after window identity at the TypeScript provider boundary. Identity substitution is uncertain and non-retryable.
+- C06: Explicit `windowsPathLeasePath` runtime-factory configuration now reaches ProcessProvider one-shot Job Object execution instead of relying only on ambient environment. Existing missing-helper behavior remains fail-closed; release packaging/build/self-test wiring is source-covered.
 
 ## Source tests on LAPTOP-MRNU23B2 (separate disposable worktree)
 
@@ -20,14 +24,16 @@ This file records implemented work and precise residual uncertainty. It is **not
 - Canonical risk and resource-lease tests: **58 passed, 0 failed**.
 - C03 typed/browser source contract tests: **28 passed, 0 failed**.
 - C04 Windows UIA source-contract tests: **24 passed, 0 failed**.
+- Targeted second-pass C02/C04/C06 source contracts and focused router regressions: **62 passed, 0 failed**. No provider effects or physical UIA actions were run.
+- A separately started `test/process.test.ts` run was stopped when it exceeded the bounded test scope. Before interruption, helper-independent tests passed while helper-dependent Windows cases failed with the expected absent-helper/containment errors. `native/windows-path-lease/target/release/operator-windows-path-lease.exe` and the UIA release binary are absent in this uninstalled worktree; no helper was built or installed.
 - The broader source run had process tests failing due absent packaged Windows Job Object/path-lease helpers, plus a process identity observation failure under the concurrent test run. Native process containment and real Windows app correctness **NOT_ACCEPTED**. Do not weaken or silently skip these physical gates.
 - No new npm RC, real browser benchmark, deployed service, original-device state mutation, or physical release acceptance.
 
 ## Remaining Wave 1 coding / exit evidence to reconcile before one PR
 
-- C02: Truthful provider readiness and generic conformance across all providers for cancellation, uncertainty, paginated artifact references and private/public schema negotiation.
+- C02: Physical provider readiness and real outcome correctness remain open. The generic central-boundary source census is complete; it does not certify provider effects, paginated external artifacts or installed private/public clients.
 - C03: Full browser DOM/CDP, cross-origin/OOPIF, shadow, virtualization, accessibility, upload/download, input and Chrome/Edge source coverage. Existing source tests do not certify the entire operation matrix.
-- C04: Native Windows/UIA deterministic app fixtures, monitor/DPI/focus, sidecar restart and process descendant cleanup, cancellation, protected desktop/UAC rejection. Requires a compatible native helper at RC acceptance.
+- C04: Run the new deterministic app harness in an owner-controlled interactive Windows session, then independently measure monitor/DPI/focus, sidecar restart, process descendant cleanup, cancellation and protected desktop/UAC rejection. Requires compatible native helpers at RC acceptance.
 - C06: Verify end-to-end owned multi-file edit, exact Git/worktree transactions, trusted scoped test/build invocation, Docker and PostgreSQL, VS Code semantic navigation, artifact-based postconditions, and failed/uncertain side-effect recovery.
 - The C02–C06 issue tracker checklists remain mostly unchecked. A source audit must reconcile existing implementations against these requirements before declaring coding 100%. No code or test acceptance is inferred from an unchecked item or a historical PR.
 - Keep Wave 1 in ONE branch until source gaps are actually addressed. Open ONE Wave 1 PR only then. Do not publish npm or update production in this coding branch.
@@ -46,7 +52,7 @@ This is a source-coding census, not physical acceptance. `IMPLEMENTED` means the
 | C02-06 | IMPLEMENTED: UIA generation, authority and visual-source integrity checks | NOT_VERIFIED against foreground changes on Windows |
 | C02-07 | IMPLEMENTED: CDP deltas, bounded observations and continuation handling | NOT_VERIFIED across the full operation/browser matrix |
 | C02-08 | IMPLEMENTED: artifact-store references and sensitive visual retrieval boundaries | NOT_VERIFIED through a deployed relay/API pipeline |
-| C02-09 | PARTIAL: reusable conformance framework and negative provider tests exist; the built-in provider matrix is not exhaustive | NOT_VERIFIED; extend only from concrete provider gaps, not synthetic benchmark tasks |
+| C02-09 | IMPLEMENTED: exhaustive 21-provider factory census plus central adversarial boundary cases for allow/deny, cancellation, malformed result, untrusted error, uncertainty/no replay, redaction, missing provider and recovery; configured/default-off providers are explicit | NOT_VERIFIED for physical outcomes; source mocks and declarations never certify provider effects |
 | C02-10 | IMPLEMENTED: public nine stay closed; private Developer tools have explicit version/surface routing, including private worktrees | NOT_VERIFIED with MCP clients; local MCP SDK packages are absent |
 | C03-01 | IMPLEMENTED: CDP lifecycle, operation dispatch and observation contracts | NOT_VERIFIED by independent Chrome/Edge measurement |
 | C03-02 | IMPLEMENTED: DOM control-family targeting including descendant normalization | NOT_VERIFIED on a real-world SVG/control corpus |
@@ -61,8 +67,8 @@ This is a source-coding census, not physical acceptance. `IMPLEMENTED` means the
 | C03-11 | IMPLEMENTED: genericity and false-progress source tests | NOT_VERIFIED for physical correctness or p50/p95 |
 | C03-12 | IMPLEMENTED: accepted source-genericity gate remains benchmark-task independent | Physical browser correctness remains outside this source gate |
 | C04-01 | IMPLEMENTED: UIA provider schema, discovery and strict native protocol boundary | NOT_VERIFIED on installed Windows/native apps |
-| C04-02 | PARTIAL: deterministic .NET contract-app source and CI compile/describe fixture exist; interactive UIA assertions are absent | NOT_VERIFIED; requires an interactive Windows runner |
-| C04-03 | PARTIAL: native element/window identities and provider target binding exist; physical process/tab/focus identity integration is unproven | NOT_VERIFIED on Windows |
+| C04-02 | IMPLEMENTED: deterministic .NET contract app plus reproducible owner-session harness exercise PID-bound inspect, focus, set-value, invoke, status verification and wrong-process rejection without targeting unrelated windows | NOT_VERIFIED; harness was not run because this checkout has no UIA release binary and hosted headless Windows is not desktop evidence |
+| C04-03 | IMPLEMENTED: provider validates native operation, process, automation-id and stable before/after window identity; adversarial identity substitution is uncertain and non-retryable | NOT_VERIFIED for physical process/tab/focus behavior on Windows |
 | C04-04 | IMPLEMENTED: native visual/input protocol families and source-native safety checks | NOT_VERIFIED for real keyboard/drag/clipboard/editor actions |
 | C04-05 | IMPLEMENTED: visual capture carries source window, bounds, generation and integrity metadata | NOT_VERIFIED for DPI/multi-monitor/window movement |
 | C04-06 | IMPLEMENTED: fallback is scoped, privacy-labelled and authority-bound | NOT_VERIFIED for real semantic insufficiency |
@@ -80,7 +86,7 @@ This is a source-coding census, not physical acceptance. `IMPLEMENTED` means the
 | C06-08 | IMPLEMENTED: source/symbol/call semantic navigation and VS Code-oriented workspace intelligence | NOT_VERIFIED in installed VS Code/LSP environments |
 | C06-09 | IMPLEMENTED: evidence packs bind source, commands, outputs and verification receipts | NOT_VERIFIED by an external reviewer |
 | C06-10 | IMPLEMENTED: compound project workflows preserve authority, resources and postcondition truth | NOT_VERIFIED on the broader unfamiliar-workflow campaign |
-| C06-11 | PARTIAL: provider cancellation and uncertain-side-effect contracts exist; packaged Windows path-lease/Job Object helpers are absent on this checkout's runner | NOT_VERIFIED for leak/descendant/process matrix |
+| C06-11 | IMPLEMENTED (source): provider cancellation/uncertainty contracts, fail-closed Job Object execution, explicit runtime-factory helper wiring, deterministic build, package copy and packaged self-test checks are present | NOT_VERIFIED for leak/descendant/process matrix; helper binary is absent in this uninstalled worktree and remains an environment/RC gate |
 | C06-12 | IMPLEMENTED: exhaustive leaf-deny tests prevent implicit shell/SQL or unsupported Git operations | NOT_VERIFIED against every optional installed provider |
 
-Source conclusion: no additional significant Wave 1 source implementation gap was found outside the three explicit `PARTIAL` conformance/fixture/integration areas and the missing packaged Windows helper noted above. This does **not** close the 43 physical acceptance rows, certify performance, or justify a 100% Wave 1 claim.
+Source conclusion: the four targeted second-pass source gaps now have bounded implementations and focused source tests. No physical UIA action or native containment campaign was executed, and the uninstalled worktree contains neither release helper binary. Those physical and release-artifact gates remain explicitly open; this does **not** close the 43 physical acceptance rows, certify performance, or justify a 100% Wave 1 claim.

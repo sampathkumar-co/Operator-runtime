@@ -278,7 +278,10 @@ test('C04 exact bounded UIA selector still permits an explicitly scoped semantic
     client: {
       async call(method: string, params: unknown) {
         calls.push({ method, params });
-        return { verified: true };
+        return { operation: 'set_value',
+          before: { process_id: 1, automation_id: 'target-value' },
+          after: { process_id: 1, automation_id: 'target-value' },
+          postcondition: { verified: true } };
       },
       close() {}
     }
@@ -362,7 +365,9 @@ test('C04 native invoke dispatch is not falsely labeled as verified application 
   const run = async (postcondition: Record<string, unknown>) => {
     const provider=new WindowsUiaProvider({
       platform:'win32',
-      client:{async call(){return { postcondition };},close(){}}
+      client:{async call(){return { operation: 'invoke',
+        before: { process_id: 1, automation_id: 'save' },
+        after: { process_id: 1, automation_id: 'save' }, postcondition };},close(){}}
     });
     const result=await provider.execute({
       id:'uia-invoke-dispatch-truth',capability:'app.operate',risk:'external',provenance,
@@ -435,7 +440,12 @@ test('C04 exact UIA mutation identity rejects leading/trailing whitespace instea
   const provider = new WindowsUiaProvider({
     platform: 'win32',
     client: {
-      async call() { sidecarCalls++; return { postcondition: { verified: true } }; },
+      async call(_method: string, params: any) { sidecarCalls++; return {
+        operation: params.operation,
+        before: { process_id: 1, automation_id: params.selector.automation_id },
+        after: { process_id: 1, automation_id: params.selector.automation_id },
+        postcondition: { verified: true }
+      }; },
       close() {}
     }
   });

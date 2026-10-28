@@ -33,6 +33,13 @@ internal static class Program
                 deterministic = true,
                 networkAccess = false,
                 backgroundActions = false,
+                interactiveRunner = "run-interactive-uia.ps1",
+                targetBinding = "every selector includes this fixture process id",
+                interactionCases = new[]
+                {
+                    "inspect-main-window", "focus-name-field", "set-name-value",
+                    "invoke-save", "verify-status", "reject-wrong-process"
+                },
                 controlIds = ControlIds
             }));
             return;

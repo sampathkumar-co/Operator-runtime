@@ -80,6 +80,7 @@ export class ProcessProvider implements CapabilityProvider {
   #maxOutputBytes: number;
   #requiredRisk?: ActionRisk;
   #environmentOverrides: Readonly<Record<string, string>>;
+  #windowsPathLeaseExecutable?: string;
   #sessions = new Map<string, ManagedSession>();
   #store?: TerminalSessionStore;
   #observeProcess: ProcessInstanceObserver;
@@ -97,6 +98,7 @@ export class ProcessProvider implements CapabilityProvider {
     maxOutputBytes?: number;
     requiredRisk?: ActionRisk;
     environmentOverrides?: Readonly<Record<string, string>>;
+    windowsPathLeaseExecutable?: string;
     stateDir?: string;
     processObserver?: ProcessInstanceObserver;
     beforeOwnershipCommit?: (details: { sessionId: string; pid: number }) => void | Promise<void>;
@@ -106,6 +108,14 @@ export class ProcessProvider implements CapabilityProvider {
     this.#maxOutputBytes = boundedInteger(options.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES, 1024, MAX_OUTPUT_BYTES);
     this.#requiredRisk = options.requiredRisk;
     this.#environmentOverrides = validateEnvironmentOverrides(options.environmentOverrides);
+    if (options.windowsPathLeaseExecutable !== undefined &&
+        (typeof options.windowsPathLeaseExecutable !== 'string' ||
+         !path.isAbsolute(options.windowsPathLeaseExecutable) ||
+         options.windowsPathLeaseExecutable.includes('\0'))) {
+      throw new OperatorError('PROCESS_JOB_HELPER_INVALID',
+        'Windows Job Object helper must be an absolute literal path.');
+    }
+    this.#windowsPathLeaseExecutable = options.windowsPathLeaseExecutable;
     this.#store = options.stateDir ? new TerminalSessionStore(options.stateDir) : undefined;
     this.#observeProcess = options.processObserver ?? observeProcessInstance;
     this.#beforeOwnershipCommit = options.beforeOwnershipCommit;
@@ -262,7 +272,8 @@ export class ProcessProvider implements CapabilityProvider {
 
     try {
       const cwd = await this.#scope.resolveExisting(action.input.cwd as string);
-      const output = await runProcess(executable, args, cwd, timeoutMs, this.#maxOutputBytes, this.#environmentOverrides, context.signal);
+      const output = await runProcess(executable, args, cwd, timeoutMs, this.#maxOutputBytes,
+        this.#environmentOverrides, context.signal, this.#windowsPathLeaseExecutable);
       const ok = output.exitCode === 0;
       return {
         ok,
@@ -1090,7 +1101,7 @@ function validateEnvironmentOverrides(value: Readonly<Record<string, string>> | 
   return Object.freeze(output);
 }
 
-async function runProcess(executable: string, args: string[], cwd: string, timeoutMs: number, maxOutputBytes: number, environmentOverrides: Readonly<Record<string, string>>, signal?: AbortSignal): Promise<{
+async function runProcess(executable: string, args: string[], cwd: string, timeoutMs: number, maxOutputBytes: number, environmentOverrides: Readonly<Record<string, string>>, signal?: AbortSignal, configuredWindowsHelper?: string): Promise<{
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   stdout: string;
@@ -1108,10 +1119,9 @@ async function runProcess(executable: string, args: string[], cwd: string, timeo
     // creates the child SUSPENDED, places it in KILL_ON_JOB_CLOSE, then resumes
     // it. The helper, not the child, is the observed one-shot process owner.
     // This is deliberately distinct from long-lived terminal.session ownership.
+    const helperCandidate = configuredWindowsHelper ?? process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH;
     const windowsNativeHelper = process.platform === 'win32'
-      && path.isAbsolute(process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH ?? '')
-      ? process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH
-      : undefined;
+      && path.isAbsolute(helperCandidate ?? '') ? helperCandidate : undefined;
     // A Windows timeout cannot certify descendant quiescence through
     // snapshot/taskkill alone. Do not silently downgrade execution when the
     // packaged security helper was omitted or cannot be located.

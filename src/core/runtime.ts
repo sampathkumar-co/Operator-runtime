@@ -181,7 +181,7 @@ export class OperatorRuntime {
         }
         const op = error instanceof OperatorError
           ? error
-          : new OperatorError('PROVIDER_EXCEPTION', error instanceof Error ? error.message : String(error), { retryable: true });
+          : new OperatorError('PROVIDER_EXCEPTION', 'Provider execution failed.', { retryable: true });
         const executionPhase = thrownExecutionPhase(op);
         const sideEffectState = executionPhase === 'pre_dispatch' ? 'none' : thrownSideEffectState(canonicalAction.risk, op);
         const failure = { code: op.code, message: op.message, retryable: op.retryable, sideEffectState, executionPhase };
