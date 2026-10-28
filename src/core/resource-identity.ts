@@ -21,6 +21,7 @@ export const RESOURCE_EXTRACTOR_CAPABILITIES = Object.freeze([
   'file.read', 'file.list', 'file.write', 'file.create', 'file.replace', 'file.info', 'file.search', 'file.manage',
   'document.inspect', 'document.extract', 'document.render', 'structured.inspect', 'structured.extract', 'structured.render',
   'workspace.edit.resolve_lsp', 'workspace.edit.transaction', 'workspace.edit.rollback',
+  'workspace.worktree.create', 'workspace.worktree.inspect', 'workspace.worktree.release',
   'git.status', 'git.diff', 'git.rev-parse', 'git.checkpoint.inspect', 'git.checkpoint.create', 'git.checkpoint.restore', 'git.write',
   'docker.inspect', 'docker.manage', 'compute.run', 'postgres.inspect', 'postgres.select',
   'vscode.inspect', 'vscode.open', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage',
@@ -75,6 +76,7 @@ export function resourcePathOperandsForAction(action: ActionRequest): string[] {
   if (action.capability === 'file.manage') values.push(input.path, input.source, input.destination);
   else if (action.capability.startsWith('file.')) values.push(input.path);
   else if (action.capability.startsWith('document.') || action.capability.startsWith('structured.')) values.push(input.path);
+  else if (action.capability.startsWith('workspace.worktree.')) values.push(inertNamespaceInput(input, 'repositoryRoot'));
   else if (action.capability === 'workspace.edit.resolve_lsp' || action.capability === 'workspace.edit.rollback') values.push(input.workspaceRoot);
   else if (action.capability === 'workspace.edit.transaction') {
     const root = input.workspaceRoot;
@@ -136,6 +138,19 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
         if (typeof file?.path === 'string') add('file', path.join(root, ...file.path.split('/')), keys);
       }
     }
+  } else if (action.capability.startsWith('workspace.worktree.')) {
+    const sessionId = inertNamespaceInput(input, 'sessionId');
+    const repositoryRoot = inertNamespaceInput(input, 'repositoryRoot');
+    const risk = CAPABILITY_RISK_RULES[action.capability];
+    if (risk !== action.risk || typeof sessionId !== 'string' ||
+        !/^[A-Za-z0-9._:@-]{1,128}$/.test(sessionId) ||
+        typeof repositoryRoot !== 'string' || !path.isAbsolute(repositoryRoot) ||
+        repositoryRoot.includes('\\0') || Buffer.byteLength(repositoryRoot, 'utf8') > 32768) {
+      throw new OperatorError('RESOURCE_TARGET_INVALID',
+        'Worktree resource identity needs an exact risk, session and absolute repository root.');
+    }
+    keys.add('developer-worktree:session:' + sessionId);
+    add('repo', repositoryRoot, keys);
   } else if (action.capability.startsWith('git.')) {
     add('repo', input.cwd, keys);
   } else if (action.capability.startsWith('project.')) {
@@ -231,57 +246,18 @@ export async function resolvePhysicalResourceKeysForAction(action: ActionRequest
 }
 
 /**
- * Private C06 worktree identity contract. Do NOT add these capabilities to
- * RESOURCE_EXTRACTOR_CAPABILITIES or the public runtime until their canonical
- * risks, authorization paths and provider registration have been reviewed.
- *
- * Uses the same physical-directory resolution as ordinary Git actions, so a
- * symlinked ancestor cannot create an unrelated lock domain for the same
- * repository. A stable session key also conflicts before a path can be read.
+ * C06 compatibility wrapper. Private caller and canonical task scheduler use
+ * exactly the same source-bound physical resource and session keys. This
+ * function cannot register a provider or grant execution authority.
  */
 export async function privateDeveloperWorktreeResourceKeysForAction(
   action: ActionRequest
 ): Promise<string[]> {
-  const risks: Record<string, 'read' | 'write' | 'destructive'> = {
-    'workspace.worktree.create': 'write',
-    'workspace.worktree.inspect': 'read',
-    'workspace.worktree.release': 'destructive'
-  };
-  if (!Object.prototype.hasOwnProperty.call(risks, action.capability) ||
-      risks[action.capability] !== action.risk) {
-    throw new OperatorError('RESOURCE_TARGET_INVALID',
-      'Worktree capability has no matching private canonical risk contract.');
+  if (!['workspace.worktree.create','workspace.worktree.inspect','workspace.worktree.release']
+    .includes(action.capability)) {
+    throw new OperatorError('RESOURCE_TARGET_INVALID', 'Unsupported private worktree resource.');
   }
-  const input = action.input;
-  if (!input || typeof input !== 'object' || Array.isArray(input) ||
-      (Object.getPrototypeOf(input) !== Object.prototype &&
-       Object.getPrototypeOf(input) !== null)) {
-    throw new OperatorError('RESOURCE_TARGET_INVALID',
-      'Worktree identity must be an inert input object.');
-  }
-  const field = (name: 'repositoryRoot' | 'sessionId'): string => {
-    const descriptor = Object.getOwnPropertyDescriptor(input, name);
-    if (!descriptor || !descriptor.enumerable || !('value' in descriptor) ||
-        typeof descriptor.value !== 'string') {
-      throw new OperatorError('RESOURCE_TARGET_INVALID',
-        'Worktree identity field must be a literal string: ' + name);
-    }
-    return descriptor.value;
-  };
-  const sessionId = field('sessionId');
-  const root = field('repositoryRoot');
-  if (!/^[A-Za-z0-9._:@-]{1,128}$/.test(sessionId) ||
-      !path.isAbsolute(root) || root.includes('\0') ||
-      Buffer.byteLength(root, 'utf8') > 32768) {
-    throw new OperatorError('RESOURCE_TARGET_INVALID',
-      'Worktree session or repository root is invalid.');
-  }
-  const identity = await physicalPathIdentity(root);
-  return [
-    'developer-worktree:session:' + sessionId,
-    identity.pathKey,
-    ...(identity.objectKey ? [identity.objectKey] : [])
-  ].sort();
+  return await resolvePhysicalResourceKeysForAction(action);
 }
 
 export function resourceKeysConflict(left: string, right: string): boolean {
