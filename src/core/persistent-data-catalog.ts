@@ -65,7 +65,7 @@ export const MONOTONIC_RESTORE_STORE_IDS = Object.freeze([
   'studio-runs', 'events', 'desired-state', 'digital-operations', 'organization-programs', 'quarantine-adjudications', 'semantic-migrations',
   'relay-client', 'relay-session-credential', 'relay-deliveries', 'relay-results', 'relay-reservation-reconciliation', 'relay-outbox',
   'device-sessions', 'approvals', 'action-executions', 'emergency-stop',
-  'terminal-sessions', 'model-budget',
+  'terminal-sessions', 'model-budget', 'outcome-receipts',
   'device-registry', 'device-routing', 'device-pool', 'device-enrollments', 'device-resets', 'account-devices',
   'enterprise-policy', 'enterprise-authority-leases', 'enterprise-identity', 'bootstrap', 'local-device-reset'
 ] as const);
@@ -111,6 +111,7 @@ export const PERSISTENT_DATA_CATALOG: readonly PersistentDataEntry[] = Object.fr
   // protected restore/deletion unit. Partial restoration of only the ledger
   // or marker is not valid durable model spending authority.
   entry({ id: 'model-budget', owner: 'model-goal-inference', location: 'model-budget', category: 'tasks', sensitivity: 'sensitive', retention: 'while-model-task-spending-authority-exists', deletion: 'privacy-category', backup: 'include', restore: 'required', scope: 'task', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'PROCESS_LOCKED' }),
+  entry({ id: 'outcome-receipts', owner: 'independent-outcome-verification', location: 'outcome-receipts-v1.json', category: 'tasks', sensitivity: 'sensitive', retention: 'while-task-outcome-replay-fence-is-active', deletion: 'privacy-category', backup: 'include', restore: 'required', scope: 'task', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'PROCESS_LOCKED' }),
   entry({ id: 'developer-runtime-ownership', owner: 'developer-runtime', location: 'developer-runtime-ownership.json', category: 'session-state', sensitivity: 'sensitive', retention: 'active-session-or-terminal-tombstone', deletion: 'privacy-category', backup: 'exclude-secret', restore: 'never', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'PROCESS_LOCKED' }),
   entry({ id: 'developer-runtime-ownership-lock', owner: 'developer-runtime', location: 'developer-runtime-ownership.lock', category: 'session-state', sensitivity: 'operational', retention: 'while-writer-active', deletion: 'privacy-category', backup: 'ephemeral', restore: 'never', scope: 'device', secretMaterial: 'none', participatesInDeletion: false, concurrency: 'PROCESS_LOCKED' }),
   entry({ id: 'developer-sessions', owner: 'developer-session', location: 'developer-sessions', category: 'tasks', sensitivity: 'sensitive', retention: 'objective-session-lifetime', deletion: 'privacy-category', backup: 'include', restore: 'optional', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'SINGLE_PROCESS_ONLY' }),
