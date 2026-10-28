@@ -94,14 +94,14 @@ export function resourcePathOperandsForAction(action: ActionRequest): string[] {
   else if (action.capability.startsWith('postgres.')) values.push(input.path);
   else if (action.capability === 'vscode.open') values.push(input.path, input.leftPath, input.rightPath);
   else if (action.capability === 'terminal.execute') values.push(input.cwd, ...terminalAffectedPaths(action));
-  else if (action.capability === 'terminal.session' && input.operation === 'start') values.push(input.cwd, ...terminalAffectedPaths(action));
+  else if (action.capability === 'terminal.session' && inertNamespaceInput(input, 'operation') === 'start') values.push(input.cwd, ...terminalAffectedPaths(action));
   return [...new Set(values.filter((value): value is string => typeof value === 'string' && value.length > 0 && !value.includes('\0')))];
 }
 
 /** Host paths whose contents may change, distinct from authorization-only operands such as terminal cwd. */
 function resourceEffectPathOperandsForAction(action: ActionRequest): string[] {
   if (action.capability === 'terminal.execute'
-    || (action.capability === 'terminal.session' && action.input.operation === 'start')) {
+    || (action.capability === 'terminal.session' && inertNamespaceInput(action.input, 'operation') === 'start')) {
     return terminalAffectedPaths(action);
   }
   return resourcePathOperandsForAction(action);
@@ -177,18 +177,22 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
     if (affected.length === 0) keys.add('filesystem:any');
     else for (const affectedPath of affected) add('file', affectedPath, keys);
   } else if (action.capability === 'terminal.session') {
-    if (input.operation === 'start') {
+    if (inertNamespaceInput(input, 'operation') === 'start') {
       const affected = terminalAffectedPaths(action);
       if (affected.length === 0) keys.add('filesystem:any');
       else for (const affectedPath of affected) add('file', affectedPath, keys);
-      if (input.ports !== undefined) {
-        if (!Array.isArray(input.ports) || input.ports.length > 128) {
-          throw new OperatorError('RESOURCE_TARGET_INVALID', 'Terminal session port declarations are invalid.');
+      const ports = inertNamespaceInput(input, 'ports');
+      if (ports !== undefined) {
+        if (!Array.isArray(ports) || ports.length > 128 ||
+            Object.getPrototypeOf(ports) !== Array.prototype ||
+            Reflect.ownKeys(ports).length !== ports.length + 1) {
+          throw new OperatorError('RESOURCE_TARGET_INVALID', 'Terminal session ports must be a dense inert array.');
         }
-        // Provider dispatch already requires literal 1..65535 ports. Do
-        // not run caller valueOf()/toString() while computing resource locks.
-        for (const port of input.ports) {
-          if (typeof port !== 'number' || !Number.isSafeInteger(port) ||
+        for (let index = 0; index < ports.length; index++) {
+          const entry = Object.getOwnPropertyDescriptor(ports, String(index));
+          const port = entry?.value;
+          if (!entry || !entry.enumerable || !('value' in entry) ||
+              typeof port !== 'number' || !Number.isSafeInteger(port) ||
               port < 1 || port > 65535) {
             throw new OperatorError('RESOURCE_TARGET_INVALID', 'Terminal port identity must be a literal number.');
           }
@@ -322,27 +326,39 @@ function normalizeLegacyResourceKey(key: string): string {
 }
 
 function terminalAffectedPaths(action: ActionRequest): string[] {
-  const raw = action.input.affectedResources;
+  const raw = inertNamespaceInput(action.input, 'affectedResources');
   if (raw === undefined) return [];
-  if (!Array.isArray(raw) || raw.length > 128) {
-    throw new OperatorError('RESOURCE_DECLARATION_INVALID', 'affectedResources must be a bounded array of typed resource declarations.');
+  if (!Array.isArray(raw) || raw.length > 128 ||
+      Object.getPrototypeOf(raw) !== Array.prototype ||
+      Reflect.ownKeys(raw).length !== raw.length + 1) {
+    throw new OperatorError('RESOURCE_DECLARATION_INVALID',
+      'affectedResources must be a dense, bounded array of inert declarations.');
   }
-  const paths = raw.map((item, index) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      throw new OperatorError('RESOURCE_DECLARATION_INVALID', `affectedResources[${index}] must be a typed resource declaration.`);
+  const paths: string[] = [];
+  for (let index = 0; index < raw.length; index++) {
+    const entry = Object.getOwnPropertyDescriptor(raw, String(index));
+    const declaration = entry?.value;
+    if (!entry || !entry.enumerable || !('value' in entry) ||
+        !declaration || typeof declaration !== 'object' || Array.isArray(declaration) ||
+        (Object.getPrototypeOf(declaration) !== Object.prototype &&
+         Object.getPrototypeOf(declaration) !== null)) {
+      throw new OperatorError('RESOURCE_DECLARATION_INVALID',
+        `affectedResources[${index}] must be an inert typed declaration.`);
     }
-    const declaration = item as Record<string, unknown>;
-    const fields = Object.keys(declaration).sort();
-    if (fields.join('\0') !== 'kind\0path' || declaration.kind !== 'path'
-      || typeof declaration.path !== 'string' || declaration.path.length < 1
-      || declaration.path.length > 4096 || declaration.path.includes('\0')) {
-      throw new OperatorError('RESOURCE_DECLARATION_INVALID', `affectedResources[${index}] must contain only kind=path and a bounded path.`);
+    const fields = Reflect.ownKeys(declaration);
+    const kind = Object.getOwnPropertyDescriptor(declaration, 'kind');
+    const pathEntry = Object.getOwnPropertyDescriptor(declaration, 'path');
+    const value = pathEntry?.value;
+    if (fields.length !== 2 || fields.some(field => field !== 'kind' && field !== 'path') ||
+        !kind || !kind.enumerable || !('value' in kind) || kind.value !== 'path' ||
+        !pathEntry || !pathEntry.enumerable || !('value' in pathEntry) ||
+        typeof value !== 'string' || value.length < 1 || value.length > 4096 ||
+        value.includes('\0') || !path.isAbsolute(value)) {
+      throw new OperatorError('RESOURCE_DECLARATION_INVALID',
+        `affectedResources[${index}] needs exact kind=path and an absolute literal path.`);
     }
-    if (!path.isAbsolute(declaration.path)) {
-      throw new OperatorError('RESOURCE_DECLARATION_INVALID', `affectedResources[${index}].path must be an absolute host path.`);
-    }
-    return path.resolve(declaration.path);
-  });
+    paths.push(path.resolve(value));
+  }
   return [...new Set(paths)];
 }
 
