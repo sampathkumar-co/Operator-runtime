@@ -42,15 +42,27 @@ async function providerAdvertises(provider: CapabilityProvider, action: ActionRe
 }
 
 function checkedScore(score: CapabilityScore, providerName: string): CapabilityScore {
-  if (!score || typeof score !== 'object' || Array.isArray(score) ||
-    Object.keys(WEIGHTS).some((key) => {
-      const value = score[key as keyof CapabilityScore];
-      return typeof value !== 'number' || !Number.isFinite(value);
-    })) {
+  const invalid = (): never => {
     throw new OperatorError('PROVIDER_SCORE_CONTRACT_INVALID',
       `Provider ${providerName} returned an invalid capability score.`);
+  };
+  if (!score || typeof score !== 'object' || Array.isArray(score) ||
+      (Object.getPrototypeOf(score) !== Object.prototype &&
+       Object.getPrototypeOf(score) !== null)) invalid();
+  // Read each immutable data descriptor only once. Provider score callbacks
+  // must not install getters which run again when the rank is calculated.
+  const result: Record<string, number> = {};
+  const fields = Reflect.ownKeys(score);
+  const allowed = Object.keys(WEIGHTS);
+  if (fields.length !== allowed.length ||
+      fields.some(key => typeof key !== 'string' || !allowed.includes(key))) invalid();
+  for (const key of allowed) {
+    const prop = Object.getOwnPropertyDescriptor(score, key);
+    if (!prop || !prop.enumerable || !('value' in prop) ||
+        typeof prop.value !== 'number' || !Number.isFinite(prop.value)) invalid();
+    result[key] = prop.value;
   }
-  return score;
+  return result as unknown as CapabilityScore;
 }
 
 function weightedScore(score: CapabilityScore): number {
