@@ -250,3 +250,101 @@ test('C06 release preflight and reconciliation never finalize an unfinished crea
   assert.equal((await fs.readFile(path.join(fx.repositoryRoot, 'README.txt'), 'utf8')),
     'original\n', 'original repository remains unmodified');
 });
+
+
+test('C06 opt-in runtime binds worktree risk, repository authority and exact resource identity', async t => {
+  if (!supportedGitAvailable()) { t.skip('supported Git unavailable'); return; }
+  const fx = await fixture(t);
+  const { createRuntime } = await import('../apps/local-agent/src/runtime-factory.ts');
+  const { capabilityRiskRule } = await import('../src/core/capability-policy.ts');
+  const { resourceKeysForAction, resolvePhysicalResourceKeysForAction, resourceKeysConflict } =
+    await import('../src/core/resource-identity.ts');
+
+  assert.equal(capabilityRiskRule('workspace.worktree.create'), 'write');
+  assert.equal(capabilityRiskRule('workspace.worktree.inspect'), 'read');
+  assert.equal(capabilityRiskRule('workspace.worktree.release'), 'destructive');
+
+  const options = {
+    stateDir: fx.stateDir, allowedRoots: [fx.repositoryRoot], allowedExecutables: [],
+    developerWorktree: { enabled: true as const, worktreeRoot: fx.worktreeRoot }
+  };
+  const runtime = createRuntime(options);
+  await runtime.assertMutationReconciliationCoverage();
+  assert.ok(await runtime.router.provider('workspace.worktree.git'));
+  const input = {
+    sessionId: 'scoped-session', repositoryRoot: fx.repositoryRoot,
+    baseCommit: fx.baseCommit
+  };
+  const create = action('workspace.worktree.create', 'write', input);
+  const scope = {
+    allowedCapabilities: ['workspace.worktree.create', 'workspace.worktree.inspect',
+      'workspace.worktree.release'],
+    allowedRoots: [fx.repositoryRoot],
+    maxRisk: 'destructive' as const
+  };
+  const denied = await runtime.execute(create, {
+    ...scope, allowedCapabilities: ['git.status']
+  });
+  assert.equal(denied.ok, false);
+  assert.equal(denied.error?.code, 'CAPABILITY_DENIED');
+
+  const badScope = await runtime.execute(action('workspace.worktree.create', 'write', {
+    ...input, repositoryRoot: path.join(path.dirname(fx.repositoryRoot), 'out-of-scope')
+  }, 'outside-root'), scope);
+  assert.equal(badScope.ok, false);
+  assert.equal(badScope.error?.code, 'PATH_OUTSIDE_SCOPE');
+
+  const badRisk = await runtime.execute(action('workspace.worktree.create', 'read',
+    input, 'risk-underclaim'), scope);
+  assert.equal(badRisk.ok, false);
+  assert.equal(badRisk.error?.code, 'ACTION_RISK_MISMATCH');
+
+  const keys = await resolvePhysicalResourceKeysForAction(create);
+  const gitKeys = await resolvePhysicalResourceKeysForAction(action(
+    'git.status', 'read', { cwd: fx.repositoryRoot }));
+  assert.ok(keys.includes('developer-worktree:session:scoped-session'));
+  assert.ok(resourceKeysForAction(create).some(key => key.startsWith('repo:')));
+  assert.ok(keys.some(a => gitKeys.some(b => resourceKeysConflict(a,b))),
+    'Git and worktree operations on same root must conflict');
+
+  const created = await runtime.execute(create, scope);
+  assert.equal(created.ok, true, created.error?.message);
+  const state = created.output as Record<string, unknown>;
+  assert.equal(state.phase, 'ACTIVE');
+  assert.equal(state.head, fx.baseCommit);
+  const inspected = await runtime.execute(action('workspace.worktree.inspect', 'read', input),scope);
+  assert.equal(inspected.ok, true, inspected.error?.message);
+  assert.equal((inspected.output as Record<string, unknown>).fingerprint,state.fingerprint);
+
+  const release = action('workspace.worktree.release', 'destructive', {
+    ...input, expectedFingerprint: state.fingerprint
+  });
+  const noApproval = await runtime.execute(release, scope);
+  assert.equal(noApproval.ok,false);
+  assert.equal(noApproval.error?.code,'APPROVAL_REQUIRED');
+  const released = await runtime.execute(release, {
+    ...scope, approvedActionIds: [release.id]
+  });
+  assert.equal(released.ok,true,released.error?.message);
+  assert.equal((released.output as Record<string, unknown>).phase,'RELEASED');
+  assert.equal(await fs.readFile(path.join(fx.repositoryRoot,'README.txt'),'utf8'),
+    'original\n','original repo cannot be changed by owned worktree release');
+});
+
+test('C06 private worktree is disabled unless owner supplies complete explicit local opt-in', async t => {
+  if (!supportedGitAvailable()) { t.skip('supported Git unavailable'); return; }
+  const fx = await fixture(t);
+  const { createRuntime } = await import('../apps/local-agent/src/runtime-factory.ts');
+  const options = { allowedRoots:[fx.repositoryRoot],allowedExecutables:[] };
+  assert.throws(() => createRuntime({
+    ...options, developerWorktree: {
+      enabled: true as const, worktreeRoot: fx.worktreeRoot
+    }
+  }), (e:any) => e?.code === 'DEVELOPER_WORKTREE_OPT_IN_INVALID');
+  const defaultRuntime = createRuntime({ ...options,stateDir:fx.stateDir });
+  assert.equal(await defaultRuntime.router.provider('workspace.worktree.git'),undefined);
+  assert.throws(() => createRuntime({
+    ...options, stateDir:fx.stateDir,
+    developerWorktree: { enabled:true as const,worktreeRoot:'relative/worktree' }
+  }), (e:any) => e?.code === 'DEVELOPER_WORKTREE_OPT_IN_INVALID');
+});
