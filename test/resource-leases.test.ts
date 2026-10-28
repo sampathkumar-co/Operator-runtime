@@ -257,6 +257,7 @@ test('canonical resource extractor registry covers every policy capability and m
     if (capability === 'file.manage') return { operation: 'move', source: path.join(root, 'a'), destination: path.join(root, 'b') };
     if (capability.startsWith('file.')) return { path: path.join(root, 'a') };
     if (capability.startsWith('workspace.edit.')) return { workspaceRoot: root };
+    if (capability.startsWith('workspace.worktree.')) return { repositoryRoot: root, sessionId: 'coverage-session' };
     if (capability.startsWith('git.')) return { cwd: root };
     if (capability.startsWith('docker.')) return { path: root };
     if (capability.startsWith('postgres.')) return { path: root, profileId: 'main' };
@@ -273,7 +274,7 @@ test('canonical resource extractor registry covers every policy capability and m
     const keys = resourceKeysForAction({
       id: `coverage-${capability}`,
       capability,
-      risk: 'write',
+      risk: rule === 'dynamic' ? 'write' : rule,
       input: inputFor(capability),
       provenance: { kind: 'runtime' }
     });
