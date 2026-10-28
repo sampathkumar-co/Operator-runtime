@@ -11,7 +11,7 @@ import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
 import { normalizeMachineObservation, observationDomain } from './machine-state.ts';
 import { classifyTaskFailure, type TaskFailureDecision } from './task-failure.ts';
-import { verifyGoalOutcomeTruth, verifyTaskCompletion } from './task-verifier.ts';
+import { taskOutcomeProofBinding, verifyGoalOutcomeTruth, verifyTaskCompletion } from './task-verifier.ts';
 import { postgresSelectActionInput } from './semantic-task-input.ts';
 import { conservativeExecutionPhase, conservativeSideEffectState, retrySafeWithoutReconciliation, validExecutionPhase, validSideEffectState } from './side-effect.ts';
 import type { ResourceLeaseStore } from './resource-leases.ts';
@@ -44,6 +44,7 @@ import type {
   TaskIntelligenceContext,
   TaskIntelligenceProvider,
   TaskObservation,
+  TaskOutcomeProofPolicy,
   TaskPlanner,
   TaskPlannerContext,
   TaskPlanningInfluence,
@@ -85,6 +86,7 @@ export type {
   TaskIntelligenceProvider,
   TaskIntelligenceRequest,
   TaskObservation,
+  TaskOutcomeProofPolicy,
   TaskPlanner,
   TaskPlannerContext,
   TaskPlanningInfluence,
@@ -137,6 +139,7 @@ export class TaskOrchestrator {
   #modalityShadow?: TaskModalityShadowAdvisor;
   #strategyShadow?: TaskStrategyShadowAdvisor;
   #planningInfluence?: TaskPlanningInfluenceProvider;
+  #outcomeProofPolicy?: TaskOutcomeProofPolicy;
 
   constructor(options: {
     runtime: OperatorRuntime;
@@ -157,6 +160,7 @@ export class TaskOrchestrator {
     modalityShadow?: TaskModalityShadowAdvisor;
     strategyShadow?: TaskStrategyShadowAdvisor;
     planningInfluence?: TaskPlanningInfluenceProvider;
+    outcomeProofPolicy?: TaskOutcomeProofPolicy;
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
@@ -177,6 +181,47 @@ export class TaskOrchestrator {
     this.#modalityShadow = options.modalityShadow;
     this.#strategyShadow = options.strategyShadow;
     this.#planningInfluence = options.planningInfluence;
+    const configuredProofPolicy = options.outcomeProofPolicy;
+    if (configuredProofPolicy) {
+      if (!Array.isArray(configuredProofPolicy.requirements) ||
+          configuredProofPolicy.requirements.length > 100 ||
+          Reflect.ownKeys(configuredProofPolicy.requirements).length !== configuredProofPolicy.requirements.length + 1 ||
+          typeof configuredProofPolicy.obtainProof !== 'function' ||
+          typeof configuredProofPolicy.verifySignature !== 'function' ||
+          typeof configuredProofPolicy.consumeReceipt !== 'function') {
+        throw new OperatorError('TASK_OUTCOME_PROOF_POLICY_INVALID', 'Outcome proof policy must contain exact bounded registrations and verifier callbacks.');
+      }
+      const requirements = configuredProofPolicy.requirements.map((item) => {
+        const expectedDomains: Record<string, string> = {
+          'browser-navigation': 'browser', 'browser-download': 'download',
+          'app-operation': 'application', 'controlled-file-change': 'file-git',
+          'trusted-project-command': 'build-test', 'project-quality-gate': 'build-test',
+          'docker-lifecycle': 'docker', 'postgres-select': 'trusted-database'
+        };
+        if (!item || typeof item !== 'object' || Array.isArray(item) ||
+            typeof item.goalKind !== 'string' || typeof item.domain !== 'string' ||
+            typeof item.principalId !== 'string' || typeof item.deviceId !== 'string' ||
+            expectedDomains[item.goalKind] !== item.domain ||
+            !Array.isArray(item.trustedObserverIds) || item.trustedObserverIds.length < 1 || item.trustedObserverIds.length > 32 ||
+            Reflect.ownKeys(item.trustedObserverIds).length !== item.trustedObserverIds.length + 1 ||
+            item.trustedObserverIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(id)) ||
+            new Set(item.trustedObserverIds).size !== item.trustedObserverIds.length) {
+          throw new OperatorError('TASK_OUTCOME_PROOF_POLICY_INVALID', 'Outcome proof registration is invalid.');
+        }
+        return Object.freeze({ ...item, trustedObserverIds: Object.freeze([...item.trustedObserverIds]) as unknown as string[] });
+      });
+      const goalKinds = requirements.map(item => item.goalKind);
+      if (new Set(goalKinds).size !== goalKinds.length) {
+        throw new OperatorError('TASK_OUTCOME_PROOF_POLICY_INVALID', 'A goal kind may have only one strict outcome proof registration.');
+      }
+      this.#outcomeProofPolicy = {
+        requirements,
+        obtainProof: input => configuredProofPolicy.obtainProof(input),
+        verifySignature: (observerId, payload, signature) => configuredProofPolicy.verifySignature(observerId, payload, signature),
+        consumeReceipt: receipt => configuredProofPolicy.consumeReceipt(receipt),
+        ...(configuredProofPolicy.now ? { now: () => configuredProofPolicy.now!() } : {})
+      };
+    }
   }
 
   async submit(input: SubmitTaskOptions): Promise<TaskCapsule> {
@@ -503,14 +548,60 @@ export class TaskOrchestrator {
         this.#planningControllers.delete(task.id);
       }
       if (decision.type === 'complete') {
-        const verification = verifyTaskCompletion(task);
-        task.evidence.push(verification.evidence);
+        const proofRequirement = this.#outcomeProofPolicy?.requirements.find(item => item.goalKind === current.goalKind);
+        let suppliedProof: Awaited<ReturnType<TaskOutcomeProofPolicy['obtainProof']>> | undefined;
+        if (proofRequirement) {
+          try {
+            const binding = taskOutcomeProofBinding(task, proofRequirement.domain);
+            suppliedProof = await this.#outcomeProofPolicy!.obtainProof({ task: structuredClone(task), binding });
+          } catch {
+            // Required proof acquisition is observational and never authorizes
+            // a retry or mutation. Missing/erroring proof fails closed below.
+          }
+        }
+        const verification = verifyTaskCompletion(task, proofRequirement ? {
+          outcomeProof: {
+            domain: proofRequirement.domain,
+            principalId: proofRequirement.principalId,
+            deviceId: proofRequirement.deviceId,
+            trustedObserverIds: [...proofRequirement.trustedObserverIds],
+            ...(suppliedProof ? { proof: suppliedProof } : {}),
+            ...(this.#outcomeProofPolicy!.now ? { now: this.#outcomeProofPolicy!.now!() } : {}),
+            verifySignature: (observerId, payload, signature) =>
+              this.#outcomeProofPolicy!.verifySignature(observerId, payload, signature)
+          }
+        } : {});
         if (!verification.ok) {
+          task.evidence.push(verification.evidence);
           await this.#recordRejectedDecision(task, decision, 'TASK_INDEPENDENT_VERIFICATION_FAILED', 'Independent completion verification rejected the task graph.', {
             retryAllowed: false, reobserveAllowed: true, replanAllowed: true
           }, assertLease);
           return await this.#fail(task, 'TASK_INDEPENDENT_VERIFICATION_FAILED', 'Independent completion verification rejected the task graph.', assertLease);
         }
+        if (proofRequirement) {
+          const receipt = verification.outcomeProof?.receipt;
+          if (!receipt || verification.outcomeProof?.evaluation?.verified !== true) {
+            task.evidence.push(evidence('independent_task_verification', 'fail',
+              'Independent verifier rejected task completion because required signed proof was absent after validation.', {
+                digest: verification.bundle.digest, code: 'OUTCOME_PROOF_REQUIRED'
+              }));
+            return await this.#fail(task, 'TASK_OUTCOME_PROOF_REQUIRED', 'Required independent outcome proof was not verified.', assertLease);
+          }
+          try {
+            await this.#outcomeProofPolicy!.consumeReceipt(receipt);
+          } catch (error) {
+            const replay = error instanceof OperatorError && error.code === 'OUTCOME_RECEIPT_REPLAY';
+            task.evidence.push(evidence('independent_task_verification', 'fail',
+              'Independent verifier rejected task completion because required signed proof could not be durably consumed.', {
+                digest: verification.bundle.digest,
+                outcomeReceiptDigest: verification.outcomeProof.evaluation.receiptDigest,
+                code: replay ? 'OUTCOME_RECEIPT_REPLAY' : 'OUTCOME_RECEIPT_CONSUMPTION_FAILED'
+              }));
+            return await this.#fail(task, replay ? 'TASK_OUTCOME_PROOF_REPLAY' : 'TASK_OUTCOME_PROOF_CONSUMPTION_FAILED',
+              replay ? 'Independent outcome receipt was already consumed.' : 'Independent outcome receipt could not be durably consumed.', assertLease);
+          }
+        }
+        task.evidence.push(verification.evidence);
         task.evidence.push(evidence('task_completion', 'pass', decision.message, { verificationDigest: verification.bundle.digest }));
         finalizeTask(task);
         await this.#persistRunState(task, assertLease);

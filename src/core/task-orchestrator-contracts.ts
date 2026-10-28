@@ -4,6 +4,8 @@ import type { TaskPlannerEvent } from './task-planner-event.ts';
 import type { TaskDecisionBudget } from './task-decision-budget.ts';
 import type { TaskStateAssertion } from './task-state-assertion.ts';
 import type { RuntimeAdvisoryCommand } from './intelligence-adapters.ts';
+import type { IndependentOutcomeReceiptV1, OutcomeContractV1, OutcomeDomain } from './outcome-contract.ts';
+import type { TaskOutcomeProofBinding } from './task-verifier.ts';
 
 export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
 export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
@@ -183,6 +185,27 @@ export interface TaskRunAuthorization {
     action: ActionRequest,
     remainingMs: number
   ) => 'retry' | 'deny' | void | Promise<'retry' | 'deny' | void>;
+}
+
+export interface TaskOutcomeProofPolicy {
+  /** Exact opt-in registrations. Absence preserves legacy deterministic
+   * completion; a matching registration makes proof mandatory. */
+  requirements: Array<{
+    goalKind: SemanticTaskGoal['kind'];
+    domain: OutcomeDomain;
+    principalId: string;
+    deviceId: string;
+    trustedObserverIds: string[];
+  }>;
+  obtainProof(input: {
+    task: TaskCapsule;
+    binding: TaskOutcomeProofBinding;
+  }): Promise<{ contract: OutcomeContractV1; receipt: IndependentOutcomeReceiptV1 } | undefined>;
+  verifySignature(observerId: string, payload: Buffer, signature: string): boolean;
+  /** Must durably reject receipt-id or nonce reuse. Called only after full
+   * task and signature validation and before VERIFIED is persisted. */
+  consumeReceipt(receipt: IndependentOutcomeReceiptV1): Promise<void>;
+  now?: () => string;
 }
 
 export interface SubmitTaskOptions {

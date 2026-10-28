@@ -7,6 +7,13 @@ import type { TaskActionRecord, TaskCapsule } from './task.ts';
 import { VerificationKernel } from './verification-kernel.ts';
 import { postgresSelectActionInput } from './semantic-task-input.ts';
 import { assertTaskMachineState, normalizeTaskStateAssertions } from './task-state-assertion.ts';
+import {
+  evaluateIndependentOutcome,
+  type IndependentOutcomeReceiptV1,
+  type OutcomeContractV1,
+  type OutcomeDomain,
+  type OutcomeEvaluation
+} from './outcome-contract.ts';
 
 export interface TaskVerificationBundle {
   version: 1;
@@ -21,6 +28,7 @@ export interface TaskVerificationBundle {
   succeededActions: number;
   interruptedActions: number;
   stateVersions: string[];
+  outcomeProof?: { receiptDigest: string; disposition: string };
   checks: Array<{ name: string; ok: boolean; detail: string }>;
   digest: string;
 }
@@ -32,11 +40,42 @@ export interface TaskOutcomeTruth {
   stateVersions: string[];
 }
 
+export interface TaskOutcomeProofBinding {
+  domain: OutcomeDomain;
+  planId: string;
+  planGeneration: number;
+  actionId: string;
+  actionDigest: string;
+  actionGeneration: number;
+}
+
+/** A requirement is supplied only by trusted runtime configuration. Receipt
+ * data remains untrusted until this verifier validates every binding and the
+ * configured observer signature. */
+export interface TaskOutcomeProofRequirement {
+  domain: OutcomeDomain;
+  principalId: string;
+  deviceId: string;
+  trustedObserverIds: string[];
+  proof?: { contract: OutcomeContractV1; receipt: IndependentOutcomeReceiptV1 };
+  now?: string;
+  verifySignature: (observerId: string, payload: Buffer, signature: string) => boolean;
+}
+
+export interface TaskOutcomeProofResult {
+  required: true;
+  evaluation?: OutcomeEvaluation;
+  receipt?: IndependentOutcomeReceiptV1;
+}
+
 export function verifyGoalOutcomeTruth(task: TaskCapsule): TaskOutcomeTruth {
   return structuredOutcomeTruth(task);
 }
 
-export function verifyTaskCompletion(task: TaskCapsule): { ok: boolean; bundle: TaskVerificationBundle; evidence: Evidence } {
+export function verifyTaskCompletion(
+  task: TaskCapsule,
+  options: { outcomeProof?: TaskOutcomeProofRequirement } = {}
+): { ok: boolean; bundle: TaskVerificationBundle; evidence: Evidence; outcomeProof?: TaskOutcomeProofResult } {
   const execution = task.execution;
   const checks: TaskVerificationBundle['checks'] = [];
   const outcomeTruth = structuredOutcomeTruth(task);
@@ -74,6 +113,45 @@ export function verifyTaskCompletion(task: TaskCapsule): { ok: boolean; bundle: 
       ? 'Every required graph node is verified or explicitly skipped by a recorded strategy transition.'
       : `${unresolvedNodes.length + failedRequired.length} required graph node(s) remain unresolved or failed.`
   });
+
+  let outcomeProof: TaskOutcomeProofResult | undefined;
+  if (options.outcomeProof) {
+    outcomeProof = { required: true };
+    const requirement = options.outcomeProof;
+    let evaluation: OutcomeEvaluation | undefined;
+    let binding: TaskOutcomeProofBinding | undefined;
+    let bindingOk = false;
+    try {
+      binding = taskOutcomeProofBinding(task, requirement.domain);
+      const proof = requirement.proof;
+      if (proof) {
+        const contract = proof.contract;
+        const trustedObserver = requirement.trustedObserverIds.includes(proof.receipt.observerId);
+        bindingOk = trustedObserver && contract.domain === binding.domain &&
+          contract.planId === binding.planId && contract.planGeneration === binding.planGeneration &&
+          contract.actionId === binding.actionId && contract.actionDigest === binding.actionDigest &&
+          contract.actionGeneration === binding.actionGeneration &&
+          contract.principalId === requirement.principalId && contract.deviceId === requirement.deviceId;
+        evaluation = evaluateIndependentOutcome({
+          contract,
+          receipt: proof.receipt,
+          ...(requirement.now ? { now: requirement.now } : {}),
+          verifySignature: (payload, signature) => trustedObserver &&
+            requirement.verifySignature(proof.receipt.observerId, payload, signature)
+        });
+        outcomeProof = { required: true, evaluation, receipt: proof.receipt };
+      }
+    } catch {
+      // Malformed, stale, forged, or otherwise unevaluable proof fails closed.
+    }
+    checks.push({
+      name: 'required-independent-outcome-proof',
+      ok: bindingOk && evaluation?.verified === true,
+      detail: bindingOk && evaluation?.verified === true
+        ? 'A fresh signed receipt from a configured independent observer is bound to this task, action, plan generation, principal, and device.'
+        : 'This goal requires independent signed outcome proof, but no valid fresh task-bound receipt was supplied.'
+    });
+  }
   checks.push({
     name: 'no-inflight-actions',
     ok: activeRecords.length === 0,
@@ -155,6 +233,10 @@ export function verifyTaskCompletion(task: TaskCapsule): { ok: boolean; bundle: 
     succeededActions: execution?.records.filter((record) => record.state === 'SUCCEEDED').length ?? 0,
     interruptedActions: execution?.records.filter((record) => record.state === 'INTERRUPTED').length ?? 0,
     stateVersions,
+    ...(outcomeProof?.evaluation ? { outcomeProof: {
+      receiptDigest: outcomeProof.evaluation.receiptDigest,
+      disposition: outcomeProof.evaluation.disposition
+    } } : {}),
     checks
   };
   const { checks: _contractChecks, ...contract } = base;
@@ -170,6 +252,7 @@ export function verifyTaskCompletion(task: TaskCapsule): { ok: boolean; bundle: 
   return {
     ok,
     bundle,
+    ...(outcomeProof ? { outcomeProof } : {}),
     evidence: evidence(
       'independent_task_verification',
       ok ? 'pass' : 'fail',
@@ -182,10 +265,56 @@ export function verifyTaskCompletion(task: TaskCapsule): { ok: boolean; bundle: 
         actionRecords: bundle.actionRecords,
         succeededActions: bundle.succeededActions,
         stateVersionCount: bundle.stateVersions.length,
+        ...(bundle.outcomeProof ? { outcomeProof: bundle.outcomeProof } : {}),
         checks: checks.map(({ name, ok, detail }) => ({ name, ok, detail }))
       }
     )
   };
+}
+
+/** Produce the exact runtime binding an independent observer must certify.
+ * The action digest is derived from durable execution facts, never from a
+ * provider's success string or model-authored claim. */
+export function taskOutcomeProofBinding(task: TaskCapsule, domain: OutcomeDomain): TaskOutcomeProofBinding {
+  const goalDomain = outcomeDomainForGoalKind(task.execution?.goalKind ?? '');
+  if (goalDomain && goalDomain !== domain) throw new Error('Outcome proof domain does not match the typed goal.');
+  const records = task.execution?.records ?? [];
+  const terminal = [...records].reverse().find(record => record.state === 'SUCCEEDED' && record.risk !== 'read') ??
+    [...records].reverse().find(record => record.state === 'SUCCEEDED');
+  if (!terminal) throw new Error('Outcome proof requires a succeeded durable action record.');
+  const plan = task.execution?.plannerState.durablePlan;
+  const planGeneration = plan && typeof plan === 'object' && !Array.isArray(plan) &&
+    Number.isSafeInteger((plan as Record<string, unknown>).revision)
+    ? Number((plan as Record<string, unknown>).revision) : 1;
+  return {
+    domain,
+    planId: task.id,
+    planGeneration,
+    actionId: terminal.actionId,
+    actionDigest: sha256(canonicalJson({
+      taskId: task.id,
+      stepKey: terminal.stepKey,
+      actionId: terminal.actionId,
+      capability: terminal.capability,
+      risk: terminal.risk,
+      inputHash: terminal.inputHash,
+      attempt: terminal.attempt,
+      startedAt: terminal.startedAt,
+      finishedAt: terminal.finishedAt ?? null
+    })),
+    actionGeneration: terminal.attempt
+  };
+}
+
+function outcomeDomainForGoalKind(goalKind: string): OutcomeDomain | undefined {
+  if (goalKind === 'browser-navigation') return 'browser';
+  if (goalKind === 'browser-download') return 'download';
+  if (goalKind === 'app-operation') return 'application';
+  if (goalKind === 'controlled-file-change') return 'file-git';
+  if (goalKind === 'trusted-project-command' || goalKind === 'project-quality-gate') return 'build-test';
+  if (goalKind === 'docker-lifecycle') return 'docker';
+  if (goalKind === 'postgres-select') return 'trusted-database';
+  return undefined;
 }
 
 

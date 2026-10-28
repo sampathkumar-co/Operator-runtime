@@ -40,6 +40,7 @@ export * from './artifact-store.ts';
 export * from './artifact-object-store.ts';
 export * from './evidence-pack.ts';
 export * from './outcome-contract.ts';
+export * from './correlated-server-outcome.ts';
 export * from './workspace-graph.ts';
 export * from './developer-session.ts';
 export * from './control-center-model.ts';
