@@ -279,8 +279,10 @@ export class PostgresProvider implements CapabilityProvider {
       if (value.includes('\0')) throw new OperatorError('POSTGRES_PARAMETER_INVALID', 'PostgreSQL query parameters cannot contain NUL bytes.');
       args.push(`--set=${name}=${value}`);
     }
-    args.push('--command', sql);
-    const output = await runPsql(this.#psqlExecutable, args, cwd, profile, timeoutMs, signal);
+    // psql -c/--command bypasses client-side :variable interpolation. Read the
+    // fixed, bounded SQL template through psql's stdin parser instead.
+    args.push('--file=-');
+    const output = await runPsql(this.#psqlExecutable, args, cwd, profile, timeoutMs, signal, sql);
     if (output.truncated) throw new OperatorError('POSTGRES_OUTPUT_TOO_LARGE', 'PostgreSQL output exceeded the bounded response size.');
     return parseCsvObjects(output.stdout, MAX_ROWS);
   }
@@ -458,7 +460,7 @@ function psqlEnvironment(profile: Profile, timeoutMs: number): NodeJS.ProcessEnv
   return env;
 }
 
-async function runPsql(executable: string, args: string[], cwd: string, profile: Profile, timeoutMs: number, signal?: AbortSignal): Promise<PsqlOutput> {
+async function runPsql(executable: string, args: string[], cwd: string, profile: Profile, timeoutMs: number, signal: AbortSignal | undefined, sql: string): Promise<PsqlOutput> {
   return await new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new OperatorError('EXECUTION_ABORTED', 'PostgreSQL execution was cancelled.', { retryable: false }));
@@ -470,7 +472,7 @@ async function runPsql(executable: string, args: string[], cwd: string, profile:
       cwd,
       shell: false,
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
       env: environment
     });
     const stdout: Buffer[] = [];
@@ -489,6 +491,11 @@ async function runPsql(executable: string, args: string[], cwd: string, profile:
     };
     child.stdout.on('data', capture(stdout));
     child.stderr.on('data', capture(stderr));
+    // The SQL template contains only server-generated identifier/value placeholders;
+    // actual values stay in psql's --set variables and cannot become meta-commands.
+    // Early child exit may close stdin first; the process exit code still fails closed.
+    child.stdin.on('error', () => {});
+    child.stdin.end(sql + '\n', 'utf8');
     child.once('error', reject);
     const terminate = () => {
       try { child.kill('SIGTERM'); } catch { /* child may already be gone */ }
