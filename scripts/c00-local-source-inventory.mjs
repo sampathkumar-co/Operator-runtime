@@ -107,7 +107,12 @@ export async function inventoryLocalSource({root,showPaths=false}={}) {
     try {
       handle=await fs.open(abs,(await import('node:fs')).constants.O_RDONLY | nofollow);
       const fresh=await handle.stat();
-      if (!fresh.isFile() || fresh.size !== info.size || fresh.dev !== info.dev ||
+      // Node on Windows may report lstat.dev=0 but a real volume id for
+      // FileHandle.stat(). Preserve inode/size identity; compare devices when
+      // lstat actually supplied a device identity rather than a zero sentinel.
+      const deviceComparable = process.platform !== 'win32' || info.dev !== 0;
+      if (!fresh.isFile() || fresh.size !== info.size ||
+          (deviceComparable && fresh.dev !== info.dev) ||
           fresh.ino !== info.ino || fresh.size > MAX_BYTES_PER_FILE) {
         fail('File changed during read; inventory must be rerun.');
       }

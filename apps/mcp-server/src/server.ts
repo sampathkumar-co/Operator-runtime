@@ -666,6 +666,46 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     expectedRisk
   }, path));
 
+  // Private Developer surface only. The runtime-factory registers its provider
+  // strictly on explicit owner opt-in; this MCP route grants no capability,
+  // root, session, or approval authority on its own.
+  const worktreeSessionId = z.string().regex(/^[A-Za-z0-9._:@-]{1,128}$/);
+  const worktreeRepositoryRoot = z.string().min(1).max(4096);
+  const worktreeInput = z.discriminatedUnion('operation', [
+    z.object({
+      operation: z.literal('create'), sessionId: worktreeSessionId,
+      repositoryRoot: worktreeRepositoryRoot,
+      baseCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i)
+    }),
+    z.object({
+      operation: z.literal('inspect'), sessionId: worktreeSessionId,
+      repositoryRoot: worktreeRepositoryRoot
+    }),
+    z.object({
+      operation: z.literal('release'), sessionId: worktreeSessionId,
+      repositoryRoot: worktreeRepositoryRoot,
+      expectedFingerprint: z.string().regex(/^[0-9a-f]{64}$/i)
+    })
+  ]);
+  server.registerTool('workspace.worktree', {
+    title: 'Manage an explicitly enabled private Developer worktree',
+    description: 'Create, inspect, or release an owned isolated Git worktree with exact source and session identity. The private provider is disabled by default; this tool never grants worktree roots or approval authority. Releases require exact fingerprint and destructive-policy review.',
+    inputSchema: worktreeInput,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+  }, async (input) => {
+    const { sessionId, repositoryRoot } = input;
+    if (input.operation === 'inspect') {
+      return invoke('workspace.worktree.inspect', 'read',
+        { sessionId, repositoryRoot }, repositoryRoot);
+    }
+    if (input.operation === 'create') {
+      return invoke('workspace.worktree.create', 'write',
+        { sessionId, repositoryRoot, baseCommit: input.baseCommit }, repositoryRoot);
+    }
+    return invoke('workspace.worktree.release', 'destructive',
+      { sessionId, repositoryRoot, expectedFingerprint: input.expectedFingerprint }, repositoryRoot);
+  });
+
   server.registerTool('workspace.edit.resolve', {
     title: 'Resolve LSP edits into a transactional workspace plan',
     description: 'Resolve versioned LSP text-document edits against exact current SHA-256 document bytes. This is read-only: it returns an immutable multi-file plan and affected-test hints; applying the plan requires a separate workspace.edit write action.',

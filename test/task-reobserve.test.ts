@@ -272,7 +272,9 @@ class UncertainNoProgressBrowserProvider implements CapabilityProvider {
     return {
       ok: false, capability: action.capability, provider: this.name, evidence: [], durationMs: 1,
       error: { code: 'BROWSER_NO_PROGRESS', message: 'Cannot establish whether prior click applied.',
-        retryable: true,
+        // A dispatched uncertain mutation is never retryable, even when a provider
+        // signals no progress. The missing-receipt fixture remains separately adversarial.
+        retryable: !this.includeProviderEffectReceipt,
         ...(this.includeProviderEffectReceipt ? { sideEffectState: 'uncertain' as const, executionPhase: 'dispatched' as const } : {})
       }
     };
