@@ -19,8 +19,8 @@ async function makeFakePsql(t: test.TestContext, largeRows = 0): Promise<{ execu
 const fs = require('node:fs');
 const argv = process.argv.slice(2);
 const logPath = ${JSON.stringify(logPath)};
-const commandIndex = argv.indexOf('--command');
-const sql = commandIndex >= 0 ? argv[commandIndex + 1] : '';
+if (!argv.includes('--file=-') || argv.includes('--command')) process.exit(2);
+const sql = fs.readFileSync(0, 'utf8');
 fs.appendFileSync(logPath, JSON.stringify({
   argv,
   sql,
@@ -136,6 +136,8 @@ test('Structured SELECT keeps malicious values out of SQL text and parses bounde
   const calls = await readCalls(fake.logPath);
   assert.equal(calls.length, 1);
   assert.doesNotMatch(calls[0].sql, /DROP TABLE/);
+  assert.equal(calls[0].argv.includes('--file=-'), true, 'psql stdin parser must expand bound variables');
+  assert.equal(calls[0].argv.includes('--command'), false, 'psql -c bypasses variable interpolation');
   assert.match(calls[0].sql, /FROM :"op_schema"\.:"op_table"/);
   assert.equal(calls[0].argv.some((arg) => arg === `--set=op_filter_val_0=${malicious}`), true);
   assert.match(String(calls[0].env.PGOPTIONS), /default_transaction_read_only=on/);
