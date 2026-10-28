@@ -149,3 +149,40 @@ test('C02 capability schema collection must be literal, unique and bounded befor
   router.register({ ...provider(() => true), capabilitySchemas: () => [schema] });
   assert.deepEqual(await router.capabilitySchemas(action), [{ ...schema, provider: 'c02-fixture' }]);
 });
+
+test('C02 router never executes property getters in provider score objects', async () => {
+  let invoked = 0;
+  for (const key of [...Object.keys(score), 'unrelated']) {
+    const scored = { ...score } as Record<string, unknown>;
+    Object.defineProperty(scored, key, {
+      enumerable: true, get() { invoked++; return 1; }
+    });
+    const router = new CapabilityRouter();
+    router.register({
+      ...provider(() => true),
+      score: () => scored as unknown as CapabilityScore
+    });
+    await assert.rejects(router.rank(action), (error: any) =>
+      error?.code === 'PROVIDER_SCORE_CONTRACT_INVALID', 'getter score key ' + key);
+  }
+  assert.equal(invoked, 0, 'no accessor executes during route ranking');
+  const valid = new CapabilityRouter();
+  valid.register(provider(() => true));
+  assert.equal((await valid.rank(action))[0]?.provider.name, 'c02-fixture');
+});
+
+test('C02 provider score cannot be a class or an array masquerading as metrics', async () => {
+  class ScoreImpersonator {
+    constructor() { Object.assign(this, score); }
+  }
+  const values = [Object.assign([], score), new ScoreImpersonator(),
+    { ...score, security: Infinity }, { ...score, unused: 1 }];
+  for (const value of values) {
+    const router = new CapabilityRouter();
+    router.register({
+      ...provider(() => true), score: () => value as CapabilityScore
+    });
+    await assert.rejects(router.rank(action), (error: any) =>
+      error?.code === 'PROVIDER_SCORE_CONTRACT_INVALID');
+  }
+});
