@@ -12,6 +12,10 @@ export const CAPABILITY_RISK_RULES = Object.freeze<Record<string, CapabilityRisk
   'workspace.edit.transaction': 'write',
   'workspace.edit.rollback': 'destructive',
   'workspace.edit.resolve_lsp': 'read',
+  // Private developer workflow operations. Provider registration is separately opt-in.
+  'workspace.worktree.create': 'write',
+  'workspace.worktree.inspect': 'read',
+  'workspace.worktree.release': 'destructive',
   'file.read': 'read',
   'file.list': 'read',
   'file.write': 'write',
