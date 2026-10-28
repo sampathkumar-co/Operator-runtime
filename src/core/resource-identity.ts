@@ -145,7 +145,7 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
     if (risk !== action.risk || typeof sessionId !== 'string' ||
         !/^[A-Za-z0-9._:@-]{1,128}$/.test(sessionId) ||
         typeof repositoryRoot !== 'string' || !path.isAbsolute(repositoryRoot) ||
-        repositoryRoot.includes('\\0') || Buffer.byteLength(repositoryRoot, 'utf8') > 32768) {
+        repositoryRoot.includes('\0') || Buffer.byteLength(repositoryRoot, 'utf8') > 32768) {
       throw new OperatorError('RESOURCE_TARGET_INVALID',
         'Worktree resource identity needs an exact risk, session and absolute repository root.');
     }
