@@ -22,6 +22,15 @@ type Pending = {
 
 type EventListener = (params: JsonMap, sessionId?: string) => void;
 
+function isJsonObject(value: unknown): value is JsonMap {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isCdpError(value: unknown): value is { message: string; code?: number } {
+  return isJsonObject(value) && typeof value.message === 'string' && value.message.length > 0
+    && (value.code === undefined || (typeof value.code === 'number' && Number.isSafeInteger(value.code)));
+}
+
 export function assertLoopbackDebuggerUrl(raw: string): void {
   let url: URL;
   try { url = new URL(raw); } catch { throw new OperatorError('UNSAFE_CDP_WEBSOCKET', 'Invalid DevTools WebSocket URL.'); }
@@ -109,10 +118,19 @@ export class CdpConnection {
           clearTimeout(pending.timer);
           pending.detachAbort?.();
           this.#pending.delete(message.id);
-          if (message.error) {
-            pending.reject(new OperatorError('CDP_COMMAND_FAILED', message.error.message ?? 'CDP command failed.', { retryable: false, details: { code: message.error.code } }));
+          const hasError = Object.hasOwn(message, 'error');
+          const hasResult = Object.hasOwn(message, 'result');
+          if (hasError === hasResult || (hasResult && !isJsonObject(message.result)) || (hasError && !isCdpError(message.error))) {
+            // A reply without a valid outcome cannot prove the action succeeded.
+            // The command was already dispatched; its side effect is uncertain.
+            pending.reject(new OperatorError('CDP_RESPONSE_INVALID', 'Browser target returned a malformed command outcome.', {
+              retryable: false,
+              details: { executionPhase: 'post_dispatch', sideEffectState: 'unknown', remedy: 'reobserve_before_retry' }
+            }));
+          } else if (hasError) {
+            pending.reject(new OperatorError('CDP_COMMAND_FAILED', message.error!.message, { retryable: false, details: { code: message.error!.code } }));
           } else {
-            pending.resolve(message.result ?? {});
+            pending.resolve(message.result!);
           }
           return;
         }
@@ -143,8 +161,8 @@ export class CdpConnection {
   }
 
   async sendInSession(sessionId: string, method: string, params: JsonMap = {}, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<JsonMap> {
-    if (!sessionId || sessionId.length > 256) {
-      throw new OperatorError('INVALID_CDP_SESSION', 'Flattened CDP session id must contain 1-256 characters.');
+    if (typeof sessionId !== 'string' || !sessionId.length || sessionId.length > 256) {
+      throw new OperatorError('INVALID_CDP_SESSION', 'Flattened CDP session id must be a string of 1-256 characters.');
     }
     return this.#send(method, params, timeoutMs, sessionId, signal);
   }
