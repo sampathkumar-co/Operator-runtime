@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { buildWave0EvaluationReport } from './wave0-evaluation.mjs';
+import { requireFrozenEvaluationCases, requireInertEvaluationObject } from './c01-inert-evaluation-input.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -82,6 +83,13 @@ async function boundedExternalPhase(name, deadlineMs, invoke) {
 }
 
 export async function runPairedLaneC(input) {
+  requireInertEvaluationObject(input, deny, 'Lane C configuration');
+  // Fail before reading any callback getter or resetting even the first arm.
+  if (Object.getOwnPropertyDescriptor(input, 'cases')?.value !== undefined) {
+    requireFrozenEvaluationCases(Object.getOwnPropertyDescriptor(input, 'cases').value,
+      1, 200, deny, 'paired scenarios',
+      ['id','version','seed','objective','prompt','initialStateDigest','independentOracleDigest']);
+  }
   if (!validInput(input)) deny('A source-pinned model, fixed cases and three trusted evaluator callbacks are required.');
   const unique = new Set();
   for (const c of input.cases) {

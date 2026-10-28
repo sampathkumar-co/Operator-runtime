@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { validateWave0Record } from './wave0-evaluation.mjs';
+import { requireDenseEvaluationArray, requireInertEvaluationObject } from './c01-inert-evaluation-input.mjs';
 
 const SHA=/^[0-9a-f]{40}$/;
 const DIGEST=/^[0-9a-f]{64}$/;
@@ -47,6 +48,10 @@ function recordStep(value,index){
  * evaluation report. It cannot establish physical release acceptance.
  */
 export function createSanitizedEvaluationTrace(input) {
+ requireInertEvaluationObject(input, deny, 'step trace input');
+ requireDenseEvaluationArray(input.steps, 1, 1000, deny, 'step receipts');
+ for (const step of input.steps) requireInertEvaluationObject(step, deny, 'step receipt');
+ requireInertEvaluationObject(input.record, deny, 'scorer record');
  if(!input||typeof input!=='object'||typeof input.sourceCommit!=='string'||!SHA.test(input.sourceCommit)||
     !textId(input.runId)||typeof input.suiteDigest!=='string'||!DIGEST.test(input.suiteDigest)||
     !Array.isArray(input.steps)||input.steps.length<1||input.steps.length>1000||

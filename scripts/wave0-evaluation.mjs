@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { requireDenseEvaluationArray, requireInertEvaluationObject } from './c01-inert-evaluation-input.mjs';
 
 const LANES = Object.freeze(['A', 'B', 'C']);
 const SHA = /^[a-f0-9]{64}$/;
@@ -40,6 +41,7 @@ function safeSum(records, label) {
   }, 0);
 }
 export function validateWave0Record(record, sourceCommit) {
+  requireInertEvaluationObject(record, fail, 'run receipt');
   if (!record || typeof record !== 'object' || Array.isArray(record)) fail('record must be an object');
   const lane = record.lane;
   if (!LANES.includes(lane)) fail('unknown lane');
@@ -116,6 +118,18 @@ function identity(run) {
     ...(run.lane === 'C' ? [run.promptDigest, run.budgetDigest] : [])]);
 }
 export function buildWave0EvaluationReport({ sourceCommit, records = [], preregistered = null }) {
+  // A sparse run array can falsely claim campaign coverage when Array.map,
+  // every and some silently skip empty slots. Receipts must be inert before
+  // the independent scorer reads any of their fields.
+  requireDenseEvaluationArray(records, 0, 10000, fail, 'evaluation runs');
+  for (const record of records) requireInertEvaluationObject(record, fail, 'run receipt');
+  if (preregistered !== null) {
+    requireInertEvaluationObject(preregistered, fail, 'preregistered campaign');
+    requireDenseEvaluationArray(preregistered.expectedScenarioIds, 50, 10000,
+      fail, 'preregistered suite scenarios');
+    requireDenseEvaluationArray(preregistered.expectedSeeds, 3, 1000,
+      fail, 'preregistered suite seeds');
+  }
   if (typeof sourceCommit !== 'string' || !COMMIT.test(sourceCommit)) fail('sourceCommit must be exact 40-digit git SHA');
   if (!Array.isArray(records) || records.length > 10000) fail('runs must be a bounded array');
   const valid = records.map(x => validateWave0Record(x, sourceCommit));

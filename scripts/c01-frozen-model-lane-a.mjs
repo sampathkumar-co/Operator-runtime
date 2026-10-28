@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { buildWave0EvaluationReport } from './wave0-evaluation.mjs';
+import { requireDenseEvaluationArray, requireFrozenEvaluationCases, requireInertEvaluationObject } from './c01-inert-evaluation-input.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
 const HASH = /^[0-9a-f]{64}$/;
@@ -50,6 +51,15 @@ function snapshot(input) {
  * and provenance certification are completed by the separate acceptance gate.
  */
 export async function runFrozenModelLaneA(input) {
+  requireInertEvaluationObject(input, fail, 'Lane A configuration');
+  requireFrozenEvaluationCases(input.cases, 1, 200, fail, 'model-only cases',
+    ['id','version','seed','observation','choices','correctChoiceId']);
+  for (const item of input.cases) {
+    requireDenseEvaluationArray(item.choices, 2, 10, fail, 'model-only choices');
+    for (const choice of item.choices) {
+      requireInertEvaluationObject(choice, fail, 'model-only choice', ['id','description']);
+    }
+  }
   if (!input || typeof input !== 'object' || !SHA.test(input.sourceCommit) ||
       !HASH.test(input.runnerDigest) || !HASH.test(input.modelConfigDigest) ||
       !HASH.test(input.environmentDigest) ||
