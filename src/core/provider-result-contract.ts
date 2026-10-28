@@ -1,4 +1,4 @@
-import type { ActionRequest, ActionResult, ProviderReconciliationResult } from './types.ts';
+import type { ActionRequest, ActionResult, ProviderReconciliationResult, RecoveryRemedy } from './types.ts';
 import { OperatorError } from './errors.ts';
 
 /**
@@ -31,6 +31,61 @@ function inertEvidenceArray(value: unknown, reject: () => never): Record<string,
   return entries;
 }
 
+const RESULT_FIELDS = new Set(['ok', 'capability', 'provider', 'output', 'evidence', 'error', 'durationMs']);
+const EVIDENCE_FIELDS = new Set(['kind', 'status', 'message', 'data', 'timestamp']);
+const ERROR_FIELDS = new Set([
+  'code', 'message', 'retryable', 'sideEffectState', 'executionPhase', 'epistemicStatus', 'details'
+]);
+const RECONCILIATION_FIELDS = new Set(['status', 'result', 'evidence']);
+const RECOVERY_REMEDIES = new Set<RecoveryRemedy>([
+  'reobserve_before_retry',
+  'reobserve_dialog_do_not_retry',
+  'reobserve_tab_focus_before_retry',
+  'select_page_target',
+  'select_target_id_from_current_tabs',
+  'close_the_dialog_manually_then_reobserve'
+]);
+
+function exactFields(record: Record<string, unknown>, allowed: ReadonlySet<string>, reject: () => never): void {
+  for (const key of Reflect.ownKeys(record)) {
+    if (typeof key !== 'string' || !allowed.has(key)) reject();
+  }
+}
+
+/** Provider-owned payloads cross a trust boundary. Permit bounded JSON data,
+ * but never accessors, custom prototypes, sparse arrays, symbols or cycles. */
+function inertJson(value: unknown, reject: () => never): void {
+  const seen = new Set<object>();
+  let nodes = 0;
+  const visit = (item: unknown, depth: number): void => {
+    if (++nodes > 20_000 || depth > 32) reject();
+    if (item === null || typeof item === 'string' || typeof item === 'boolean') return;
+    if (typeof item === 'number') { if (!Number.isFinite(item)) reject(); return; }
+    if (typeof item !== 'object') reject();
+    if (seen.has(item as object)) reject();
+    seen.add(item as object);
+    if (Array.isArray(item)) {
+      if (Object.getPrototypeOf(item) !== Array.prototype || item.length > 10_000 ||
+          Reflect.ownKeys(item).length !== item.length + 1) reject();
+      for (let index = 0; index < item.length; index++) {
+        const field = Object.getOwnPropertyDescriptor(item, String(index));
+        if (!field || !field.enumerable || !('value' in field)) reject();
+        visit(field.value, depth + 1);
+      }
+    } else {
+      if (Object.getPrototypeOf(item) !== Object.prototype && Object.getPrototypeOf(item) !== null) reject();
+      if (Reflect.ownKeys(item).length > 10_000) reject();
+      for (const key of Reflect.ownKeys(item)) {
+        const field = Object.getOwnPropertyDescriptor(item, key);
+        if (typeof key !== 'string' || !field || !field.enumerable || !('value' in field)) reject();
+        visit(field.value, depth + 1);
+      }
+    }
+    seen.delete(item as object);
+  };
+  visit(value, 0);
+}
+
 /**
  * Verify the result returned by a leaf provider before the router can treat it
  * as proof of a completed user action. This is independent from the provider's
@@ -51,6 +106,7 @@ export function assertProviderResultContract(
       });
   };
   const result = inertReceiptRecord(input, reject);
+  exactFields(result, RESULT_FIELDS, reject);
   const receipts = inertEvidenceArray(result.evidence, reject);
   if (typeof action.capability !== 'string' || typeof providerName !== 'string' ||
       result.capability !== action.capability || result.provider !== providerName ||
@@ -61,6 +117,7 @@ export function assertProviderResultContract(
       !Array.isArray(result.evidence) || result.evidence.length > 256) reject();
 
   for (const evidence of receipts) {
+    exactFields(evidence, EVIDENCE_FIELDS, reject);
     if (typeof evidence.kind !== 'string' || !evidence.kind ||
         evidence.kind.length > 128 ||
         (typeof evidence.status !== 'string' || !['pass','fail','info'].includes(evidence.status)) ||
@@ -69,11 +126,15 @@ export function assertProviderResultContract(
         typeof evidence.timestamp !== 'string' ||
         !Number.isFinite(Date.parse(evidence.timestamp)) ||
         new Date(evidence.timestamp).toISOString() !== evidence.timestamp) reject();
+    if (evidence.data !== undefined) inertJson(evidence.data, reject);
   }
+
+  if (result.output !== undefined) inertJson(result.output, reject);
 
   if (result.ok === true && result.error !== undefined) reject();
   if (result.error !== undefined) {
     const error = inertReceiptRecord(result.error, reject);
+    exactFields(error, ERROR_FIELDS, reject);
     if (typeof error.code !== 'string' || !/^[A-Z][A-Z0-9_]{1,127}$/.test(error.code) ||
         typeof error.message !== 'string' || error.message.length > 8192 ||
         (error.retryable !== undefined && typeof error.retryable !== 'boolean')) reject();
@@ -81,6 +142,15 @@ export function assertProviderResultContract(
         (typeof error.sideEffectState !== 'string' || !['none','known','uncertain'].includes(error.sideEffectState))) reject();
     if (error.executionPhase !== undefined &&
         (typeof error.executionPhase !== 'string' || !['pre_dispatch','dispatched','effect_observed','reconciled'].includes(error.executionPhase))) reject();
+    if (error.epistemicStatus !== undefined &&
+        (typeof error.epistemicStatus !== 'string' || !['UNKNOWN','AMBIGUOUS','CONTRADICTED','UNAVAILABLE','UNAUTHORIZED','EXECUTION_UNCERTAIN','VERIFIED_FALSE'].includes(error.epistemicStatus))) reject();
+    if (error.retryable === true && error.sideEffectState === 'uncertain') reject();
+    if (error.details !== undefined) {
+      inertJson(error.details, reject);
+      const details = error.details as Record<string, unknown>;
+      if (details.remedy !== undefined &&
+          (typeof details.remedy !== 'string' || !RECOVERY_REMEDIES.has(details.remedy as RecoveryRemedy))) reject();
+    }
   }
   return input as ActionResult;
 }
@@ -103,6 +173,7 @@ export function assertProviderReconciliationContract(
       });
   };
   const value = inertReceiptRecord(input, reject);
+  exactFields(value, RECONCILIATION_FIELDS, reject);
   inertEvidenceArray(value.evidence, reject);
   if (!['completed','not_applied','uncertain'].includes(value.status as string) ||
       !Array.isArray(value.evidence) || value.evidence.length > 256) reject();

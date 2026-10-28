@@ -125,7 +125,7 @@ export class CdpConnection {
             // The command was already dispatched; its side effect is uncertain.
             pending.reject(new OperatorError('CDP_RESPONSE_INVALID', 'Browser target returned a malformed command outcome.', {
               retryable: false,
-              details: { executionPhase: 'post_dispatch', sideEffectState: 'unknown', remedy: 'reobserve_before_retry' }
+              details: { executionPhase: 'dispatched', sideEffectState: 'uncertain', remedy: 'reobserve_before_retry' }
             }));
           } else if (hasError) {
             pending.reject(new OperatorError('CDP_COMMAND_FAILED', message.error!.message, { retryable: false, details: { code: message.error!.code } }));
@@ -144,7 +144,7 @@ export class CdpConnection {
 
     this.#socket.addEventListener('close', () => {
       this.#closed = true;
-      const error = new OperatorError('CDP_CONNECTION_CLOSED', 'Browser target connection closed.', { retryable: true });
+      const error = dispatchedFailure('CDP_CONNECTION_CLOSED', 'Browser target connection closed while a command was in flight.');
       for (const pending of this.#pending.values()) {
         clearTimeout(pending.timer);
         pending.detachAbort?.();
@@ -179,14 +179,14 @@ export class CdpConnection {
       const timer = setTimeout(() => {
         this.#pending.delete(id);
         signal?.removeEventListener('abort', onAbort);
-        reject(new OperatorError('CDP_COMMAND_TIMEOUT', `${method} timed out.`, { retryable: true }));
+        reject(dispatchedFailure('CDP_COMMAND_TIMEOUT', `${method} timed out after dispatch.`));
       }, timeoutMs);
       const onAbort = () => {
         const pending = this.#pending.get(id);
         if (!pending) return;
         clearTimeout(pending.timer);
         this.#pending.delete(id);
-        reject(aborted());
+        reject(dispatchedFailure('EXECUTION_ABORTED', 'Browser execution was cancelled after command dispatch.'));
       };
       signal?.addEventListener('abort', onAbort, { once: true });
       this.#pending.set(id, { resolve, reject, timer, ...(signal ? { detachAbort: () => signal.removeEventListener('abort', onAbort) } : {}) });
@@ -240,6 +240,13 @@ async function waitForReadyOrAbort(ready: Promise<void>, signal?: AbortSignal): 
 
 function aborted(): OperatorError {
   return new OperatorError('EXECUTION_ABORTED', 'Browser execution was cancelled.', { retryable: false });
+}
+
+function dispatchedFailure(code: string, message: string): OperatorError {
+  return new OperatorError(code, message, {
+    retryable: false,
+    details: { executionPhase: 'dispatched', sideEffectState: 'uncertain', remedy: 'reobserve_before_retry' }
+  });
 }
 
 export class CdpSessionManager {

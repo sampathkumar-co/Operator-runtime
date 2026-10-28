@@ -67,8 +67,25 @@ test('C03 missing/coerced/contradictory CDP command outcomes never become succes
     await assert.rejects(promise, (error: any) =>
       error?.code === 'CDP_RESPONSE_INVALID' &&
       error?.retryable === false &&
-      error?.details?.executionPhase === 'post_dispatch' &&
-      error?.details?.sideEffectState === 'unknown' &&
+      error?.details?.executionPhase === 'dispatched' &&
+      error?.details?.sideEffectState === 'uncertain' &&
+      error?.details?.remedy === 'reobserve_before_retry');
+  }
+});
+
+test('C03 timeout, cancellation and transport close after CDP dispatch are uncertain and never retryable', async t => {
+  const cases = ['timeout', 'abort', 'close'] as const;
+  for (const kind of cases) {
+    const { connection, socket } = setup(t);
+    const controller = new AbortController();
+    const promise = connection.send('Input.dispatchMouseEvent', {}, kind === 'timeout' ? 10 : 8_000, controller.signal);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    if (kind === 'abort') controller.abort();
+    else if (kind === 'close') socket.emit('close');
+    await assert.rejects(promise, (error: any) =>
+      error?.retryable === false &&
+      error?.details?.executionPhase === 'dispatched' &&
+      error?.details?.sideEffectState === 'uncertain' &&
       error?.details?.remedy === 'reobserve_before_retry');
   }
 });
