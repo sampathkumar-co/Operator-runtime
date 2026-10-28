@@ -161,28 +161,61 @@ export class CapabilityRouter {
     const schemas: Array<ProviderCapabilitySchema & { provider: string }> = [];
     for (const provider of this.#providers) {
       if (!provider.capabilitySchemas || !await providerSupports(provider, action)) continue;
-      const declarations = provider.capabilitySchemas();
-      if (!Array.isArray(declarations) || declarations.length > 256 ||
-          declarations.some((entry) => !entry || typeof entry !== 'object' || Array.isArray(entry) ||
-            typeof entry.capability !== 'string' ||
-            !/^[A-Za-z][A-Za-z0-9._:-]{0,255}$/.test(entry.capability))) {
+      const invalid = (): never => {
         throw new OperatorError('CAPABILITY_SCHEMA_INVALID',
           `Provider ${provider.name} returned an invalid capability schema collection.`);
-      }
-      const declared = declarations.filter((entry) => entry.capability === action.capability);
-      if (declared.length > 1) {
-        throw new OperatorError('CAPABILITY_SCHEMA_INVALID',
-          `Provider ${provider.name} declared the same operation schema multiple times.`);
-      }
-      for (const entry of declared) {
-        if (!entry || entry.inputSchemaVersion !== 1 || entry.cancellation !== 'required'
-          || !['read', 'write', 'external', 'system', 'destructive', 'dynamic'].includes(entry.risk)
-          || !Number.isSafeInteger(entry.inputMaxBytes) || entry.inputMaxBytes < 1
-          || entry.inputMaxBytes > 4 * 1024 * 1024 || !Array.isArray(entry.resourceKinds)
-          || entry.resourceKinds.some((kind: unknown) => typeof kind !== 'string' || kind.length < 1 || kind.length > 128)) {
-          throw new OperatorError('CAPABILITY_SCHEMA_INVALID', `Provider ${provider.name} returned an invalid capability schema.`);
+      };
+      const declarations = provider.capabilitySchemas();
+      if (!Array.isArray(declarations) || declarations.length > 256 ||
+          Object.getPrototypeOf(declarations) !== Array.prototype ||
+          Reflect.ownKeys(declarations).length !== declarations.length + 1) invalid();
+      const seen = new Set<string>();
+      for (let index = 0; index < declarations.length; index++) {
+        const descriptor = Object.getOwnPropertyDescriptor(declarations, String(index));
+        const raw = descriptor?.value;
+        if (!descriptor || !descriptor.enumerable || !('value' in descriptor) ||
+            !raw || typeof raw !== 'object' || Array.isArray(raw) ||
+            (Object.getPrototypeOf(raw) !== Object.prototype &&
+             Object.getPrototypeOf(raw) !== null)) invalid();
+        const fields = Reflect.ownKeys(raw);
+        const allowed = ['capability','risk','inputSchemaVersion','inputMaxBytes','cancellation','resourceKinds'];
+        if (fields.length !== allowed.length ||
+            fields.some(key => typeof key !== 'string' || !allowed.includes(key))) invalid();
+        const value: Record<string, unknown> = {};
+        for (const key of allowed) {
+          const field = Object.getOwnPropertyDescriptor(raw, key);
+          if (!field || !field.enumerable || !('value' in field)) invalid();
+          value[key] = field.value;
         }
-        schemas.push({ ...structuredClone(entry), provider: provider.name });
+        const capability = value.capability;
+        if (typeof capability !== 'string' ||
+            !/^[A-Za-z][A-Za-z0-9._:-]{0,255}$/.test(capability) ||
+            seen.has(capability)) invalid();
+        seen.add(capability);
+        const kinds = value.resourceKinds;
+        if (!Array.isArray(kinds) || kinds.length > 128 ||
+            Object.getPrototypeOf(kinds) !== Array.prototype ||
+            Reflect.ownKeys(kinds).length !== kinds.length + 1) invalid();
+        const inertKinds: string[] = [];
+        for (let i = 0; i < kinds.length; i++) {
+          const field = Object.getOwnPropertyDescriptor(kinds, String(i));
+          if (!field || !field.enumerable || !('value' in field) ||
+              typeof field.value !== 'string' || field.value.length < 1 ||
+              field.value.length > 128) invalid();
+          inertKinds.push(field.value);
+        }
+        if (value.inputSchemaVersion !== 1 || value.cancellation !== 'required' ||
+            !['read','write','external','system','destructive','dynamic'].includes(value.risk as string) ||
+            !Number.isSafeInteger(value.inputMaxBytes) ||
+            (value.inputMaxBytes as number) < 1 ||
+            (value.inputMaxBytes as number) > 4 * 1024 * 1024) invalid();
+        if (capability === action.capability) {
+          schemas.push({
+            capability, risk: value.risk as ProviderCapabilitySchema['risk'],
+            inputSchemaVersion: 1, inputMaxBytes: value.inputMaxBytes as number,
+            cancellation: 'required', resourceKinds: inertKinds, provider: provider.name
+          });
+        }
       }
     }
     return schemas.sort((a, b) => a.provider.localeCompare(b.provider));
