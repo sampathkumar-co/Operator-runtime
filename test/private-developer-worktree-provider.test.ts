@@ -59,8 +59,7 @@ test('C06 private worktree provider is source-only and not registered through th
     sessionId: 'source-only', repositoryRoot: fx.repositoryRoot, baseCommit: fx.baseCommit
   }), { allowedCapabilities: ['workspace.worktree.create'], allowedRoots: [fx.repositoryRoot] });
   assert.equal(result.ok, false);
-  assert.equal(result.error?.code === 'CAPABILITY_RISK_UNREGISTERED' ||
-    result.error?.code === 'NO_PROVIDER', true,
+  assert.equal(result.error?.code, 'CAPABILITY_UNAVAILABLE',
     'private provider must not silently widen production runtime surface');
 });
 
