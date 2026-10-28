@@ -22,6 +22,8 @@ export interface ControlCenterRuntimeStatus {
     updatedAt?: string;
     ageMs?: number;
     freshness: RuntimeFreshness;
+    sourceCommit?: string;
+    sourceCompatibility: VersionCompatibility;
     code?: string;
   };
   capabilities: { count: number; names: string[] };
@@ -61,7 +63,7 @@ export function buildControlCenterRuntimeStatus(input: {
   const rawRuntime = record(input.runtimeStatus);
   const packageVersion = optionalSemver(rawRuntime.packageVersion);
   const sourceCommit = optionalCommit(rawRuntime.sourceCommit);
-  const relay = relayProjection(rawRuntime.relay, observedMs);
+  const relay = relayProjection(rawRuntime.relay, observedMs, sourceCommit);
   const names = capabilityNames(input.supportedCapabilities);
   const authorizedRootCount = safeCount(input.authorizedRootCount, 'authorizedRootCount');
   const optionalFeatures = featureProjection(input.settings);
@@ -83,7 +85,7 @@ export function buildControlCenterRuntimeStatus(input: {
   };
 }
 
-function relayProjection(input: unknown, observedMs: number): ControlCenterRuntimeStatus['relay'] {
+function relayProjection(input: unknown, observedMs: number, localSourceCommit?: string): ControlCenterRuntimeStatus['relay'] {
   const raw = record(input);
   const configured = raw.configured === true;
   const required = raw.required === true;
@@ -103,6 +105,12 @@ function relayProjection(input: unknown, observedMs: number): ControlCenterRunti
       : ageMs <= FRESH_MS ? 'FRESH'
         : ageMs <= STALE_MS ? 'AGING' : 'STALE';
   const code = typeof raw.code === 'string' && CODE.test(raw.code) ? raw.code : undefined;
+  const relayCommit = optionalCommit(raw.sourceCommit);
+  // Never assert source parity from an absent, stale, or disconnected relay.
+  const sourceCompatibility: VersionCompatibility =
+    !relayCommit || !localSourceCommit || freshness === 'STALE' ||
+    freshness === 'UNKNOWN' || state !== 'READY'
+      ? 'UNKNOWN' : relayCommit === localSourceCommit ? 'MATCH' : 'MISMATCH';
   return {
     state,
     configured,
@@ -110,6 +118,8 @@ function relayProjection(input: unknown, observedMs: number): ControlCenterRunti
     continuity,
     ...(updatedAt ? { updatedAt, ageMs } : {}),
     freshness,
+    ...(relayCommit ? { sourceCommit: relayCommit } : {}),
+    sourceCompatibility,
     ...(code ? { code } : {})
   };
 }
