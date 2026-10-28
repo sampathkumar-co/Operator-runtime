@@ -2,6 +2,36 @@ import type { ActionRequest, ActionResult, ProviderReconciliationResult } from '
 import { OperatorError } from './errors.ts';
 
 /**
+ * A provider is a less-trusted execution boundary: getters and sparse arrays
+ * must never be treated as receipts or executed while validating evidence.
+ * Validate own data descriptors before reading ANY authority-bearing fields.
+ */
+function inertReceiptRecord(value: unknown, reject: () => never): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      (Object.getPrototypeOf(value) !== Object.prototype &&
+       Object.getPrototypeOf(value) !== null)) reject();
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (typeof key !== 'string' || !descriptor || !descriptor.enumerable ||
+        !('value' in descriptor)) reject();
+  }
+  return value as Record<string, unknown>;
+}
+
+function inertEvidenceArray(value: unknown, reject: () => never): Record<string, unknown>[] {
+  if (!Array.isArray(value) || value.length > 256 ||
+      Object.getPrototypeOf(value) !== Array.prototype ||
+      Reflect.ownKeys(value).length !== value.length + 1) reject();
+  const entries: Record<string, unknown>[] = [];
+  for (let index = 0; index < value.length; index++) {
+    const item = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!item || !item.enumerable || !('value' in item)) reject();
+    entries.push(inertReceiptRecord(item.value, reject));
+  }
+  return entries;
+}
+
+/**
  * Verify the result returned by a leaf provider before the router can treat it
  * as proof of a completed user action. This is independent from the provider's
  * own support and schema implementation. A provider bug must not be converted
@@ -20,8 +50,8 @@ export function assertProviderResultContract(
         details: { executionPhase: 'dispatched', sideEffectState: 'uncertain' }
       });
   };
-  if (!input || typeof input !== 'object' || Array.isArray(input)) reject();
-  const result = input as Record<string, unknown>;
+  const result = inertReceiptRecord(input, reject);
+  const receipts = inertEvidenceArray(result.evidence, reject);
   if (typeof action.capability !== 'string' || typeof providerName !== 'string' ||
       result.capability !== action.capability || result.provider !== providerName ||
       typeof result.ok !== 'boolean' ||
@@ -30,9 +60,7 @@ export function assertProviderResultContract(
       result.durationMs > 24 * 60 * 60_000 ||
       !Array.isArray(result.evidence) || result.evidence.length > 256) reject();
 
-  for (const entry of result.evidence as unknown[]) {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) reject();
-    const evidence = entry as Record<string, unknown>;
+  for (const evidence of receipts) {
     if (typeof evidence.kind !== 'string' || !evidence.kind ||
         evidence.kind.length > 128 ||
         (typeof evidence.status !== 'string' || !['pass','fail','info'].includes(evidence.status)) ||
@@ -45,8 +73,7 @@ export function assertProviderResultContract(
 
   if (result.ok === true && result.error !== undefined) reject();
   if (result.error !== undefined) {
-    if (!result.error || typeof result.error !== 'object' || Array.isArray(result.error)) reject();
-    const error = result.error as Record<string, unknown>;
+    const error = inertReceiptRecord(result.error, reject);
     if (typeof error.code !== 'string' || !/^[A-Z][A-Z0-9_]{1,127}$/.test(error.code) ||
         typeof error.message !== 'string' || error.message.length > 8192 ||
         (error.retryable !== undefined && typeof error.retryable !== 'boolean')) reject();
@@ -75,8 +102,8 @@ export function assertProviderReconciliationContract(
         details: { executionPhase: 'reconciled', sideEffectState: 'uncertain' }
       });
   };
-  if (!input || typeof input !== 'object' || Array.isArray(input)) reject();
-  const value = input as Record<string, unknown>;
+  const value = inertReceiptRecord(input, reject);
+  inertEvidenceArray(value.evidence, reject);
   if (!['completed','not_applied','uncertain'].includes(value.status as string) ||
       !Array.isArray(value.evidence) || value.evidence.length > 256) reject();
 
