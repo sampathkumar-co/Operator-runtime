@@ -45,7 +45,7 @@ test('C00 real runtime registration produces an honest non-execution source cens
   const report = await censusCurrentGitCheckout();
   assert.match(report.sourceCommit, /^[0-9a-f]{40}$/);
   assert.ok(report.runtimeRegisteredProviderCount >= 15);
-  assert.equal(report.declaredBuiltInRiskCount, 52);
+  assert.equal(report.declaredBuiltInRiskCount, 55);
   assert.equal(report.providers.length, report.runtimeRegisteredProviderCount);
   assert.equal(report.providers.every(p => p.emptyInputDeclaredSupports.every(op =>
     op.verification === 'NOT_TESTED' && op.platformCertification === 'NOT_TESTED')), true);

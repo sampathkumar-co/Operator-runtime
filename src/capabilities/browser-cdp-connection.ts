@@ -128,7 +128,7 @@ export class CdpConnection {
               details: { executionPhase: 'dispatched', sideEffectState: 'uncertain', remedy: 'reobserve_before_retry' }
             }));
           } else if (hasError) {
-            pending.reject(new OperatorError('CDP_COMMAND_FAILED', message.error!.message, { retryable: false, details: { code: message.error!.code } }));
+            pending.reject(new OperatorError('CDP_COMMAND_FAILED', (message.error!.message ?? 'DevTools command failed.'), { retryable: false, details: { code: message.error!.code } }));
           } else {
             pending.resolve(message.result!);
           }
