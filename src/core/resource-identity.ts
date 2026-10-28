@@ -21,6 +21,7 @@ export const RESOURCE_EXTRACTOR_CAPABILITIES = Object.freeze([
   'file.read', 'file.list', 'file.write', 'file.create', 'file.replace', 'file.info', 'file.search', 'file.manage',
   'document.inspect', 'document.extract', 'document.render', 'structured.inspect', 'structured.extract', 'structured.render',
   'workspace.edit.resolve_lsp', 'workspace.edit.transaction', 'workspace.edit.rollback',
+  'workspace.worktree.create', 'workspace.worktree.inspect', 'workspace.worktree.release',
   'git.status', 'git.diff', 'git.rev-parse', 'git.checkpoint.inspect', 'git.checkpoint.create', 'git.checkpoint.restore', 'git.write',
   'docker.inspect', 'docker.manage', 'compute.run', 'postgres.inspect', 'postgres.select',
   'vscode.inspect', 'vscode.open', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage',
@@ -75,6 +76,7 @@ export function resourcePathOperandsForAction(action: ActionRequest): string[] {
   if (action.capability === 'file.manage') values.push(input.path, input.source, input.destination);
   else if (action.capability.startsWith('file.')) values.push(input.path);
   else if (action.capability.startsWith('document.') || action.capability.startsWith('structured.')) values.push(input.path);
+  else if (action.capability.startsWith('workspace.worktree.')) values.push(inertNamespaceInput(input, 'repositoryRoot'));
   else if (action.capability === 'workspace.edit.resolve_lsp' || action.capability === 'workspace.edit.rollback') values.push(input.workspaceRoot);
   else if (action.capability === 'workspace.edit.transaction') {
     const root = input.workspaceRoot;
@@ -92,14 +94,14 @@ export function resourcePathOperandsForAction(action: ActionRequest): string[] {
   else if (action.capability.startsWith('postgres.')) values.push(input.path);
   else if (action.capability === 'vscode.open') values.push(input.path, input.leftPath, input.rightPath);
   else if (action.capability === 'terminal.execute') values.push(input.cwd, ...terminalAffectedPaths(action));
-  else if (action.capability === 'terminal.session' && input.operation === 'start') values.push(input.cwd, ...terminalAffectedPaths(action));
+  else if (action.capability === 'terminal.session' && inertNamespaceInput(input, 'operation') === 'start') values.push(input.cwd, ...terminalAffectedPaths(action));
   return [...new Set(values.filter((value): value is string => typeof value === 'string' && value.length > 0 && !value.includes('\0')))];
 }
 
 /** Host paths whose contents may change, distinct from authorization-only operands such as terminal cwd. */
 function resourceEffectPathOperandsForAction(action: ActionRequest): string[] {
   if (action.capability === 'terminal.execute'
-    || (action.capability === 'terminal.session' && action.input.operation === 'start')) {
+    || (action.capability === 'terminal.session' && inertNamespaceInput(action.input, 'operation') === 'start')) {
     return terminalAffectedPaths(action);
   }
   return resourcePathOperandsForAction(action);
@@ -136,6 +138,19 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
         if (typeof file?.path === 'string') add('file', path.join(root, ...file.path.split('/')), keys);
       }
     }
+  } else if (action.capability.startsWith('workspace.worktree.')) {
+    const sessionId = inertNamespaceInput(input, 'sessionId');
+    const repositoryRoot = inertNamespaceInput(input, 'repositoryRoot');
+    const risk = CAPABILITY_RISK_RULES[action.capability];
+    if (risk !== action.risk || typeof sessionId !== 'string' ||
+        !/^[A-Za-z0-9._:@-]{1,128}$/.test(sessionId) ||
+        typeof repositoryRoot !== 'string' || !path.isAbsolute(repositoryRoot) ||
+        repositoryRoot.includes('\0') || Buffer.byteLength(repositoryRoot, 'utf8') > 32768) {
+      throw new OperatorError('RESOURCE_TARGET_INVALID',
+        'Worktree resource identity needs an exact risk, session and absolute repository root.');
+    }
+    keys.add('developer-worktree:session:' + sessionId);
+    add('repo', repositoryRoot, keys);
   } else if (action.capability.startsWith('git.')) {
     add('repo', input.cwd, keys);
   } else if (action.capability.startsWith('project.')) {
@@ -162,18 +177,22 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
     if (affected.length === 0) keys.add('filesystem:any');
     else for (const affectedPath of affected) add('file', affectedPath, keys);
   } else if (action.capability === 'terminal.session') {
-    if (input.operation === 'start') {
+    if (inertNamespaceInput(input, 'operation') === 'start') {
       const affected = terminalAffectedPaths(action);
       if (affected.length === 0) keys.add('filesystem:any');
       else for (const affectedPath of affected) add('file', affectedPath, keys);
-      if (input.ports !== undefined) {
-        if (!Array.isArray(input.ports) || input.ports.length > 128) {
-          throw new OperatorError('RESOURCE_TARGET_INVALID', 'Terminal session port declarations are invalid.');
+      const ports = inertNamespaceInput(input, 'ports');
+      if (ports !== undefined) {
+        if (!Array.isArray(ports) || ports.length > 128 ||
+            Object.getPrototypeOf(ports) !== Array.prototype ||
+            Reflect.ownKeys(ports).length !== ports.length + 1) {
+          throw new OperatorError('RESOURCE_TARGET_INVALID', 'Terminal session ports must be a dense inert array.');
         }
-        // Provider dispatch already requires literal 1..65535 ports. Do
-        // not run caller valueOf()/toString() while computing resource locks.
-        for (const port of input.ports) {
-          if (typeof port !== 'number' || !Number.isSafeInteger(port) ||
+        for (let index = 0; index < ports.length; index++) {
+          const entry = Object.getOwnPropertyDescriptor(ports, String(index));
+          const port = entry?.value;
+          if (!entry || !entry.enumerable || !('value' in entry) ||
+              typeof port !== 'number' || !Number.isSafeInteger(port) ||
               port < 1 || port > 65535) {
             throw new OperatorError('RESOURCE_TARGET_INVALID', 'Terminal port identity must be a literal number.');
           }
@@ -231,57 +250,18 @@ export async function resolvePhysicalResourceKeysForAction(action: ActionRequest
 }
 
 /**
- * Private C06 worktree identity contract. Do NOT add these capabilities to
- * RESOURCE_EXTRACTOR_CAPABILITIES or the public runtime until their canonical
- * risks, authorization paths and provider registration have been reviewed.
- *
- * Uses the same physical-directory resolution as ordinary Git actions, so a
- * symlinked ancestor cannot create an unrelated lock domain for the same
- * repository. A stable session key also conflicts before a path can be read.
+ * C06 compatibility wrapper. Private caller and canonical task scheduler use
+ * exactly the same source-bound physical resource and session keys. This
+ * function cannot register a provider or grant execution authority.
  */
 export async function privateDeveloperWorktreeResourceKeysForAction(
   action: ActionRequest
 ): Promise<string[]> {
-  const risks: Record<string, 'read' | 'write' | 'destructive'> = {
-    'workspace.worktree.create': 'write',
-    'workspace.worktree.inspect': 'read',
-    'workspace.worktree.release': 'destructive'
-  };
-  if (!Object.prototype.hasOwnProperty.call(risks, action.capability) ||
-      risks[action.capability] !== action.risk) {
-    throw new OperatorError('RESOURCE_TARGET_INVALID',
-      'Worktree capability has no matching private canonical risk contract.');
+  if (!['workspace.worktree.create','workspace.worktree.inspect','workspace.worktree.release']
+    .includes(action.capability)) {
+    throw new OperatorError('RESOURCE_TARGET_INVALID', 'Unsupported private worktree resource.');
   }
-  const input = action.input;
-  if (!input || typeof input !== 'object' || Array.isArray(input) ||
-      (Object.getPrototypeOf(input) !== Object.prototype &&
-       Object.getPrototypeOf(input) !== null)) {
-    throw new OperatorError('RESOURCE_TARGET_INVALID',
-      'Worktree identity must be an inert input object.');
-  }
-  const field = (name: 'repositoryRoot' | 'sessionId'): string => {
-    const descriptor = Object.getOwnPropertyDescriptor(input, name);
-    if (!descriptor || !descriptor.enumerable || !('value' in descriptor) ||
-        typeof descriptor.value !== 'string') {
-      throw new OperatorError('RESOURCE_TARGET_INVALID',
-        'Worktree identity field must be a literal string: ' + name);
-    }
-    return descriptor.value;
-  };
-  const sessionId = field('sessionId');
-  const root = field('repositoryRoot');
-  if (!/^[A-Za-z0-9._:@-]{1,128}$/.test(sessionId) ||
-      !path.isAbsolute(root) || root.includes('\0') ||
-      Buffer.byteLength(root, 'utf8') > 32768) {
-    throw new OperatorError('RESOURCE_TARGET_INVALID',
-      'Worktree session or repository root is invalid.');
-  }
-  const identity = await physicalPathIdentity(root);
-  return [
-    'developer-worktree:session:' + sessionId,
-    identity.pathKey,
-    ...(identity.objectKey ? [identity.objectKey] : [])
-  ].sort();
+  return await resolvePhysicalResourceKeysForAction(action);
 }
 
 export function resourceKeysConflict(left: string, right: string): boolean {
@@ -346,27 +326,39 @@ function normalizeLegacyResourceKey(key: string): string {
 }
 
 function terminalAffectedPaths(action: ActionRequest): string[] {
-  const raw = action.input.affectedResources;
+  const raw = inertNamespaceInput(action.input, 'affectedResources');
   if (raw === undefined) return [];
-  if (!Array.isArray(raw) || raw.length > 128) {
-    throw new OperatorError('RESOURCE_DECLARATION_INVALID', 'affectedResources must be a bounded array of typed resource declarations.');
+  if (!Array.isArray(raw) || raw.length > 128 ||
+      Object.getPrototypeOf(raw) !== Array.prototype ||
+      Reflect.ownKeys(raw).length !== raw.length + 1) {
+    throw new OperatorError('RESOURCE_DECLARATION_INVALID',
+      'affectedResources must be a dense, bounded array of inert declarations.');
   }
-  const paths = raw.map((item, index) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      throw new OperatorError('RESOURCE_DECLARATION_INVALID', `affectedResources[${index}] must be a typed resource declaration.`);
+  const paths: string[] = [];
+  for (let index = 0; index < raw.length; index++) {
+    const entry = Object.getOwnPropertyDescriptor(raw, String(index));
+    const declaration = entry?.value;
+    if (!entry || !entry.enumerable || !('value' in entry) ||
+        !declaration || typeof declaration !== 'object' || Array.isArray(declaration) ||
+        (Object.getPrototypeOf(declaration) !== Object.prototype &&
+         Object.getPrototypeOf(declaration) !== null)) {
+      throw new OperatorError('RESOURCE_DECLARATION_INVALID',
+        `affectedResources[${index}] must be an inert typed declaration.`);
     }
-    const declaration = item as Record<string, unknown>;
-    const fields = Object.keys(declaration).sort();
-    if (fields.join('\0') !== 'kind\0path' || declaration.kind !== 'path'
-      || typeof declaration.path !== 'string' || declaration.path.length < 1
-      || declaration.path.length > 4096 || declaration.path.includes('\0')) {
-      throw new OperatorError('RESOURCE_DECLARATION_INVALID', `affectedResources[${index}] must contain only kind=path and a bounded path.`);
+    const fields = Reflect.ownKeys(declaration);
+    const kind = Object.getOwnPropertyDescriptor(declaration, 'kind');
+    const pathEntry = Object.getOwnPropertyDescriptor(declaration, 'path');
+    const value = pathEntry?.value;
+    if (fields.length !== 2 || fields.some(field => field !== 'kind' && field !== 'path') ||
+        !kind || !kind.enumerable || !('value' in kind) || kind.value !== 'path' ||
+        !pathEntry || !pathEntry.enumerable || !('value' in pathEntry) ||
+        typeof value !== 'string' || value.length < 1 || value.length > 4096 ||
+        value.includes('\0') || !path.isAbsolute(value)) {
+      throw new OperatorError('RESOURCE_DECLARATION_INVALID',
+        `affectedResources[${index}] needs exact kind=path and an absolute literal path.`);
     }
-    if (!path.isAbsolute(declaration.path)) {
-      throw new OperatorError('RESOURCE_DECLARATION_INVALID', `affectedResources[${index}].path must be an absolute host path.`);
-    }
-    return path.resolve(declaration.path);
-  });
+    paths.push(path.resolve(value));
+  }
   return [...new Set(paths)];
 }
 

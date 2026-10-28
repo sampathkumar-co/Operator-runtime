@@ -39,7 +39,7 @@ jobs:
         run: |
           set -euo pipefail
           node --experimental-strip-types scripts/c00-source-operation-inventory.ts > "$RUNNER_TEMP/c00-source-inventory.json"
-          node -e "const fs=require('fs');const r=JSON.parse(fs.readFileSync(process.argv[1]));if(r.sourceCommit!==process.env.GITHUB_SHA||r.declaredCanonicalCapabilityCount!==52||r.releaseAcceptance!=='NOT_ACCEPTED'||r.operations.some(o=>o.actualOsSupport!=='NOT_PHYSICALLY_VERIFIED'))throw Error('C00 inventory provenance/uncertainty contract violated')" "$RUNNER_TEMP/c00-source-inventory.json"
+          node -e "const fs=require('fs');const r=JSON.parse(fs.readFileSync(process.argv[1]));if(r.sourceCommit!==process.env.GITHUB_SHA||r.declaredCanonicalCapabilityCount!==55||r.releaseAcceptance!=='NOT_ACCEPTED'||r.operations.some(o=>o.actualOsSupport!=='NOT_PHYSICALLY_VERIFIED'))throw Error('C00 inventory provenance/uncertainty contract violated')" "$RUNNER_TEMP/c00-source-inventory.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: c00-source-inventory-${{ github.sha }}

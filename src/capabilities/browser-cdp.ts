@@ -1283,8 +1283,10 @@ export class BrowserCdpProvider implements CapabilityProvider {
       };
     } catch (error) {
       if (!dispatchAttempted) throw error;
-      if (error instanceof OperatorError &&
-          error.details?.executionPhase !== undefined && error.details?.sideEffectState !== undefined) throw error;
+      // A proven, known mismatch is already the most specific outcome. Any
+      // lower-level transport/cancellation uncertainty still needs the
+      // dialog-specific no-replay remedy and target-bound context.
+      if (error instanceof OperatorError && error.details?.sideEffectState === 'known') throw error;
       throw new OperatorError('BROWSER_DIALOG_OUTCOME_UNCERTAIN', 'JavaScript dialog handling was dispatched but its exact outcome was not proven; re-observe and do not replay blindly.', {
         retryable: false,
         details: {

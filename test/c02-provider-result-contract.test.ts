@@ -98,6 +98,35 @@ test('C02 provider receipts retain legitimate fractional time and canonical evid
   assert.equal(assertProviderResultContract(canonical, action, 'probe').durationMs, 0.125);
 });
 
+test('C02 provider receipts reject executable nested payloads, unknown remedies and replayable uncertainty', () => {
+  let invoked = 0;
+  const executable = Object.defineProperty({}, 'secret', {
+    enumerable: true, get() { invoked++; return 'must-not-run'; }
+  });
+  const failures = [
+    { ...valid(), output: executable },
+    { ...valid(), evidence: [{ ...evidence('test', 'pass', 'nested'), data: executable }] },
+    { ...valid(), ok: false, error: { code: 'FAILED', message: 'bad', details: executable } },
+    { ...valid(), extra: true },
+    { ...valid(), evidence: [{ ...evidence('test', 'pass', 'extra'), extra: true }] },
+    { ...valid(), ok: false, error: { code: 'FAILED', message: 'bad', extra: true } },
+    { ...valid(), ok: false, error: { code: 'FAILED', message: 'bad', details: { remedy: 'retry_now' } } },
+    { ...valid(), ok: false, error: { code: 'FAILED', message: 'bad', retryable: true, sideEffectState: 'uncertain' } }
+  ];
+  for (const [index, receipt] of failures.entries()) {
+    assert.throws(() => assertProviderResultContract(receipt, action, 'probe'),
+      (error: any) => error?.code === 'PROVIDER_RESULT_CONTRACT_INVALID', `case ${index}`);
+  }
+  assert.equal(invoked, 0);
+
+  const accepted = {
+    ...valid(), ok: false,
+    error: { code: 'FAILED', message: 'bad', retryable: false, sideEffectState: 'uncertain' as const,
+      executionPhase: 'dispatched' as const, details: { remedy: 'reobserve_before_retry' } }
+  };
+  assert.equal(assertProviderResultContract(accepted, action, 'probe').error?.retryable, false);
+});
+
 test('C02 provider reconciliation cannot claim completion without the exact successful provider receipt', () => {
   const completed = {
     status: 'completed' as const,

@@ -7,11 +7,11 @@ import { SessionApprovalStore } from '../apps/local-agent/src/session-approval.t
 import { PolicyEngine } from '../src/core/policy.ts';
 import type { ActionRequest, PermissionProfile } from '../src/core/types.ts';
 
-test('private developer MCP surface remains exactly 42 grouped semantic tools', () => {
-  assert.equal(TOOL_NAMES.length, 42);
+test('private developer MCP surface remains exactly 43 grouped semantic tools', () => {
+  assert.equal(TOOL_NAMES.length, 43);
   for (const name of [
     'operations', 'knowledge.inspect', 'file.info', 'file.search', 'file.manage', 'compute.run',
-    'terminal.session', 'process.inspect', 'process.manage', 'browser.verify', 'workspace.edit.resolve', 'workspace.edit',
+    'terminal.session', 'process.inspect', 'process.manage', 'browser.verify', 'workspace.edit.resolve', 'workspace.edit', 'workspace.worktree',
     'document.inspect', 'document.extract', 'document.render', 'structured.inspect', 'structured.extract', 'structured.render'
   ]) assert.ok(TOOL_NAMES.includes(name), name);
 });

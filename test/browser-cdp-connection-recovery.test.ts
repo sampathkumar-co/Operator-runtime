@@ -63,3 +63,21 @@ test('CDP synchronous send failure immediately detaches abort listener', async (
   assert.equal(attached, 0, 'failed send must not leave abort listener active');
   connection.close();
 });
+
+test('C03 abort during an opening CDP socket returns promptly without dispatch or poisoning later users', async (t) => {
+  const socket = mockSocket(t);
+  const connection = new CdpConnection('test', 'ws://127.0.0.1:9222/devtools/page/test');
+  const controller = new AbortController();
+  const pending = connection.send('Runtime.evaluate', {}, 8_000, controller.signal);
+  controller.abort();
+  await assert.rejects(
+    Promise.race([pending, new Promise((_, reject) => setTimeout(() => reject(Error('abort waited for handshake')), 250))]),
+    (error: any) => error?.code === 'EXECUTION_ABORTED'
+  );
+  socket().emit('open');
+  // The cancelled caller must never dispatch after the shared socket opens.
+  // This synthetic socket rejects every send, so only a new caller can see a send failure.
+  await assert.rejects(connection.send('Runtime.evaluate'),
+    (error: any) => error?.code === 'CDP_COMMAND_SEND_FAILED');
+  connection.close();
+});

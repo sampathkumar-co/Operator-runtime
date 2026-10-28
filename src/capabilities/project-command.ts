@@ -139,8 +139,8 @@ export class ProjectCommandProvider implements CapabilityProvider {
             registryLocation: 'operator-local-config',
             commands: project?.commands.map(({ id, title, kind, executable, args, cwd, timeoutMs, risk, artifacts }) => ({
               id,
-              title,
-              kind,
+              ...(title !== undefined ? { title } : {}),
+              ...(kind !== undefined ? { kind } : {}),
               executable,
               args,
               cwd,
@@ -202,15 +202,15 @@ export class ProjectCommandProvider implements CapabilityProvider {
       const baseOutput = {
         command: {
           id: command.id,
-          title: command.title,
-          kind: command.kind,
+          ...(command.title !== undefined ? { title: command.title } : {}),
+          ...(command.kind !== undefined ? { kind: command.kind } : {}),
           executable: command.executable,
           args: command.args,
           cwd: command.cwd,
           risk: command.risk,
           artifacts: command.artifacts
         },
-        execution: result.output
+        ...(result.output !== undefined ? { execution: result.output } : {})
       };
 
       if (!result.ok) {

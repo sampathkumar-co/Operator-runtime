@@ -6,6 +6,7 @@ import {
   type CapabilityExtensionManifest
 } from './capability-sdk.ts';
 import { OperatorError } from './errors.ts';
+import type { CapabilityRouter } from './router.ts';
 
 export type CapabilityConformanceSuite =
   | 'SANDBOX'
@@ -76,6 +77,79 @@ const ALL_SUITES: CapabilityConformanceSuite[] = [
   'ADVERSARIAL',
   'PERFORMANCE'
 ];
+
+export const GENERIC_PROVIDER_CONFORMANCE_CASES = [
+  'allow_and_deny',
+  'cancellation_before_and_after_dispatch',
+  'malformed_result_fails_uncertain',
+  'untrusted_error_is_bounded',
+  'uncertain_mutation_is_not_replayed',
+  'sensitive_diagnostics_are_redacted',
+  'missing_provider_fails_closed',
+  'recovery_requires_source_bound_reconciliation'
+] as const;
+
+export type GenericProviderConformanceCase = typeof GENERIC_PROVIDER_CONFORMANCE_CASES[number];
+export type BuiltInProviderRegistration = 'always' | 'configured' | 'default_off';
+
+export interface BuiltInProviderDeclaration {
+  name: string;
+  registration: BuiltInProviderRegistration;
+  configuration?: string;
+}
+
+/**
+ * Produce an exhaustive source-level census of the providers assembled by a
+ * runtime factory. This deliberately does not call provider.execute() and can
+ * never certify an OS, account, browser, native helper, or other physical
+ * outcome. Generic cases are central router/runtime boundary obligations that
+ * every registered provider must pass in the adversarial test suite.
+ */
+export function createBuiltInProviderConformanceCensus(
+  router: CapabilityRouter,
+  declarations: readonly BuiltInProviderDeclaration[]
+) {
+  if (!Array.isArray(declarations) || declarations.length === 0 || declarations.length > 256) {
+    throw invalid('Built-in provider declaration collection is invalid.');
+  }
+  const registered = new Set(router.providers().map((provider) => provider.name));
+  const seen = new Set<string>();
+  const providers = declarations.map((declaration) => {
+    if (!declaration || typeof declaration !== 'object' || Array.isArray(declaration) ||
+        Object.getPrototypeOf(declaration) !== Object.prototype ||
+        typeof declaration.name !== 'string' ||
+        !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(declaration.name) ||
+        !['always', 'configured', 'default_off'].includes(declaration.registration) ||
+        (declaration.registration !== 'always' &&
+          (typeof declaration.configuration !== 'string' || declaration.configuration.length === 0)) ||
+        seen.has(declaration.name)) {
+      throw invalid('Built-in provider declaration is invalid.');
+    }
+    seen.add(declaration.name);
+    const isRegistered = registered.delete(declaration.name);
+    if (declaration.registration === 'always' && !isRegistered) {
+      throw invalid(`Required built-in provider ${declaration.name} is not registered.`);
+    }
+    return {
+      name: declaration.name,
+      registration: declaration.registration,
+      configured: isRegistered,
+      sourceBoundary: isRegistered ? 'GENERIC_CASES_REQUIRED' as const : 'NOT_EXERCISED' as const,
+      physicalOutcome: 'NOT_VERIFIED' as const,
+      ...(declaration.configuration ? { configuration: declaration.configuration } : {})
+    };
+  });
+  if (registered.size > 0) {
+    throw invalid(`Runtime contains undeclared built-in providers: ${[...registered].sort().join(', ')}.`);
+  }
+  return {
+    schemaVersion: 1 as const,
+    providers,
+    genericCases: [...GENERIC_PROVIDER_CONFORMANCE_CASES],
+    executionMethod: 'CENTRAL_BOUNDARY_ADVERSARIAL_TESTS_NO_PROVIDER_EFFECTS' as const,
+    physicalOutcome: 'NOT_VERIFIED' as const
+  };
+}
 
 export function createCapabilityConformanceReceipt(input: {
   suite: CapabilityConformanceSuite;

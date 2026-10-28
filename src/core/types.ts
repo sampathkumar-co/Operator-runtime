@@ -1,6 +1,13 @@
 export type ActionRisk = 'read' | 'write' | 'external' | 'system' | 'destructive';
 export type SideEffectState = 'none' | 'known' | 'uncertain';
 export type ExecutionPhase = 'pre_dispatch' | 'dispatched' | 'effect_observed' | 'reconciled';
+export type RecoveryRemedy =
+  | 'reobserve_before_retry'
+  | 'reobserve_dialog_do_not_retry'
+  | 'reobserve_tab_focus_before_retry'
+  | 'select_page_target'
+  | 'select_target_id_from_current_tabs'
+  | 'close_the_dialog_manually_then_reobserve';
 export type TaskState = 'PENDING' | 'RUNNING' | 'PAUSED' | 'CANCELLED' | 'BLOCKED' | 'FAILED' | 'VERIFIED' | 'SKIPPED';
 export type EvidenceStatus = 'pass' | 'fail' | 'info';
 export type EpistemicStatus =
@@ -65,7 +72,7 @@ export interface ActionResult {
     sideEffectState?: SideEffectState;
     executionPhase?: ExecutionPhase;
     epistemicStatus?: Exclude<EpistemicStatus, 'KNOWN'>;
-    details?: Record<string, unknown>;
+    details?: Record<string, unknown> & { remedy?: RecoveryRemedy };
   };
   durationMs: number;
 }

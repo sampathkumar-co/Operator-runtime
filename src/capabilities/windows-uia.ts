@@ -75,6 +75,7 @@ const PUBLIC_UIA_ERROR_CODES = new Set([
   'UIA_SIDECAR_UNAVAILABLE', 'UIA_SIDECAR_WRITE_FAILED',
   'UIA_SIDECAR_START_FAILED', 'UIA_SIDECAR_START_TIMEOUT',
   'UIA_SIDECAR_PROTOCOL_INVALID',
+  'UIA_OPERATION_IDENTITY_INVALID',
   'UIA_SIDECAR_TERMINATE_FAILED', 'UIA_REQUEST_TOO_LARGE',
   'INVALID_UIA_OPERATION', 'INVALID_UIA_SCROLL_AMOUNT',
   'INVALID_UIA_SELECTOR', 'INVALID_UIA_VALUE', 'INVALID_UIA_INSPECT_LIMIT',
@@ -90,6 +91,7 @@ const UNCERTAIN_UIA_MUTATION_ERRORS = new Set([
   'UIA_SIDECAR_TIMEOUT', 'UIA_SIDECAR_CLOSED', 'UIA_SIDECAR_EXITED',
   'UIA_SIDECAR_WRITE_FAILED', 'EXECUTION_ABORTED', 'UIA_OPERATION_FAILED',
   'UIA_SIDECAR_PROTOCOL_INVALID',
+  'UIA_OPERATION_IDENTITY_INVALID',
   'INPUT_AFTER_CAPTURE_FAILED', 'INPUT_AFTER_CAPTURE_INVALID',
   'INPUT_AFTER_WINDOW_CHANGED', 'INPUT_AFTER_SOURCE_CHANGED',
   'VISUAL_CAPTURE_ARTIFACT_REQUIRED', 'INPUT_NATIVE_RESULT_INVALID', 'UIA_PROVIDER_FAILED'
@@ -110,6 +112,40 @@ export function strictUiaSidecarOutcome(value: unknown): boolean {
       'Native UIA response did not contain a boolean success flag.', { retryable: false });
   }
   return value;
+}
+
+/** Bind a mutating native receipt back to the selected process/control/window.
+ * The sidecar is a protocol boundary, so a claimed postcondition cannot switch
+ * identities between its before and after observations. */
+export function strictUiaOperationIdentity(
+  value: unknown,
+  expected: { operation: string; selector: Record<string, unknown> }
+): void {
+  const fail = (): never => { throw new OperatorError('UIA_OPERATION_IDENTITY_INVALID',
+    'Native UIA operation receipt did not preserve the selected target identity.', { retryable: false }); };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail();
+  const receipt = value as Record<string, unknown>;
+  if (receipt.operation !== expected.operation) fail();
+  const before = receipt.before;
+  const after = receipt.after;
+  if (!before || typeof before !== 'object' || Array.isArray(before) ||
+      !after || typeof after !== 'object' || Array.isArray(after)) fail();
+  const left = before as Record<string, unknown>;
+  const right = after as Record<string, unknown>;
+  const processId = expected.selector.process_id;
+  if (!Number.isSafeInteger(left.process_id) || Number(left.process_id) <= 0 ||
+      left.process_id !== right.process_id ||
+      (processId !== undefined && left.process_id !== processId)) fail();
+  const automationId = expected.selector.automation_id;
+  // activate_window returns a Win32 window receipt after resolving the UIA
+  // selector; that receipt preserves process/window but has no control id.
+  if (expected.operation !== 'activate_window' && automationId !== undefined &&
+      (left.automation_id !== automationId || right.automation_id !== automationId)) fail();
+  const leftWindow = left.window_id;
+  const rightWindow = right.window_id;
+  if ((leftWindow !== undefined || rightWindow !== undefined) &&
+      (typeof leftWindow !== 'string' || typeof rightWindow !== 'string' ||
+       !leftWindow || leftWindow.toLowerCase() !== rightWindow.toLowerCase())) fail();
 }
 
 const REQUIRED_UIA_SIDECAR_CAPABILITIES = [
@@ -384,13 +420,16 @@ export class WindowsUiaProvider implements CapabilityProvider {
     const started = performance.now();
     try {
       if (!this.supports(action)) throw new OperatorError('UNSUPPORTED_ACTION', 'Windows UIA provider does not support this action on the current platform.');
+      const operationInput = action.capability === 'app.operate'
+        ? normalizeOperateInput(action.input) : undefined;
       const output = action.capability === 'app.inspect'
         ? await this.#client.call('inspect', normalizeInspectInput(action.input), context.signal)
         : action.capability === 'app.operate'
-          ? await this.#client.call('operate', normalizeOperateInput(action.input), context.signal)
+          ? await this.#client.call('operate', operationInput, context.signal)
           : action.capability === 'visual.capture'
             ? await this.#capture(action, context.signal)
             : await this.#physicalInput(action, context.signal);
+      if (operationInput) strictUiaOperationIdentity(output, operationInput);
       const observedPostcondition = asRecord(asRecord(output).postcondition);
       const semanticVerified = observedPostcondition.verified === true;
       const postcondition = action.capability === 'app.operate'

@@ -737,7 +737,7 @@ export async function performSemanticInteraction(
       if (!raw || raw.ok !== true) {
         const message = typeof raw?.error === 'string' ? raw.error : 'Calendar date selection did not complete.';
         if (raw?.staleRef === true) throw new OperatorError('BROWSER_TARGET_STALE', message, { retryable: true, details: { target: input.target } });
-        if (raw?.recoverable === true) throw new OperatorError('BROWSER_DATE_SELECTION_REQUIRED', message, { retryable: true, details: { target: input.target, value: input.value, sideEffectState: 'uncertain', executionPhase: 'dispatched' } });
+        if (raw?.recoverable === true) throw new OperatorError('BROWSER_DATE_SELECTION_REQUIRED', message, { retryable: false, details: { target: input.target, value: input.value, sideEffectState: 'uncertain', executionPhase: 'dispatched', remedy: 'reobserve_before_retry' } });
         throw new OperatorError('BROWSER_INTERACTION_FAILED', message, { retryable: false, details: { target: input.target, value: input.value } });
       }
       return {

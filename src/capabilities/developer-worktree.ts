@@ -2,7 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import type {
   ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider,
-  CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult
+  CapabilityScore, ProviderCapabilitySchema, ProviderReconciliationRequest, ProviderReconciliationResult
 } from '../core/types.ts';
 import { DeveloperWorktreeManager, type DeveloperWorktreeInspection } from '../core/developer-worktree.ts';
 import { evidence } from '../core/evidence.ts';
@@ -108,6 +108,28 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
     return Object.prototype.hasOwnProperty.call(RISKS, action.capability);
   }
   score(): CapabilityScore { return SCORE; }
+
+  capabilitySchemas(): readonly ProviderCapabilitySchema[] {
+    // Descriptive, not permission grants. These declarations become
+    // discoverable only when the owner explicitly installs this provider.
+    return [
+      {
+        capability: 'workspace.worktree.create', risk: 'write',
+        inputSchemaVersion: 1, inputMaxBytes: 16_384,
+        cancellation: 'required', resourceKinds: ['repo', 'developer-worktree-session', 'fs-path']
+      },
+      {
+        capability: 'workspace.worktree.inspect', risk: 'read',
+        inputSchemaVersion: 1, inputMaxBytes: 16_384,
+        cancellation: 'required', resourceKinds: ['repo', 'developer-worktree-session', 'fs-path']
+      },
+      {
+        capability: 'workspace.worktree.release', risk: 'destructive',
+        inputSchemaVersion: 1, inputMaxBytes: 16_384,
+        cancellation: 'required', resourceKinds: ['repo', 'developer-worktree-session', 'fs-path']
+      }
+    ];
+  }
 
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
