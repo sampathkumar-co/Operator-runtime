@@ -186,3 +186,43 @@ test('C02 provider score cannot be a class or an array masquerading as metrics',
       error?.code === 'PROVIDER_SCORE_CONTRACT_INVALID');
   }
 });
+
+test('C02 schema input cannot execute getters or Array iteration while advertising operations', async () => {
+  let invoked = 0;
+  const valid = {
+    capability: 'git.status', risk: 'read' as const,
+    inputSchemaVersion: 1 as const, inputMaxBytes: 1024,
+    cancellation: 'required' as const, resourceKinds: ['repo']
+  };
+  const schemaGetter = { ...valid } as any;
+  Object.defineProperty(schemaGetter, 'risk', {
+    enumerable: true, get() { invoked++; return 'read'; }
+  });
+  const arrayGetter: unknown[] = [];
+  Object.defineProperty(arrayGetter, '0', {
+    enumerable: true, get() { invoked++; return valid; }
+  });
+  arrayGetter.length = 1;
+  const resources = ['repo'] as any;
+  resources[Symbol.iterator] = function* () { invoked++; yield 'repo'; };
+  const malformed = [
+    Array(1), arrayGetter, [schemaGetter], [{ ...valid, resourceKinds: resources }],
+    [{ ...valid, resourceKinds: Array(1) }],
+    [{ ...valid, resourceKinds: [Object.defineProperty({}, 'toString', {
+      get() { invoked++; throw Error('no conversion'); }
+    })] }],
+    [{ ...valid, extra: () => { invoked++; } }]
+  ];
+  for (const values of malformed) {
+    const router = new CapabilityRouter();
+    router.register({ ...provider(() => true),
+      capabilitySchemas: () => values as any });
+    await assert.rejects(router.capabilitySchemas(action), (error: any) =>
+      error?.code === 'CAPABILITY_SCHEMA_INVALID');
+  }
+  assert.equal(invoked, 0, 'untrusted provider schemas never execute getters or iterators');
+  const router = new CapabilityRouter();
+  router.register({ ...provider(() => true), capabilitySchemas: () => [valid] });
+  assert.deepEqual(await router.capabilitySchemas(action),
+    [{ ...valid, provider: 'c02-fixture' }]);
+});
