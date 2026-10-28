@@ -54,7 +54,7 @@ try {
   provider = new WindowsUiaProvider({ binaryPath: helper, timeoutMs: 10_000 });
   let dispatches = 0;
   const counted = {
-    name: 'native.real.windows-uia',
+    name: provider.name,
     supports: action => provider.supports(action),
     score: () => provider.score(),
     async execute(action, context) {
