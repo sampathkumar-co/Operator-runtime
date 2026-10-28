@@ -111,7 +111,11 @@ export class RelayResultStore {
           traceId: deviceId + ':' + seq + ':' + deliveryId
         }, commit)
       : await commit();
-    this.#notify(deviceId, seq, stored.result);
+    // A consumed tombstone proves ACK and is not a deliverable completion.
+    // A duplicate put must not wake a fresh waiter with payload-free state.
+    if (!stored.result.consumedAt && stored.result.result !== undefined) {
+      this.#notify(deviceId, seq, stored.result);
+    }
     return stored;
   }
 
