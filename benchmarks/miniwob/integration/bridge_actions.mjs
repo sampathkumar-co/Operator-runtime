@@ -17,3 +17,15 @@ export function boundedDisplacement(value) {
   return {deltaX:match[1]==='left'?-d:match[1]==='right'?d:0,
           deltaY:match[1]==='up'?-d:match[1]==='down'?d:0};
 }
+
+// Model chooses one of nine bounded positions within an observed element.
+// CDP provider independently hit-tests the resulting point before dispatch.
+export function relativePointForLabel(label) {
+ const points={center:[0.5,0.5],left:[0.15,0.5],right:[0.85,0.5],
+  top:[0.5,0.15],bottom:[0.5,0.85],
+  'top-left':[0.15,0.15],'top-right':[0.85,0.15],
+  'bottom-left':[0.15,0.85],'bottom-right':[0.85,0.85]};
+ if(label===''||label===undefined)label='center';
+ if(!Object.hasOwn(points,label))throw Error('INVALID_RELATIVE_POINT');
+ return {xRatio:points[label][0],yRatio:points[label][1]};
+}
