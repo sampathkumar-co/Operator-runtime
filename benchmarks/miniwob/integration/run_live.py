@@ -1,7 +1,7 @@
 """Reproducible synthetic MiniWoB: Meta Muse -> Mecord browser.cdp -> BrowserGym reward.
 No public relay, no personal browsing, no secret output. Task selection is systematic.
 """
-import os, json, re, time, argparse, subprocess, urllib.request, urllib.error, sys, secrets, queue, threading, math
+import os, json, re, time, argparse, subprocess, urllib.request, urllib.error, sys, secrets, queue, threading, math, atexit
 from pathlib import Path
 from hashlib import sha256
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,6 +76,10 @@ api_calls = 0
 max_out_tokens = 2048
 output_dir = B / "results"
 output_dir.mkdir(parents=True, exist_ok=True)
+case_label = (args.task_id.split(".")[-1] if args.task_id else f"{args.limit}")
+output_path = output_dir / f"meta_rc6_grounded_portable_{case_label}_seed{args.seed}_worker{args.worker}of{args.workers}.jsonl"
+if output_path.exists():
+    raise RuntimeError("RESULTS_ALREADY_EXIST_REFUSE_OVERWRITE")
 # Lock per benchmark workspace and reserve the maximum estimated API charge
 # DURABLY before any outbound request. Charges are never refunded for transport
 # errors because a provider could have processed the request before timing out.
@@ -86,6 +90,14 @@ try:
     os.close(lock_fd)
 except FileExistsError:
     raise RuntimeError("BENCHMARK_BUDGET_LOCK_EXISTS")
+def _unlock_owned_workspace():
+    # Never clear a lock recreated by another process.
+    try:
+        if budget_lock.read_text(encoding="ascii") == str(os.getpid()):
+            budget_lock.unlink()
+    except OSError:
+        pass
+atexit.register(_unlock_owned_workspace)
 ledger_path = output_dir / "mecord-api-reservations.jsonl"
 lifetime_cap_usd = 0.07  # < INR 7 at ~95.3/USD; leaves buffer for prior use + FX
 historical_reservations = 0.0
@@ -109,10 +121,7 @@ def reserve_budget(usd):
         os.fsync(ledger.fileno())
     historical_reservations+=usd
     run_reserved+=usd
-case_label = (args.task_id.split(".")[-1] if args.task_id else f"{args.limit}")
-output_path = output_dir / f"meta_rc6_grounded_portable_{case_label}_seed{args.seed}_worker{args.worker}of{args.workers}.jsonl"
-if output_path.exists():
-    raise RuntimeError("RESULTS_ALREADY_EXIST_REFUSE_OVERWRITE")
+
 bridge_token = secrets.token_hex(32)
 bridge_env = dict(os.environ)
 bridge_env["MECORD_MINIWOB_BRIDGE_TOKEN"] = bridge_token
@@ -294,5 +303,4 @@ finally:
     except:bridge.kill()
     key = None
     BrowserType.launch = _ORIGINAL_LAUNCH
-    try:budget_lock.unlink(missing_ok=True)
-    except OSError:pass
+    _unlock_owned_workspace()
