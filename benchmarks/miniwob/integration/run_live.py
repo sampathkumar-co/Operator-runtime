@@ -22,7 +22,7 @@ arg = argparse.ArgumentParser()
 arg.add_argument("--limit", type=int, default=12)
 arg.add_argument("--worker", type=int, default=0)
 arg.add_argument("--workers", type=int, default=1)
-arg.add_argument("--max-steps", type=int, default=4)
+arg.add_argument("--max-steps", type=int, default=6)
 arg.add_argument("--cap-usd", type=float, default=0.005)
 arg.add_argument("--seed", type=int, default=42)
 arg.add_argument("--task-id", type=str, default=None)
@@ -32,6 +32,8 @@ arg.add_argument("--campaign-tag",type=str,default="v6")
 args = arg.parse_args()
 assert 1 <= args.limit <= 125 and 1 <= args.workers <= 4
 assert 0 <= args.worker < args.workers and 1 <= args.max_steps <= 10
+if args.workers != 1 or args.worker != 0:
+    raise RuntimeError("PARALLEL_WORKERS_REQUIRE_COORDINATED_BUDGET_LEDGER")
 if not math.isfinite(args.cap_usd) or not 0.001 <= args.cap_usd <= 0.07:
     raise RuntimeError("BENCHMARK_CAP_INVALID")
 cdp_port = 9330 + args.worker
@@ -134,9 +136,11 @@ def reserve_budget(usd):
     run_reserved+=usd
 
 bridge_token = secrets.token_hex(32)
-bridge_env = dict(os.environ)
-# The browser tool process has no need for model credentials.
-bridge_env.pop("MUSE_API_KEY",None)
+# Explicit minimal environment: never pass unrelated host credentials to CDP.
+BRIDGE_ENV_ALLOWED = {"PATH","Path","PATHEXT","SystemRoot","SYSTEMROOT","WINDIR",
+    "HOME","USERPROFILE","LOCALAPPDATA","APPDATA","TEMP","TMP",
+    "MECORD_MINIWOB_WORKDIR","MECORD_MINIWOB_RUNTIME_PATH","MECORD_BENCH_CDP_PORT"}
+bridge_env = {k:v for k,v in os.environ.items() if k in BRIDGE_ENV_ALLOWED}
 bridge_env["MECORD_MINIWOB_BRIDGE_TOKEN"] = bridge_token
 bridge = subprocess.Popen(["node",str(Path(__file__).with_name("mecord_bridge.mjs"))],
                           stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
@@ -145,7 +149,7 @@ JSON_ACTION_SCHEMA = {
     "type":"json_schema",
     "json_schema":{"name":"mecord_browser_action","strict":True,"schema":{
         "type":"object","properties":{
-            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative","select_date","scroll","drag_between"]},
+            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative","select_date","scroll","drag_between","wait","drag_by","resize","hotkey","keyboard_text","format_text","select_text_range"]},
             "bid":{"type":"string"},"value":{"type":"string"},"key":{"type":"string"}
         },
         "required":["op","bid","value","key"],"additionalProperties":False
@@ -156,7 +160,9 @@ def request_model(prompt, *, output_limit=None):
     tokens = output_limit if output_limit is not None else max_out_tokens
     if type(tokens) is not int or not 256 <= tokens <= 3072:
         raise RuntimeError("MODEL_OUTPUT_CAP_INVALID")
-    reserve = (len(prompt.encode("utf8"))*0.10+tokens*0.20)/1e6
+    # Reserve against a conservative byte-level input bound plus protocol
+    # overhead rather than assuming one token per ten UTF-8 bytes.
+    reserve = ((len(prompt.encode("utf8")) + 1024)*0.10 + tokens*0.20)/1e6
     reserve_budget(reserve)
     payload={"model":"muse-spark-1.3-contributor",
              "messages":[{"role":"user","content":prompt}],
@@ -188,6 +194,18 @@ def request_model(prompt, *, output_limit=None):
     except json.JSONDecodeError:return {},status if status=="truncated" else "incomplete"
     return action if isinstance(action,dict) else {},status
 
+def compact_candidate_json(candidates, max_chars=12500):
+    """Never truncate in the middle of a JSON element or target ref."""
+    kept = []
+    for candidate in candidates:
+        presentation = {k:v for k,v in candidate.items() if k != "identity" and v is not None}
+        proposed = kept + [presentation]
+        if len(json.dumps(proposed,ensure_ascii=True)) > max_chars:
+            break
+        kept.append(presentation)
+    return json.dumps(kept,ensure_ascii=True),len(candidates)-len(kept)
+
+
 def compact_nodes(obs):
     allowed = {"button", "link", "textbox", "searchbox", "checkbox", "radio", "combobox",
                "option", "listbox", "spinbutton", "slider", "menuitem", "tab", "switch"}
@@ -209,6 +227,8 @@ def bridge_call(port, payload):
     try:
         with urllib.request.urlopen(req, timeout=21) as response:
             return json.load(response)
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        raise RuntimeError("LOCAL_BRIDGE_TRANSPORT_" + type(exc).__name__) from None
     except urllib.error.HTTPError as exc:
         try:
             detail=json.loads(exc.read(1024).decode("utf8","replace"))
@@ -235,7 +255,8 @@ try:
             start = time.perf_counter()
             outcome = {"task_id": task_id, "plan_index": original_index, "seed": args.seed,
                        "reward": 0.0, "steps": 0, "agent": "meta-muse-spark-1.3-contributor",
-                       "executor": "mecord-browser.cdp-isolated", "error": None}
+                       "executor": "mecord-browser.cdp-isolated", "error": None,
+                        "trace":[], "step_limit":args.max_steps, "frozen_plan_sha256":frozen_plan_sha256}
             env = None
             try:
                 env = gym.make(task_id, headless=True)
@@ -243,6 +264,8 @@ try:
                 time.sleep(0.08)
                 history = []
                 for step in range(args.max_steps):
+                    event = {"step":step+1}
+                    outcome["trace"].append(event)
                     if time.perf_counter() - start > 145:
                         raise RuntimeError("TASK_WALL_TIMEOUT")
                     # Mecord RC6, not BrowserGym AX, is the dispatch authority.
@@ -253,14 +276,22 @@ try:
                     candidates = observed_mecord_candidates(mecord_inspection,limit=90)
                     if not candidates:
                         raise RuntimeError("NO_MECORD_GROUNDED_TARGETS")
+                    candidate_json,hidden_count = compact_candidate_json(candidates)
+                    event.update({"observed_candidates":len(candidates),
+                        "hidden_candidates":hidden_count,
+                        "observation_generation":mecord_inspection["page"]["semantic"]["observationGeneration"],
+                        "observation_pagination":mecord_inspection.get("pagination")})
                     prompt = (
                         "You control an isolated synthetic MiniWoB page. Choose one next action "
                         "from Mecord's CURRENT verified actionable controls and visual objects. "
                         "Use the exact current bid (a generation-bound Mecord ref); never invent CSS, "
                         "coordinates, refs or authority. Return ONLY JSON with exactly four strings: "
                         '{"op":"click","bid":"b-current-observed-ref","value":"","key":""}. '
-                        "Supported actions: click,set_value,type,select,key_press,hover,click_relative,select_date,scroll,drag_between. "
-                        "For scrollable candidates use scroll with value exactly up or down. "
+                        "Supported actions: click,set_value,type,select,key_press,hover,click_relative,select_date,scroll,drag_between,wait,drag_by,resize,hotkey,keyboard_text,format_text,select_text_range. "
+                        "For wait use empty bid/value/key. For hotkey put CTRL+A/CTRL+B/CTRL+I/CTRL+U/CTRL+Z in key. "
+                        "For drag_by or resize, value is direction:40/80/160. For format_text use bold/italic/underline. "
+                        "For select_text_range use start:end as value. For keyboard_text use an editable target. "
+                        "For scrollable candidates use scroll with value up/down or up:160/down:320. "
                         "For sortable-geometry candidates use drag_between with bid as observed source ref "
                         "and value as observed destination ref (same generation). "
                         "Do not invent either ref. "
@@ -268,10 +299,13 @@ try:
                         "Its center is verified and hit-tested by Mecord, with no model-supplied coordinates. "
                         "For date inputs with inputType date use select_date and ISO YYYY-MM-DD. "
                         "For textbox values use set_value. Do not claim completion. "
-                        f"Goal: {str(obs.get('goal') or '')[:800]}\\n"
-                        "CURRENT Mecord controls/visual objects: " + json.dumps(candidates,ensure_ascii=True)[:12500]
-                        + "\\nPrevious actions: " + json.dumps(history[-3:])[:800]
-                        + "\\nSelect exactly one next action, with a bid from CURRENT controls."
+                        f"Goal: {str(obs.get('goal') or '')[:1300]}\n"
+                        "CURRENT Mecord controls/visual objects: " + candidate_json
+                        + "\nPage headings: " + json.dumps(mecord_inspection.get("headings") or [],ensure_ascii=True)[:1000]
+                        + "\nVisible page excerpt: " + str(mecord_inspection.get("textExcerpt") or "")[:1200]
+                        + "\nMore omitted candidates: " + str(hidden_count)
+                        + "\nPrevious actions: " + json.dumps(history[-4:],ensure_ascii=True)[:2200]
+                        + "\nSelect exactly one next action, with a bid from CURRENT controls."
                     )
                     model_action, status = request_model(prompt)
                     try:
