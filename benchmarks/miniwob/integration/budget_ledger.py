@@ -64,7 +64,7 @@ class BudgetLedger:
              "worker":self.worker,"workers":self.workers,
              "global_manifest":self.manifest}
         with self.ledger.open("a",encoding="utf8") as f:
-            f.write(json.dumps(row,separators=(",",":"))+"\\n")
+            f.write(json.dumps(row,separators=(",",":"))+"\n")
             f.flush()
             os.fsync(f.fileno())
         self.workspace_reserved=current+amount
