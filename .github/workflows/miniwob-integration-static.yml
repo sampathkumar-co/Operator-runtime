@@ -1,0 +1,27 @@
+name: MiniWoB Integration Static Checks
+on:
+  pull_request:
+    paths:
+      - 'benchmarks/miniwob/**'
+      - '.github/workflows/miniwob-integration-static.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source:
+    name: Python unit tests and Python/Node syntax (no API/browser)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Python syntax and isolated fixtures
+        run: |
+          set -euo pipefail
+          python3 -m py_compile benchmarks/miniwob/controller.py benchmarks/miniwob/mecord_observation.py benchmarks/miniwob/integration/run_live.py benchmarks/miniwob/integration/smoke.py
+          python3 -m unittest discover -s benchmarks/miniwob -p 'test_*.py' -v
+      - name: JavaScript bridge syntax
+        run: |
+          set -euo pipefail
+          node --check benchmarks/miniwob/integration/mecord_bridge.mjs
