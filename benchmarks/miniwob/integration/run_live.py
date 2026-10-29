@@ -124,6 +124,8 @@ def reserve_budget(usd):
 
 bridge_token = secrets.token_hex(32)
 bridge_env = dict(os.environ)
+# The browser tool process has no need for model credentials.
+bridge_env.pop("MUSE_API_KEY",None)
 bridge_env["MECORD_MINIWOB_BRIDGE_TOKEN"] = bridge_token
 bridge = subprocess.Popen(["node",str(Path(__file__).with_name("mecord_bridge.mjs"))],
                           stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
@@ -284,6 +286,10 @@ try:
                 outcome["error"] = type(exc).__name__ + ":" + str(exc)[:100]
                 if str(exc) in {"BUDGET_CAP_REACHED","MODEL_USAGE_MISSING"} or str(exc).startswith("META_HTTP_429"):
                     campaign_stop = "API_BUDGET_OR_PROVIDER_STOP"
+                    # No independently scored task result is inferred when
+                    # the call never ran or token accounting is inconclusive.
+                    outcome["reward"] = None
+                    outcome["unscored"] = True
             finally:
                 if env:
                     try:env.close()
@@ -298,6 +304,7 @@ try:
                 break
     print("META_MECORD_SUMMARY=" + json.dumps({
         "attempted":attempted_count,"scheduled":len(task_plan),
+        "scored":attempted_count - (1 if campaign_stop else 0),
         "status":"COMPLETE" if attempted_count==len(task_plan) else "PARTIAL",
         "campaign_stop":campaign_stop,
         "api_calls":api_calls,
