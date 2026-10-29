@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import urllib.request
+import urllib.error
 import secrets
 from pathlib import Path
 from playwright.sync_api._generated import BrowserType
@@ -61,6 +62,16 @@ try:
     if not header.startswith("MECORD_BRIDGE_PORT="):
         raise RuntimeError("BRIDGE_FAILED_TO_START")
     port = int(header.split("=",1)[1])
+    # The bridge must refuse all unauthenticated local HTTP requests.
+    unsigned = urllib.request.Request(
+        "http://127.0.0.1:"+str(port)+"/execute",
+        data=b'{"op":"inspect"}',method="POST",
+        headers={"Content-Type":"application/json"})
+    try:
+        urllib.request.urlopen(unsigned,timeout=5)
+        raise RuntimeError("BRIDGE_ACCEPTED_UNAUTHENTICATED_REQUEST")
+    except urllib.error.HTTPError as exc:
+        if exc.code != 403:raise
     inspect = request(port,{"op":"inspect"})
     candidates = observed_mecord_candidates(inspect)
     buttons = [c for c in candidates if c["role"]=="button" and c["name"]=="Click Me!"]
@@ -70,6 +81,12 @@ try:
     dispatched = request(port,{"op":action["op"],"ref":action["ref"]})
     if dispatched.get("ok") is not True or dispatched.get("provider")!="browser.cdp":
         raise RuntimeError("MECORD_DISPATCH_NOT_VERIFIED")
+    # A dispatched ref is single-use until the next fresh observation.
+    try:
+        request(port,{"op":action["op"],"ref":action["ref"]})
+        raise RuntimeError("BRIDGE_REPLAY_ACCEPTED")
+    except urllib.error.HTTPError as exc:
+        if exc.code != 400:raise
     observation,reward,done,truncated,_ = env.step("noop()")
     if float(reward) != 1.0 or done is not True:
         raise RuntimeError("BROWSERGYM_INDEPENDENT_REWARD_NOT_PROVEN")
