@@ -140,7 +140,14 @@ const svr=http.createServer(async(req,res)=>{
     if(item.disabled===true||typeof item.ref!=='string')continue;
     if(!refRE.test(item.ref)||!item.ref.startsWith('b-'+item.observationGeneration+'-'))continue;
     if(!Number.isInteger(item.context.frameDepth)||item.context.frameDepth<0||item.context.frameDepth>4)continue;
-    controlInfo.set(item.ref,item);
+    const existing=controlInfo.get(item.ref);
+    if(existing&&(
+      existing.sourceFrameTargetId!==item.sourceFrameTargetId||
+      existing.observationGeneration!==item.observationGeneration))
+      throw Error('AMBIGUOUS_OBSERVED_FRAME_REF');
+    // A semantic control and a visual candidate may reference the same DOM
+    // element. Keep richer actionable/editable metadata instead of overwriting.
+    if(!existing||(!existing.actionable&&item.actionable))controlInfo.set(item.ref,item);
     if(item.actionable===true)refs.add(item.ref);
     else if(visuals.includes(item)&&svgGeometry.has(item.tag))relativeRefs.add(item.ref);
     if(item.scrollable===true)scrollRefs.add(item.ref);
