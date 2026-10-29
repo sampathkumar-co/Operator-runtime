@@ -6,7 +6,7 @@ grants authority; the isolated host bridge must independently validate refs.
 from __future__ import annotations
 import re
 from typing import Any
-from controller import ControllerError, normalize_decision, safe_attempt, classify_error
+from controller import ControllerError, Decision, normalize_decision, safe_attempt
 
 REF = re.compile(r"b-[a-z0-9]+-[a-z0-9]+-[a-z0-9]+")
 MAX_CONTROLS = 125
@@ -36,7 +36,15 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
         for item in objects:
             if len(candidates) >= limit:
                 return candidates
-            if type(item) is not dict or item.get("actionable") is not True or item.get("disabled") is True:
+            if type(item) is not dict or item.get("disabled") is True:
+                continue
+            # SVG primitives are geometry-grounded, but may not have DOM
+            # "actionable" semantics. They are NOT ordinary click targets.
+            visual_relative = (
+                category == "visual" and item.get("actionable") is not True
+                and item.get("tag") in {"text","circle","ellipse","rect","path","polygon","polyline","line"}
+            )
+            if item.get("actionable") is not True and not visual_relative:
                 continue
             ref = item.get("ref")
             if type(ref) is not str or REF.fullmatch(ref) is None or not ref.startswith("b-" + generation + "-") or ref in seen:
@@ -59,15 +67,21 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
             seen.add(ref)
             candidates.append({
                 "bid":ref,"role":role[:40],"name":name[:130],
-                "description":category,
+                "description":"visual-geometry" if visual_relative else category,
                 "geometry":{"x":round(x,1),"y":round(y,1),"width":round(w,1),"height":round(h,1)},
             })
     return candidates
 
 def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[dict]) -> dict[str,str]:
     """Normalize a model suggestion; permit only exact, currently observed refs."""
+    relative = type(raw) is dict and raw.get("op") == "click_relative"
+    if relative:
+        proposal = dict(raw)
+        proposal["op"] = "click"
+    else:
+        proposal = raw
     try:
-        action = normalize_decision(raw, candidates)
+        action = normalize_decision(proposal, candidates)
     except ControllerError as exc:
         raise MecordObservationError(str(exc)) from None
     if action.op == "wait":
@@ -76,9 +90,15 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
         return {"op":"wait"}
     if action.op not in {"click","hover","set_value","type","select","key_press"}:
         raise MecordObservationError("OPERATION_NOT_SUPPORTED")
-    if not safe_attempt(action,history):
-        raise MecordObservationError("UNSAFE_REPLAY")
     match = [c for c in candidates if c.get("bid") == action.bid]
     if len(match) != 1:
         raise MecordObservationError("UNOBSERVED_TARGET")
+    if relative:
+        if match[0].get("description") != "visual-geometry":
+            raise MecordObservationError("RELATIVE_TARGET_NOT_VISUAL")
+        action = Decision("click_relative", action.bid, action.value, action.key)
+    elif match[0].get("description") == "visual-geometry":
+        raise MecordObservationError("VISUAL_NEEDS_RELATIVE_CLICK")
+    if not safe_attempt(action,history):
+        raise MecordObservationError("UNSAFE_REPLAY")
     return {"op":action.op,"ref":action.bid,"value":action.value,"key":action.key}
