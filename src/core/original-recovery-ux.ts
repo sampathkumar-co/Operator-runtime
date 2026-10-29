@@ -105,10 +105,16 @@ export function buildOriginalRecoveryReviewModel(
       receipt.actionHash === journal.actionDigest &&
       receipt.risk === journal.risk && SAFE_CAPABILITY.test(journal.capability) &&
       history.at(-1) === journal.state);
+    const originalDirectInterruption = history.length === 2 &&
+      history[0] === 'PREPARED' && history[1] === 'INTERRUPTED';
+    const originalPolicyDeferralInterruption = receipt.risk === 'external' &&
+      history.length === 3 && history[0] === 'PREPARED' &&
+      history[1] === 'DEFERRED' && history[2] === 'INTERRUPTED' &&
+      journal!.transitions[1]?.provider === 'policy' &&
+      typeof journal!.transitions[1]?.resultDigest === 'string';
     const undisbursedTerminal = Boolean(match && journal!.generation === 1 &&
       journal!.state === 'INTERRUPTED' &&
-      history.length === 2 && history[0] === 'PREPARED' &&
-      history[1] === 'INTERRUPTED');
+      (originalDirectInterruption || originalPolicyDeferralInterruption));
 
     let status: OriginalRecoveryStatus;
     let explanation: string;

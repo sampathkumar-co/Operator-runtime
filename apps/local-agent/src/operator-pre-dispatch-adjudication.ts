@@ -132,6 +132,84 @@ export class OperatorPreDispatchAdjudicator {
     return { actionId: decision.actionId, state: 'INTERRUPTED', epoch: decision.epoch, caseDigest: decision.caseDigest };
   }
 
+  /** Verify an existing signed no-replay decision without mutating original state. */
+  async inspectSignedFence(actionId: string): Promise<{
+    caseDigest: string; epoch: number; capability: string;
+    risk: 'write' | 'external' | 'destructive' | 'system';
+  }> {
+    const ledger = await this.#readVerifiedLedger();
+    const signed = ledger.decisions.find(d => d.actionId === actionId);
+    if (!signed) throw denied('No existing device-signed no-replay decision for this case.');
+    const journal = await this.#journal.inspect(actionId);
+    const receipt = await this.#receipts.inspectOperatorReceipt(actionId);
+    this.#assertSignedFence(signed, journal, receipt);
+    return {
+      caseDigest: signed.caseDigest, epoch: signed.epoch,
+      capability: journal.capability,
+      risk: journal.risk as 'write' | 'external' | 'destructive' | 'system'
+    };
+  }
+
+  /** Finalize ONLY a previously signed original pre-dispatch fence, under receipt CAS. */
+  async finalizeSignedFenceReceipt(actionId: string, expectedCaseDigest: string): Promise<{
+    status: 'RECEIPT_RECONCILED'; epoch: number;
+  }> {
+    const inspected = await this.inspectSignedFence(actionId);
+    if (!validHash(expectedCaseDigest) || expectedCaseDigest !== inspected.caseDigest) {
+      throw denied('Signed no-replay case changed before reconciliation.');
+    }
+    const ledger = await this.#readVerifiedLedger();
+    const signed = ledger.decisions.find(d => d.actionId === actionId);
+    if (!signed) throw denied('Original signed decision is unavailable.');
+    // The receipt store validates every mutable receipt field under its lock.
+    // The callback below re-verifies authentic signature chain + terminal
+    // journal under that same lock, without reading the receipt store again.
+    await this.#receipts.completeVerifiedSignedFence({
+      actionId, actionDigest: signed.actionDigest,
+      authorityHash: signed.receiptAuthorityHash, ownerId: signed.receiptOwnerId,
+      ...(signed.receiptOwnerProcessDigest
+        ? { ownerProcessDigest: signed.receiptOwnerProcessDigest } : {}),
+      capability: inspected.capability, risk: inspected.risk, epoch: signed.epoch
+    }, async () => {
+      const latest = (await this.#readVerifiedLedger()).decisions.find(d => d.actionId === actionId);
+      if (!latest || latest.caseDigest !== expectedCaseDigest || latest.epoch !== signed.epoch) {
+        throw denied('Signed recovery ledger changed before receipt reconciliation.');
+      }
+      const journal = await this.#journal.inspect(actionId);
+      this.#assertSignedFence(latest, journal);
+      if (journal.capability !== inspected.capability || journal.risk !== inspected.risk) {
+        throw denied('Journal capability changed before receipt reconciliation.');
+      }
+    });
+    return { status: 'RECEIPT_RECONCILED', epoch: signed.epoch };
+  }
+
+  #assertSignedFence(
+    signed: SignedDecision,
+    journal: Awaited<ReturnType<ActionTransitionJournal['inspect']>>,
+    receipt?: Awaited<ReturnType<LocalActionExecutionStore['inspectOperatorReceipt']>>
+  ): void {
+    if (journal.state !== 'INTERRUPTED' || journal.generation !== 1 ||
+        journal.risk === 'read' ||
+        signed.journalGeneration !== journal.generation ||
+        signed.actionDigest !== journal.actionDigest ||
+        journal.transitions.length < 2 ||
+        journal.transitions.some(t => t.state === 'DISPATCHED') ||
+        hexDigest(journal.transitions.slice(0, -1)) !== signed.transitionsDigest) {
+      throw denied('Signed recovery lacks the exact original terminal never-dispatched journal.');
+    }
+    if (receipt !== undefined && (!receipt || receipt.status !== 'processing' ||
+        receipt.actionHash !== signed.actionDigest ||
+        receipt.authorityHash !== signed.receiptAuthorityHash ||
+        receipt.ownerId !== signed.receiptOwnerId ||
+        (receipt.ownerProcess
+          ? !signed.receiptOwnerProcessDigest ||
+            hexDigest(receipt.ownerProcess) !== signed.receiptOwnerProcessDigest
+          : signed.receiptOwnerProcessDigest !== undefined))) {
+      throw denied('Signed no-replay case conflicts with the original processing receipt.');
+    }
+  }
+
   async #candidate(actionId: string, recoveryEpoch: number, device: NonNullable<Awaited<ReturnType<DeviceSigner['loadExisting']>>>): Promise<OperatorRecoveryCandidate> {
     const receipt = await this.#receipts.inspectOperatorReceipt(actionId);
     const journal = await this.#journal.inspect(actionId);
@@ -230,21 +308,25 @@ export class OperatorPreDispatchAdjudicator {
  */
 export async function confirmOriginalRecoveryOnWindows(input: {
   capability: string; risk: string; caseDigest: string;
+  mode?: 'new' | 'reconcile';
 }): Promise<boolean> {
   if (process.platform !== 'win32' || process.env.MECORD_DISABLE_APPROVAL_UI === '1') return false;
   const systemRoot = String(process.env.SystemRoot ?? '').trim();
   if (!/^[A-Za-z]:\\Windows$/i.test(systemRoot)) return false;
   const executable = path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   if (!/^[a-z][a-z0-9._-]{0,127}$/.test(input.capability) ||
-      !['write', 'external'].includes(input.risk) || !validHash(input.caseDigest)) return false;
+      !['write', 'external', 'destructive', 'system'].includes(input.risk) ||
+      (input.mode !== undefined && input.mode !== 'new' && input.mode !== 'reconcile') ||
+      !validHash(input.caseDigest)) return false;
   const script = [
     "$ErrorActionPreference = 'Stop'",
     'Add-Type -AssemblyName System.Windows.Forms',
     '$request = ([Console]::In.ReadToEnd() | ConvertFrom-Json)',
     '$nl = [Environment]::NewLine',
+    '$operation = if ($request.mode -eq "reconcile") { "Finish the EXISTING device-signed NO-REPLAY receipt? No historical operation will run or be retried." } else { "Authorize a permanent device-signed NO-REPLAY FENCE? This does NOT perform the old action." }',
     '$message = "Action: " + $request.capability + $nl + "Risk: " + $request.risk + $nl + "Case digest: " + $request.caseDigest + $nl + $nl +',
     '  "I CONFIRM this is the original owner device, the original process has STOPPED and this protected state was NOT COPIED to another device." + $nl + $nl +',
-    '  "Authorize a permanent device-signed NO-REPLAY FENCE? This does NOT perform the old action."',
+    '  $operation',
     "$answer = [System.Windows.Forms.MessageBox]::Show($message, 'Mecord original-device recovery',",
     '  [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning,',
     '  [System.Windows.Forms.MessageBoxDefaultButton]::Button2)',
@@ -284,13 +366,13 @@ export async function confirmOriginalRecoveryOnWindows(input: {
 export class OriginalRecoveryOwnerResolution {
   #receipts: LocalActionExecutionStore;
   #journal: ActionTransitionJournal;
-  #adjudicator: Pick<OperatorPreDispatchAdjudicator, 'inspect' | 'adjudicate'>;
-  #confirmOwner: (input: { capability: string; risk: string; caseDigest: string }) => Promise<boolean>;
+  #adjudicator: Pick<OperatorPreDispatchAdjudicator, 'inspect' | 'adjudicate' | 'inspectSignedFence' | 'finalizeSignedFenceReceipt'>;
+  #confirmOwner: (input: { capability: string; risk: string; caseDigest: string; mode?: 'new' | 'reconcile' }) => Promise<boolean>;
   #busy = false;
 
   constructor(stateDir: string, options: {
-    adjudicator?: Pick<OperatorPreDispatchAdjudicator, 'inspect' | 'adjudicate'>;
-    confirmOwner?: (input: { capability: string; risk: string; caseDigest: string }) => Promise<boolean>;
+    adjudicator?: Pick<OperatorPreDispatchAdjudicator, 'inspect' | 'adjudicate' | 'inspectSignedFence' | 'finalizeSignedFenceReceipt'>;
+    confirmOwner?: (input: { capability: string; risk: string; caseDigest: string; mode?: 'new' | 'reconcile' }) => Promise<boolean>;
   } = {}) {
     this.#receipts = new LocalActionExecutionStore(stateDir);
     this.#journal = new ActionTransitionJournal(stateDir);
@@ -298,7 +380,7 @@ export class OriginalRecoveryOwnerResolution {
     this.#confirmOwner = options.confirmOwner ?? confirmOriginalRecoveryOnWindows;
   }
 
-  async resolve(reference: unknown): Promise<{ status: 'FENCED_NO_REPLAY'; epoch: number }> {
+  async resolve(reference: unknown): Promise<{ status: 'FENCED_NO_REPLAY' | 'RECEIPT_RECONCILED'; epoch: number }> {
     if (this.#busy) throw denied('Another original-device recovery confirmation is active.');
     this.#busy = true;
     try {
@@ -307,13 +389,24 @@ export class OriginalRecoveryOwnerResolution {
       const model = buildOriginalRecoveryReviewModel(pending, journals);
       const review = model.items.find(item => item.actionId === reference);
       const actionId = locateOriginalRecoveryActionId(reference, pending);
+      if (review?.status === 'FENCED_AWAITING_RECONCILIATION' && actionId) {
+        const signed = await this.#adjudicator.inspectSignedFence(actionId);
+        if (signed.capability !== review.capability || signed.risk !== review.risk) {
+          throw denied('Signed no-replay decision conflicts with displayed original recovery case.');
+        }
+        const confirmed = await this.#confirmOwner({
+          capability: signed.capability, risk: signed.risk, caseDigest: signed.caseDigest, mode: 'reconcile'
+        });
+        if (!confirmed) throw denied('The native Windows owner denied signed fence reconciliation.');
+        return await this.#adjudicator.finalizeSignedFenceReceipt(actionId, signed.caseDigest);
+      }
       if (!review || !actionId || review.status !== 'REVIEW_REQUIRED' ||
           !['write', 'external'].includes(review.risk) || review.capability === 'Unverified action') {
         throw denied('Uncertain or mismatched history cannot be cleared through the Control Center.');
       }
       const candidate = await this.#adjudicator.inspect(actionId);
       const confirmed = await this.#confirmOwner({
-        capability: review.capability, risk: review.risk, caseDigest: candidate.caseDigest
+        capability: review.capability, risk: review.risk, caseDigest: candidate.caseDigest, mode: 'new'
       });
       if (!confirmed) throw denied('Native owner confirmation was denied or unavailable.');
       // Device-signed ledger CAS and journal fencing still happen in adjudicate.

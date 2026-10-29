@@ -30,3 +30,19 @@ This does **not** execute historical actions, automatically acknowledge relay de
 Control Center also offers **Sign in on this PC**. An unauthenticated browser can POST only to the exact literal localhost /v1/control-center/browser-login/windows, with same-origin mutation headers and bounded JSON. It cannot provide bearer/relay/enterprise authority. A separate visible native Windows Yes/No owner dialog must approve before any in-memory, HttpOnly, SameSite=Strict, idle/absolute-expiring dashboard cookie is issued. Missing Windows desktop, denied/cancelled dialog and headless use fail closed. Only one dialog can be active and attempts have a 15-second local rate limit. The existing one-time console-issued code continues to work as an optional fallback.
 
 This login is **not** itself approval to recover, execute or sign an action. The later **Resolve safely** recovery action still invokes its own separate exact-case native owner attestation and device-signed CAS fence. This login alone never supplies original receipt identities or signer material.
+
+
+## Finalizing an existing signed no-replay receipt without terminal access
+
+The Recovery tab presents **Finish reconciliation** for original receipts that already have an INTERRUPTED, original never-dispatched journal. The browser submits only the opaque case reference to the existing local, same-origin, cookie-authenticated POST /v1/control-center/original-recovery/browser/resolve. This differs from signing a *new* original PREPARED/DEFERRED recovery.
+
+For existing fences the server:
+1. Requires an exact already-existing device-signed adjudication in the fully verified signed ledger. Merely showing INTERRUPTED in the UI does not grant authority.
+2. Matches the receipt action digest, authority fingerprint, owner identity and original process binding to the signed decision and terminal journal, including the digest of all transitions before INTERRUPTION. Missing signature, changed identity, dispatched history, mismatched risk or capability fails closed.
+3. Requires a visible, default-No native Windows confirmation explicitly stating that the owner is **finishing an existing signed no-replay receipt**, not signing/dispatching a new operation. Denial, disconnected desktop and timeout refuse.
+4. After native approval, re-verifies signed ledger signatures and exact terminal journal **inside the receipt cross-process durable lock**, then atomically writes a negative terminal receipt (ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH). No provider execution, retry, relay ACK, deletion or credential exposure.
+5. Retains this completed signed-fence receipt indefinitely as a duplicate-action barrier, unlike ordinary seven-day completed receipts. The signed adjudication ledger and INTERRUPTED journal remain intact.
+
+This also applies to **previously signed** destructive no-replay fences. It **does not** add any authorization for an **unsigned** destructive PREPARED action: two historically unsigned destructive cases remain review-only. Unsupported read/missing-journal cases and uncertain/dispatched effects also remain blocked.
+
+Owner physical confirmation on original protected records has **not** been performed by CI. Tests use disposable Windows state and test signing identity only. Release acceptance, hosted/cross-host reconciliation and independently verified original effects remain separate gates.

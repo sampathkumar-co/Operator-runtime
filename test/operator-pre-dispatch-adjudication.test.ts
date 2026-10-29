@@ -1,4 +1,4 @@
-import test from 'node:test';
+﻿import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -304,4 +304,160 @@ test('already dispatched browser write is never a prepared-write recovery candid
   await assert.rejects(
     new OperatorPreDispatchAdjudicator(state, { signer: identity }).inspect(preparedWriteAction.id), denied
   );
+});
+
+
+test('signed pre-dispatch journal fence finishes the exact pending receipt without replay and remains permanent', async t => {
+  const { state, journal, identity } = await setup(t);
+  const adjudicator = new OperatorPreDispatchAdjudicator(state, { signer: identity });
+  const proof = await adjudicator.inspect(action.id);
+  await adjudicator.adjudicate({
+    actionId: action.id, caseDigest: proof.caseDigest,
+    confirmation: 'AUTHORIZE-NO-REPLAY:' + proof.caseDigest,
+    ownerAttestation: 'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED'
+  });
+  assert.equal((await journal.inspect(action.id)).state, 'INTERRUPTED');
+  const receipts = new LocalActionExecutionStore(state);
+  assert.equal((await receipts.inspectOperatorReceipt(action.id))?.status, 'processing');
+  const verified = await adjudicator.inspectSignedFence(action.id);
+  assert.equal(verified.caseDigest, proof.caseDigest);
+  assert.equal(verified.risk, 'external');
+  await assert.rejects(adjudicator.finalizeSignedFenceReceipt(action.id, '0'.repeat(64)),
+    /changed before reconciliation/);
+  assert.equal((await receipts.inspectOperatorReceipt(action.id))?.status, 'processing');
+  const result = await adjudicator.finalizeSignedFenceReceipt(action.id, verified.caseDigest);
+  assert.equal(result.status, 'RECEIPT_RECONCILED');
+  const completed = await receipts.inspectOperatorReceipt(action.id);
+  assert.equal(completed?.status, 'completed');
+  assert.equal(completed?.result?.ok, false);
+  assert.equal(completed?.result?.error?.code, 'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH');
+  assert.equal(completed?.result?.evidence?.[0]?.kind, 'signed_operator_fence');
+  assert.equal((await journal.inspect(action.id)).state, 'INTERRUPTED');
+  const fresh = new LocalActionExecutionStore(state, {
+    clock: () => new Date(Date.now() + 400 * 24 * 3600_000)
+  });
+  assert.equal((await fresh.begin(action)).status, 'completed',
+    'a signed no-replay receipt cannot expire and be started again after ordinary retention');
+  assert.equal((await fresh.inspectOperatorReceipt(action.id))?.status, 'completed');
+});
+
+test('signed fence reconciliation never accepts changed authority, unsigned decisions or a dispatched journal', async t => {
+  const { state, journal, identity } = await setup(t);
+  const adjudicator = new OperatorPreDispatchAdjudicator(state, { signer: identity });
+  await assert.rejects(adjudicator.inspectSignedFence(action.id));
+  const c = await adjudicator.inspect(action.id);
+  await adjudicator.adjudicate({
+    actionId: action.id, caseDigest: c.caseDigest,
+    confirmation: 'AUTHORIZE-NO-REPLAY:' + c.caseDigest,
+    ownerAttestation: 'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED'
+  });
+  const p = path.join(state, 'action-executions.json');
+  const before = JSON.parse(await fs.readFile(p, 'utf8'));
+  const corrupted = structuredClone(before);
+  corrupted.records[0].authorityHash = '0'.repeat(64);
+  await fs.writeFile(p, JSON.stringify(corrupted));
+  await assert.rejects(adjudicator.inspectSignedFence(action.id));
+  await assert.rejects(adjudicator.finalizeSignedFenceReceipt(action.id, c.caseDigest));
+  const still = JSON.parse(await fs.readFile(p, 'utf8'));
+  assert.equal(still.records[0].status, 'processing');
+  assert.equal((await journal.inspect(action.id)).state, 'INTERRUPTED');
+});
+
+test('Control Center signed-fence finalization requires a separate owner confirmation', async t => {
+  const { state, journal, identity } = await setup(t);
+  const adjudicator = new OperatorPreDispatchAdjudicator(state, { signer: identity });
+  const c = await adjudicator.inspect(action.id);
+  await adjudicator.adjudicate({
+    actionId: action.id, caseDigest: c.caseDigest,
+    confirmation: 'AUTHORIZE-NO-REPLAY:' + c.caseDigest,
+    ownerAttestation: 'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED'
+  });
+  const { buildOriginalRecoveryReviewModel } = await import('../src/core/original-recovery-ux.ts');
+  const receipts = new LocalActionExecutionStore(state);
+  const model = buildOriginalRecoveryReviewModel(
+    await receipts.listOperatorPendingReceipts(200), await journal.list(1000)
+  );
+  const item = model.items[0]!;
+  assert.equal(item.status, 'FENCED_AWAITING_RECONCILIATION');
+  const { OriginalRecoveryOwnerResolution } = await import('../apps/local-agent/src/operator-pre-dispatch-adjudication.ts');
+  const denied = new OriginalRecoveryOwnerResolution(state, {
+    adjudicator, confirmOwner: async () => false
+  });
+  await assert.rejects(denied.resolve(item.actionId));
+  assert.equal((await receipts.inspectOperatorReceipt(action.id))?.status, 'processing');
+  const owner = new OriginalRecoveryOwnerResolution(state, {
+    adjudicator, confirmOwner: async input => {
+      assert.equal(input.caseDigest, c.caseDigest);
+      assert.equal(input.risk, 'external');
+      assert.equal(input.mode, 'reconcile');
+      return true;
+    }
+  });
+  const result = await owner.resolve(item.actionId);
+  assert.equal(result.status, 'RECEIPT_RECONCILED');
+  assert.equal((await receipts.inspectOperatorReceipt(action.id))?.status, 'completed');
+  assert.equal((await journal.inspect(action.id)).state, 'INTERRUPTED');
+});
+
+
+test('already device-signed destructive PREPARED fence can reconcile receipt without granting new destructive approval', async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-existing-destructive-fence-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const { canonicalJson } = await import('../src/core/action-identity.ts');
+  const crypto = await import('node:crypto');
+  const sha = (value: unknown) => crypto.createHash('sha256').update(canonicalJson(value)).digest('hex');
+  const oldAction = {
+    id: 'mecord-old-destructive-fence-fixture', capability: 'terminal.execute',
+    risk: 'destructive' as const, input: { command: 'DO_NOT_EXECUTE' },
+    provenance: { kind: 'chatgpt' as const }
+  };
+  const receipts = new LocalActionExecutionStore(state);
+  await receipts.begin(oldAction);
+  const journal = new ActionTransitionJournal(state);
+  await journal.prepare({ action: oldAction, ownerKind: 'local-api', ownerId: oldAction.id, resourceKeys: [] });
+  const before = await journal.inspect(oldAction.id);
+  const receipt = await receipts.inspectOperatorReceipt(oldAction.id);
+  const identity = await signer(state);
+  const device = await identity.loadExisting();
+  assert.ok(device && receipt);
+  const original = {
+    actionId: oldAction.id, actionDigest: before.actionDigest,
+    receiptAuthorityHash: receipt!.authorityHash, receiptOwnerId: receipt!.ownerId!,
+    receiptOwnerProcessDigest: sha(receipt!.ownerProcess), journalGeneration: 1,
+    transitionsDigest: sha(before.transitions), recoveryEpoch: 1,
+    deviceId: device!.deviceId, deviceFingerprint: device!.fingerprint
+  };
+  const caseDigest = sha(original);
+  const unsigned = {
+    version: 1 as const, epoch: 1, actionId: oldAction.id,
+    actionDigest: before.actionDigest, receiptAuthorityHash: receipt!.authorityHash,
+    receiptOwnerId: receipt!.ownerId!,
+    receiptOwnerProcessDigest: original.receiptOwnerProcessDigest,
+    caseDigest, journalGeneration: 1,
+    transitionsDigest: original.transitionsDigest,
+    deviceId: device!.deviceId, deviceFingerprint: device!.fingerprint,
+    previousDigest: '0'.repeat(64), adjudicatedAt: new Date().toISOString(),
+    operatorAttestation: 'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED'
+  };
+  const signature = await identity.sign(Buffer.from(canonicalJson(unsigned)));
+  await fs.writeFile(path.join(state, 'operator-pre-dispatch-adjudications.json'),
+    JSON.stringify({ version: 1, decisions: [{ ...unsigned, signature }] }));
+  await journal.interruptPreparedBeforeDispatch(oldAction);
+  const safe = new OperatorPreDispatchAdjudicator(state, { signer: identity });
+  const verified = await safe.inspectSignedFence(oldAction.id);
+  assert.equal(verified.risk, 'destructive');
+  assert.equal(verified.caseDigest, caseDigest);
+  const result = await safe.finalizeSignedFenceReceipt(oldAction.id, caseDigest);
+  assert.equal(result.status, 'RECEIPT_RECONCILED');
+  assert.equal((await receipts.inspectOperatorReceipt(oldAction.id))?.result?.error?.code,
+    'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH');
+  assert.equal((await journal.inspect(oldAction.id)).state, 'INTERRUPTED');
+  assert.equal((await receipts.begin(oldAction)).status, 'completed');
+  // A fresh unsigned destructive PREPARED case is NOT eligible for adjudication.
+  const unsignedAction = { ...oldAction, id: oldAction.id + '-unsigned' };
+  await receipts.begin(unsignedAction);
+  await journal.prepare({ action: unsignedAction, ownerKind: 'local-api', ownerId: unsignedAction.id, resourceKeys: [] });
+  await assert.rejects(safe.inspectSignedFence(unsignedAction.id));
+  await assert.rejects(safe.finalizeSignedFenceReceipt(unsignedAction.id, caseDigest));
+  assert.equal((await receipts.inspectOperatorReceipt(unsignedAction.id))?.status, 'processing');
 });
