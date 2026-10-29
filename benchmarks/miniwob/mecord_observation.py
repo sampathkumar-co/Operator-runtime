@@ -116,7 +116,10 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
     if raw.get("op") == "wait":
         if raw.get("bid", "") != "" or raw.get("value", "") != "" or raw.get("key", "") != "":
             raise MecordObservationError("WAIT_MUST_HAVE_NO_TARGET")
-        if not safe_attempt(Decision("wait"), history):
+        if (not safe_attempt(Decision("wait"), history) or any(
+                type(h) is not dict or h.get("sideEffectState") == "uncertain"
+                or (type(h.get("error")) is str and any(x in h["error"].upper() for x in ("UNCERTAIN","RECONCIL")))
+                for h in history)):
             raise MecordObservationError("UNCERTAIN_HISTORY")
         return {"op": "wait"}
     ref = raw.get("bid")
@@ -154,7 +157,8 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
     editable_roles = {"textbox","searchbox","combobox","spinbutton","input","textarea"}
     select_roles = {"select","combobox","listbox","option"}
     if action.op in {"set_value","type"} and not date_action and not (
-            chosen.get("editable") is True or role in editable_roles):
+            chosen.get("editable") is True or role in editable_roles
+            or (action.op == "set_value" and role == "slider")):
         raise MecordObservationError("TARGET_NOT_EDITABLE")
     if action.op == "select" and role not in select_roles:
         raise MecordObservationError("TARGET_NOT_SELECTABLE")
@@ -202,7 +206,7 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
         if match[0].get("description") != "visual-geometry":
             raise MecordObservationError("RELATIVE_TARGET_NOT_VISUAL")
         action = Decision("click_relative", action.bid, action.value, action.key)
-    elif match[0].get("description") == "visual-geometry":
+    elif match[0].get("description") == "visual-geometry" and raw.get("op") not in {"drag_by","resize"}:
         raise MecordObservationError("VISUAL_NEEDS_RELATIVE_CLICK")
     if not relative and not date_action and not scroll_action and not drag_action and raw.get("op") not in {"drag_by","resize"} and chosen.get("description") in {"sortable-geometry","scroll-geometry"}:
         raise MecordObservationError("SPECIALIST_ACTION_REQUIRED")
