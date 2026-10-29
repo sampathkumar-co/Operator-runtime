@@ -86,7 +86,7 @@ JSON_ACTION_SCHEMA = {
     "type":"json_schema",
     "json_schema":{"name":"mecord_browser_action","strict":True,"schema":{
         "type":"object","properties":{
-            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover"]},
+            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative"]},
             "bid":{"type":"string"},"value":{"type":"string"},"key":{"type":"string"}
         },
         "required":["op","bid","value","key"],"additionalProperties":False
@@ -179,7 +179,9 @@ try:
                         "Use the exact current bid (a generation-bound Mecord ref); never invent CSS, "
                         "coordinates, refs or authority. Return ONLY JSON with exactly four strings: "
                         '{"op":"click","bid":"b-current-observed-ref","value":"","key":""}. '
-                        "Supported actions: click,set_value,type,select,key_press,hover. "
+                        "Supported actions: click,set_value,type,select,key_press,hover,click_relative. "
+                        "For candidates with description visual-geometry, use click_relative. "
+                        "Its center is verified and hit-tested by Mecord, with no model-supplied coordinates. "
                         "For textbox values use set_value. Do not claim completion. "
                         f"Goal: {str(obs.get('goal') or '')[:800]}\\n"
                         "CURRENT Mecord controls/visual objects: " + json.dumps(candidates,ensure_ascii=True)[:12500]
