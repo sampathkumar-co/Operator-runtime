@@ -26,6 +26,7 @@ let provider=new BrowserCdpProvider(endpoint),inspectState=null,sequence=0,busy=
 const project=item=>({
  ref:item.ref,role:item.role||'',tag:item.tag||'',primitive:item.primitive||'',
  name:item.name||'',type:item.type||'',actionable:item.actionable===true,disabled:item.disabled===true,
+ groupRole:item.groupRole||'',semanticPath:item.semanticPath||'',scrollable:item.scrollable===true,
  editable:item.editable===true,
  context:{frameDepth:item.context?.frameDepth,shadowDepth:item.context?.shadowDepth},
  geometry:item.geometry||item.rect,
@@ -66,27 +67,34 @@ const svr=http.createServer(async(req,res)=>{
    if(!Array.isArray(semantic.controls)||!Array.isArray(semantic.visuals))throw Error('MISSING_OBSERVATION_ARRAYS');
    const generation=semantic.observationGeneration;
    const controls=semantic.controls.slice(0,160).map(project),visuals=semantic.visuals.slice(0,160).map(project);
-   const refs=new Set(),relativeRefs=new Set(),controlInfo=new Map();
+   const refs=new Set(),relativeRefs=new Set(),sortableRefs=new Set(),scrollRefs=new Set(),controlInfo=new Map();
    const svgGeometry=new Set(['text','circle','ellipse','rect','path','polygon','polyline','line']);
    for(const item of [...controls,...visuals]){
     if(item.disabled===true||typeof item.ref!=='string')continue;
     if(!refRE.test(item.ref)||!item.ref.startsWith('b-'+generation+'-'))continue;
     if(item.context.frameDepth!==0)continue;
-    if(item.actionable===true){refs.add(item.ref);controlInfo.set(item.ref,item);}
+    controlInfo.set(item.ref,item);
+    if(item.actionable===true)refs.add(item.ref);
     else if(visuals.includes(item)&&svgGeometry.has(item.tag))relativeRefs.add(item.ref);
+    if(item.scrollable===true)scrollRefs.add(item.ref);
+    if(visuals.includes(item)&&item.groupRole==='li'&&
+       item.semanticPath.toLowerCase().includes('sortable')&&
+       new Set(['div','li','span']).has(item.tag))sortableRefs.add(item.ref);
    }
-   inspectState={targetId,generation,refs,relativeRefs,controlInfo};
+   inspectState={targetId,generation,refs,relativeRefs,sortableRefs,scrollRefs,controlInfo};
    res.end(JSON.stringify({ok:true,provider:out.provider,durationMs:out.durationMs,
     page:{semantic:{observationGeneration:generation,controls,visuals}},
-    observedRefCount:refs.size,visualRelativeRefs:relativeRefs.size,truncated:out.output?.truncated===true}));
+    observedRefCount:refs.size,visualRelativeRefs:relativeRefs.size,sortableRefs:sortableRefs.size,scrollRefs:scrollRefs.size,truncated:out.output?.truncated===true}));
    return;
   }
-  const allowed=new Set(['click','hover','set_value','type','select','select_date','key_press','click_relative']);
+  const allowed=new Set(['click','hover','set_value','type','select','select_date','key_press','click_relative','scroll','drag_between']);
   if(!allowed.has(input.op))throw Error('UNSUPPORTED_INTERACTION');
   if(!inspectState||inspectState.targetId!==targetId)throw Error('FRESH_INSPECTION_REQUIRED');
   const ref=input.ref;
   if(typeof ref!=='string'||!refRE.test(ref))throw Error('BAD_REF_FORMAT');
-  const allowedRefs=input.op==='click_relative'?inspectState.relativeRefs:inspectState.refs;
+  const allowedRefs=(input.op==='click_relative'?inspectState.relativeRefs:
+    input.op==='drag_between'?inspectState.sortableRefs:
+    input.op==='scroll'?inspectState.scrollRefs:inspectState.refs);
   if(!allowedRefs.has(ref))throw Error('REF_NOT_FROM_FRESH_INSPECTION');
   const observed=inspectState.controlInfo.get(ref);
   if(input.op==='type'||input.op==='set_value'){
@@ -105,6 +113,17 @@ const svr=http.createServer(async(req,res)=>{
    if(typeof input.value!=='string'||!input.value||input.value.length>400)throw Error('INVALID_TEXT_VALUE');
    if(input.op==='select_date'&&!/^\d{4}-\d{2}-\d{2}$/.test(input.value))throw Error('DATE_VALUE_INVALID');
    actionInput.value=input.value;
+  }
+  if(input.op==='scroll'){
+   if(!new Set(['up','down']).has(input.value))throw Error('INVALID_SCROLL_DIRECTION');
+   actionInput.deltaX=0;
+   actionInput.deltaY=input.value==='up'?-80:80;
+  }
+  if(input.op==='drag_between'){
+   const toRef=input.value;
+   if(typeof toRef!=='string'||!refRE.test(toRef)||toRef===ref||!inspectState.sortableRefs.has(toRef)||
+      toRef.slice(0,toRef.lastIndexOf('-'))!==ref.slice(0,ref.lastIndexOf('-')))throw Error('DRAG_TARGETS_NOT_CURRENT_SORTABLE');
+   actionInput.toTarget={ref:toRef};
   }
   if(input.op==='key_press'){
    if(typeof input.key!=='string'||!/^[A-Za-z][A-Za-z0-9+_-]{0,31}$/.test(input.key))throw Error('INVALID_KEY');
