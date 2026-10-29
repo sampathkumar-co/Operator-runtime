@@ -36,7 +36,7 @@ export function relativePointForLabel(label) {
 // performs its own pointer hit-test. There is no unrestricted screen click.
 export function boundedRelativePoint(value){
  if(typeof value!=='string')throw new Error('INVALID_RELATIVE_POINT');
- if(/^(?:0\\.[0-9]{1,2}|1(?:\\.0{1,2})?|0):(?:0\\.[0-9]{1,2}|1(?:\\.0{1,2})?|0)$/.test(value)){
+ if(/^(?:0\.[0-9]{1,2}|1(?:\.0{1,2})?|0):(?:0\.[0-9]{1,2}|1(?:\.0{1,2})?|0)$/.test(value)){
   const [xRatio,yRatio]=value.split(':').map(Number);
   return {xRatio,yRatio};
  }
