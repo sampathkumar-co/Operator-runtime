@@ -1,6 +1,7 @@
 // Isolated, source-pinned Mecord MiniWoB bridge. No production relay or credentials.
 import http from 'node:http';import path from 'node:path';
 import {timingSafeEqual} from 'node:crypto';
+import {providerOperationForInput,boundedScrollDelta,boundedDisplacement} from './bridge_actions.mjs';
 import {pathToFileURL} from 'node:url';import {readFile} from 'node:fs/promises';
 const dir=process.env.MECORD_MINIWOB_WORKDIR ? path.resolve(process.env.MECORD_MINIWOB_WORKDIR) : null;
 if(!dir)throw Error('MECORD_MINIWOB_WORKDIR_REQUIRED');
@@ -125,7 +126,7 @@ const svr=http.createServer(async(req,res)=>{
   if(Object.keys(input).some(k=>!['op','ref','value','key'].includes(k)))throw Error('EXTRA_MODEL_PARAMETERS');
   // Provider set_value is reserved for sliders; native text inputs use type
   // (which safely replaces the current value, including clear-to-empty).
-  const dispatchOp=input.op==='set_value' && observed?.role!=='slider' ? 'type' : input.op;
+  const dispatchOp=providerOperationForInput(input.op,observed?.role);
   const actionInput={targetId,operation:dispatchOp,target:{ref}};
   if(input.op==='click_relative'){actionInput.xRatio=0.5;actionInput.yRatio=0.5;}
   if(['type','set_value','select','select_date','keyboard_text','format_text','select_text_range'].includes(input.op)){
@@ -134,17 +135,13 @@ const svr=http.createServer(async(req,res)=>{
    actionInput.value=input.value;
   }
   if(input.op==='scroll'){
-   const match=/^(up|down)(?::(80|160|320))?$/.exec(input.value);
-   if(!match)throw Error('INVALID_SCROLL_DIRECTION');
    actionInput.deltaX=0;
-   actionInput.deltaY=(match[1]==='up'?-1:1)*Number(match[2]||80);
+   actionInput.deltaY=boundedScrollDelta(input.value);
   }
   if(input.op==='drag_by'||input.op==='resize'){
-   const match=/^(left|right|up|down):(40|80|160)$/.exec(input.value);
-   if(!match)throw Error('INVALID_DISPLACEMENT');
-   const delta=Number(match[2]);
-   actionInput.deltaX=match[1]==='left'?-delta:match[1]==='right'?delta:0;
-   actionInput.deltaY=match[1]==='up'?-delta:match[1]==='down'?delta:0;
+   const {deltaX,deltaY}=boundedDisplacement(input.value);
+   actionInput.deltaX=deltaX;
+   actionInput.deltaY=deltaY;
   }
   if(input.op==='format_text'&&!new Set(['bold','italic','underline']).has(input.value))throw Error('INVALID_FORMAT');
   if(input.op==='select_text_range'){
