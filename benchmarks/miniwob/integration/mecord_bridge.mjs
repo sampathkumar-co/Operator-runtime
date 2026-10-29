@@ -1,7 +1,7 @@
 // Isolated, source-pinned Mecord MiniWoB bridge. No production relay or credentials.
 import http from 'node:http';import path from 'node:path';
 import {timingSafeEqual} from 'node:crypto';
-import {providerOperationForInput,boundedScrollDelta,boundedDisplacement} from './bridge_actions.mjs';
+import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,relativePointForLabel} from './bridge_actions.mjs';
 import {captureSyntheticView,allowedSyntheticFrameUrl} from './browser_visual.mjs';
 import {pathToFileURL} from 'node:url';import {readFile} from 'node:fs/promises';
 const dir=process.env.MECORD_MINIWOB_WORKDIR ? path.resolve(process.env.MECORD_MINIWOB_WORKDIR) : null;
@@ -103,7 +103,7 @@ const svr=http.createServer(async(req,res)=>{
      actionable:false,scrollable:true,context:{frameDepth:0,shadowDepth:0},geometry:ps.geometry},generation));
    }
    const refs=new Set(),relativeRefs=new Set(),sortableRefs=new Set(),scrollRefs=new Set(),controlInfo=new Map();
-   const svgGeometry=new Set(['text','circle','ellipse','rect','path','polygon','polyline','line']);
+   const svgGeometry=new Set(['text','circle','ellipse','rect','path','polygon','polyline','line','canvas','img']);
    for(const item of [...controls,...visuals]){
     if(item.disabled===true||typeof item.ref!=='string')continue;
     if(!refRE.test(item.ref)||!item.ref.startsWith('b-'+item.observationGeneration+'-'))continue;
@@ -160,7 +160,7 @@ const svr=http.createServer(async(req,res)=>{
   // (which safely replaces the current value, including clear-to-empty).
   const dispatchOp=providerOperationForInput(input.op,observed?.role);
   const actionInput={targetId,operation:dispatchOp,target:{ref}};
-  if(input.op==='click_relative'){actionInput.xRatio=0.5;actionInput.yRatio=0.5;}
+  if(input.op==='click_relative'){Object.assign(actionInput,relativePointForLabel(input.value));}
   if(['type','set_value','select','select_date','keyboard_text','format_text','select_text_range'].includes(input.op)){
    if(typeof input.value!=='string'||(input.value.length===0&&input.op!=='set_value')||input.value.length>400)throw Error('INVALID_TEXT_VALUE');
    if(input.op==='select_date'&&!/^\d{4}-\d{2}-\d{2}$/.test(input.value))throw Error('DATE_VALUE_INVALID');
