@@ -26,6 +26,9 @@ arg.add_argument("--max-steps", type=int, default=4)
 arg.add_argument("--cap-usd", type=float, default=0.005)
 arg.add_argument("--seed", type=int, default=42)
 arg.add_argument("--task-id", type=str, default=None)
+arg.add_argument("--start-at",type=int,default=0)
+arg.add_argument("--count",type=int,default=None)
+arg.add_argument("--campaign-tag",type=str,default="v6")
 args = arg.parse_args()
 assert 1 <= args.limit <= 125 and 1 <= args.workers <= 4
 assert 0 <= args.worker < args.workers and 1 <= args.max_steps <= 10
@@ -69,6 +72,14 @@ if args.task_id:
     if args.task_id not in all_tasks:
         raise RuntimeError("TASK_ID_NOT_IN_FROZEN_BROWSERGYM_ROSTER")
     task_plan = [(all_tasks.index(args.task_id), args.task_id)]
+frozen_plan_sha256=sha256(json.dumps(task_plan,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
+if type(args.start_at) is not int or not 0 <= args.start_at < len(task_plan):
+    raise RuntimeError("INVALID_CAMPAIGN_OFFSET")
+if args.count is not None and (type(args.count) is not int or not 1 <= args.count <= len(task_plan)-args.start_at):
+    raise RuntimeError("INVALID_CAMPAIGN_COUNT")
+if not re.fullmatch(r"[a-z0-9]{1,14}",args.campaign_tag):
+    raise RuntimeError("INVALID_CAMPAIGN_TAG")
+task_plan=task_plan[args.start_at:args.start_at+args.count if args.count is not None else None]
 cost = 0.0
 in_tokens = 0
 out_tokens = 0
@@ -77,7 +88,7 @@ max_out_tokens = 2048
 output_dir = B / "results"
 output_dir.mkdir(parents=True, exist_ok=True)
 case_label = (args.task_id.split(".")[-1] if args.task_id else f"{args.limit}")
-output_path = output_dir / f"meta_rc6_grounded_portable_{case_label}_seed{args.seed}_worker{args.worker}of{args.workers}.jsonl"
+output_path = output_dir / f"meta_rc6_grounded_{args.campaign_tag}_{case_label}_seed{args.seed}_worker{args.worker}of{args.workers}_offset{args.start_at}_count{len(task_plan)}.jsonl"
 if output_path.exists():
     raise RuntimeError("RESULTS_ALREADY_EXIST_REFUSE_OVERWRITE")
 # Lock per benchmark workspace and reserve the maximum estimated API charge
@@ -315,6 +326,8 @@ try:
                 break
     print("META_MECORD_SUMMARY=" + json.dumps({
         "attempted":attempted_count,"scheduled":len(task_plan),
+        "frozen_plan_sha256":frozen_plan_sha256,
+        "start_at":args.start_at,"count":len(task_plan),"campaign_tag":args.campaign_tag,
         "scored":attempted_count - (1 if campaign_stop else 0),
         "status":"COMPLETE" if attempted_count==len(task_plan) else "PARTIAL",
         "campaign_stop":campaign_stop,
