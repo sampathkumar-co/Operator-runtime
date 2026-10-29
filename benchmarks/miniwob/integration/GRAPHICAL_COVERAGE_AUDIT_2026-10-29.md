@@ -127,3 +127,24 @@ modifier and pointer trajectory operations.
   original-device release acceptance.
 
 **Release decision: KEEP DRAFT / DO NOT PUBLISH.**
+
+## Additional native graphical provider work (draft PR #696)
+
+After this audit identified the missing provider primitives, a separate
+**unmerged, unreleased** source PR was opened:
+https://github.com/sampathkumar-co/Operator-runtime/pull/696
+
+That branch stages three typed operations on the Mecord CDP provider:
+`double_click`, `shift_click`, and `drag_path` (2-24 normalized points
+inside one exact observed ref). Path points are validated before dispatch,
+including freshness and per-point hit testing; the native CDP dispatch
+maintains a held left button between points. Canvas bitmap updates may
+not produce a DOM state delta, so action dispatch **does not certify task
+success**, and identical no-progress gestures remain replay-limited.
+
+This code is **not present in runtime 2.0.7-rc.6**. The existing MiniWoB
+bridge intentionally does not advertise these three operations until a
+source-pinned candidate contains them and a real CDP qualification succeeds.
+This report therefore continues to mark them as unsupported in the actual
+current benchmark environment. Provider source CI and physical evaluation
+remain separate gates.
