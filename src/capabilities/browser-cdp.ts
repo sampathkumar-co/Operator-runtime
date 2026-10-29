@@ -1068,7 +1068,10 @@ export class BrowserCdpProvider implements CapabilityProvider {
         throw new OperatorError('BROWSER_DOWNLOAD_CANCELED', 'Browser download was canceled.', { retryable: true, details: downloadResult });
       }
       const stateProgress = downloadResult?.state === 'completed' || directSemanticProgress || JSON.stringify(beforeRelevant) !== JSON.stringify(afterRelevant);
-      if (['drag', 'drag_by', 'drag_between', 'drag_path'].includes(operation) && !stateProgress) {
+      // A canvas can change pixels without changing its DOM tree. Preserve the
+      // truthful input-dispatched result for independently verified drawing
+      // tasks, but still prohibit repeating an unchanged identical stroke.
+      if (['drag', 'drag_by', 'drag_between'].includes(operation) && !stateProgress) {
         // An unobserved page delta does not prove no physical effect: a drag
         // was dispatched and may have changed hidden server or application state.
         // Never mark it side-effect-free or permit blind replay.
