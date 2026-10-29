@@ -38,7 +38,7 @@ import type { OriginalRecoveryOwnerResolution } from './operator-pre-dispatch-ad
 import { buildControlCenterRuntimeStatus } from '../../../src/core/control-center-runtime-status.ts';
 import { buildControlCenterTaskTimeline } from '../../../src/core/control-center-task-timeline.ts';
 import { projectDoctorOnboardingEvidence, type DoctorObservation } from '../../../src/core/control-center-doctor-evidence.ts';
-import { ControlCenterSessions, browserUiRouteAllowed, controlCenterBrowserRequestAllowed } from './control-center-session.ts';
+import { ControlCenterSessions, browserUiRouteAllowed, controlCenterBrowserRequestAllowed, confirmLocalBrowserLoginOnWindows } from './control-center-session.ts';
 import { resourceKeysForAction } from '../../../src/core/resource-identity.ts';
 import { capabilityRiskRule } from '../../../src/core/capability-policy.ts';
 import type { EnterpriseAuthorizationContext, EnterprisePolicyStore } from '../../../src/core/enterprise-policy.ts';
@@ -122,6 +122,8 @@ export function createLocalAgentServer(options: {
   beforeActionReceiptCompletion?: (input: { action: ActionRequest; result: ActionResult }) => Promise<void> | void;
   sessionApprovals?: SessionApprovalStore;
   recoveryToken?: string;
+  /** Test-only native gesture adapter; production uses the Windows owner dialog. */
+  confirmLocalBrowserLogin?: () => Promise<boolean>;
   onEmergencyStop?: () => Promise<void> | void;
   onEmergencyClear?: () => Promise<void> | void;
   audit?: AuditLog;
@@ -175,6 +177,8 @@ export function createLocalAgentServer(options: {
   const activeTeamActions = new Map<string, { missionId: string; workItemId: string; workerId: string; controller: AbortController }>();
   let emergencyExecutionGeneration = new AbortController();
   const browserSessions = new ControlCenterSessions();
+  let nativeLoginBusy = false;
+  let lastNativeLoginAt = 0;
 
   const abortTeamActions = (predicate: (entry: { missionId: string; workItemId: string; workerId: string }) => boolean) => {
     const aborted: Array<{ missionId: string; workItemId: string; workerId: string }> = [];
@@ -467,6 +471,46 @@ export function createLocalAgentServer(options: {
         return;
       }
       send(res, 200, { ok: true, ...browserSessions.issueCode() });
+      return;
+    }
+
+    // This route is only a request to show a native Windows owner login dialog.
+    // It never exposes the agent bearer or recovery token and requires a
+    // visible local human gesture before issuing any browser cookie.
+    if (pathname === '/v1/control-center/browser-login/windows' && req.method === 'POST') {
+      if (req.headers.authorization || req.headers['x-operator-relay-request'] ||
+          req.headers['x-operator-enterprise-context'] ||
+          !controlCenterBrowserRequestAllowed(req.headers, port, true) ||
+          !String(req.headers['content-type'] ?? '').startsWith('application/json')) {
+        send(res, 403, { ok: false, error: { code: 'NATIVE_BROWSER_LOGIN_DENIED',
+          message: 'Local same-origin Windows confirmation required.' } });
+        return;
+      }
+      if (process.platform !== 'win32' && !options.confirmLocalBrowserLogin) {
+        send(res, 503, { ok: false, error: { code: 'NATIVE_BROWSER_LOGIN_UNAVAILABLE' } });
+        return;
+      }
+      if (nativeLoginBusy || Date.now() - lastNativeLoginAt < 15_000) {
+        send(res, 429, { ok: false, error: { code: 'NATIVE_BROWSER_LOGIN_RATE_LIMITED' } });
+        return;
+      }
+      nativeLoginBusy = true;
+      lastNativeLoginAt = Date.now();
+      try {
+        await readJson(req); // Require bounded, valid JSON before opening a dialog.
+        const approved = await (options.confirmLocalBrowserLogin ?? confirmLocalBrowserLoginOnWindows)();
+        if (!approved) {
+          send(res, 403, { ok: false, error: { code: 'NATIVE_BROWSER_LOGIN_NOT_CONFIRMED' } });
+          return;
+        }
+        const secret = browserSessions.issueNativeOwnerSession();
+        res.setHeader('Set-Cookie', browserSessions.cookie(secret));
+        send(res, 200, { ok: true, session: 'native-windows-owner', expiresAfterSeconds: 14400 });
+      } catch {
+        send(res, 400, { ok: false, error: { code: 'NATIVE_BROWSER_LOGIN_UNAVAILABLE' } });
+      } finally {
+        nativeLoginBusy = false;
+      }
       return;
     }
 
