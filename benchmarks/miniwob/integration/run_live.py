@@ -76,6 +76,39 @@ api_calls = 0
 max_out_tokens = 2048
 output_dir = B / "results"
 output_dir.mkdir(parents=True, exist_ok=True)
+# Lock per benchmark workspace and reserve the maximum estimated API charge
+# DURABLY before any outbound request. Charges are never refunded for transport
+# errors because a provider could have processed the request before timing out.
+budget_lock = output_dir / ".mecord-budget.lock"
+try:
+    lock_fd = os.open(budget_lock,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+    os.write(lock_fd,str(os.getpid()).encode())
+    os.close(lock_fd)
+except FileExistsError:
+    raise RuntimeError("BENCHMARK_BUDGET_LOCK_EXISTS")
+ledger_path = output_dir / "mecord-api-reservations.jsonl"
+lifetime_cap_usd = 0.07  # < INR 7 at ~95.3/USD; leaves buffer for prior use + FX
+historical_reservations = 0.0
+if ledger_path.exists():
+    for line in ledger_path.read_text(encoding="utf8").splitlines():
+        entry=json.loads(line)
+        amount=entry.get("usd")
+        if type(amount) not in (int,float) or not math.isfinite(amount) or amount<=0:
+            raise RuntimeError("MODEL_LEDGER_CORRUPT")
+        historical_reservations+=amount
+run_reserved = 0.0
+def reserve_budget(usd):
+    global historical_reservations,run_reserved
+    if not math.isfinite(usd) or usd<=0:
+        raise RuntimeError("INVALID_API_RESERVATION")
+    if run_reserved+usd > args.cap_usd or historical_reservations+usd > lifetime_cap_usd:
+        raise RuntimeError("BUDGET_CAP_REACHED")
+    with ledger_path.open("a",encoding="utf8") as ledger:
+        ledger.write(json.dumps({"usd":round(usd,9),"type":"api_reservation"})+"\n")
+        ledger.flush()
+        os.fsync(ledger.fileno())
+    historical_reservations+=usd
+    run_reserved+=usd
 case_label = (args.task_id.split(".")[-1] if args.task_id else f"{args.limit}")
 output_path = output_dir / f"meta_rc6_grounded_portable_{case_label}_seed{args.seed}_worker{args.worker}of{args.workers}.jsonl"
 if output_path.exists():
@@ -101,8 +134,8 @@ def request_model(prompt, *, output_limit=None):
     tokens = output_limit if output_limit is not None else max_out_tokens
     if type(tokens) is not int or not 256 <= tokens <= 3072:
         raise RuntimeError("MODEL_OUTPUT_CAP_INVALID")
-    reserve = ((len(prompt)/1.0)*0.10+tokens*0.20)/1e6
-    if cost+reserve>args.cap_usd:raise RuntimeError("BUDGET_CAP_REACHED")
+    reserve = (len(prompt.encode("utf8"))*0.10+tokens*0.20)/1e6
+    reserve_budget(reserve)
     payload={"model":"muse-spark-1.3-contributor",
              "messages":[{"role":"user","content":prompt}],
              "response_format":JSON_ACTION_SCHEMA,
@@ -110,18 +143,15 @@ def request_model(prompt, *, output_limit=None):
     req=urllib.request.Request("https://api.meta.ai/v1/chat/completions",
                                data=json.dumps(payload).encode(),method="POST",
                                headers={"Authorization":"Bearer "+key,"Content-Type":"application/json"})
-    for retry in range(2):
-        try:
-            with urllib.request.urlopen(req,timeout=55) as r:data=json.load(r)
-            break
-        except urllib.error.HTTPError as e:
-            if e.code in (429,503) and retry==0:
-                time.sleep(3)
-                continue
-            raise RuntimeError("META_HTTP_"+str(e.code))
+    try:
+        with urllib.request.urlopen(req,timeout=55) as response:data=json.load(response)
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError("META_HTTP_"+str(exc.code)) from None
     u=data.get("usage") or {}
     ti=int(u.get("prompt_tokens") or 0);to=int(u.get("completion_tokens") or 0)
     in_tokens+=ti;out_tokens+=to;api_calls+=1
+    if ti<=0 or to<0:
+        raise RuntimeError("MODEL_USAGE_MISSING")
     cost+=(ti*.10+to*.20)/1e6
     choices=data.get("choices") or []
     if not choices:return {}, "incomplete"
@@ -253,7 +283,9 @@ try:
     print("META_MECORD_SUMMARY=" + json.dumps({
         "attempted": len(task_plan), "api_calls": api_calls,
         "input_tokens": in_tokens, "output_tokens": out_tokens,
-        "estimated_cost_usd": round(cost, 7), "cap_usd": args.cap_usd,
+        "estimated_cost_usd":round(cost,7), "reserved_usd":round(run_reserved,7),
+        "workspace_reserved_usd":round(historical_reservations,7),
+        "lifetime_cap_usd":lifetime_cap_usd,"cap_usd":args.cap_usd,
         "path": str(output_path), "worker": args.worker, "workers": args.workers,
         "note": "Synthetic MiniWoB, real Mecord browser.cdp, no production relay."}), flush=True)
 finally:
@@ -262,3 +294,5 @@ finally:
     except:bridge.kill()
     key = None
     BrowserType.launch = _ORIGINAL_LAUNCH
+    try:budget_lock.unlink(missing_ok=True)
+    except OSError:pass
