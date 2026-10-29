@@ -30,6 +30,9 @@ const authorized=header=>{
  return got.length===expectedAuth.length&&timingSafeEqual(got,expectedAuth);
 };
 let provider=new BrowserCdpProvider(endpoint),inspectState=null,sequence=0,busy=false;
+const finite=n=>typeof n==='number'&&Number.isFinite(n)&&Math.abs(n)<100000?n:null;
+const safePoint=p=>p&&typeof p==='object'?{x:finite(p.x),y:finite(p.y)}:null;
+const safeColor=(x)=>typeof x==='string'?x.slice(0,64):'';
 const project=(item,sourceGeneration='',frameTargetId='')=>({
  observationGeneration:sourceGeneration,
  sourceFrameTargetId:frameTargetId||(item.context?.frameDepth>0?'same-origin-main':''),
@@ -44,7 +47,22 @@ const project=(item,sourceGeneration='',frameTargetId='')=>({
  repeatedOrdinal:Number.isInteger(item.repeatedOrdinal)?item.repeatedOrdinal:null,
  context:{frameDepth:item.context?.frameDepth,shadowDepth:item.context?.shadowDepth},
  geometry:item.geometry||item.rect,
- perceptibleState:{text:item.perceptibleState?.text||''}
+ perceptibleState:{text:typeof item.perceptibleState?.text==='string'?item.perceptibleState.text.slice(0,200):''},
+ colors:{fill:safeColor(item.colors?.fill||item.perceptibleState?.colors?.fill),
+   stroke:safeColor(item.colors?.stroke||item.perceptibleState?.colors?.stroke),
+   background:safeColor(item.colors?.background||item.perceptibleState?.colors?.background),
+   color:safeColor(item.colors?.color||item.perceptibleState?.colors?.color)},
+ numericValue:finite(item.numericValue),
+ viewportZone:typeof item.viewportZone==='string'?item.viewportZone.slice(0,40):'',
+ shape:{center:safePoint(item.viewportCenter),
+   circle:item.circle&&typeof item.circle==='object'?{cx:finite(item.circle.cx),cy:finite(item.circle.cy),r:finite(item.circle.r)}:null,
+   line:item.viewportLine&&typeof item.viewportLine==='object'?{
+    x1:finite(item.viewportLine.x1),y1:finite(item.viewportLine.y1),
+    x2:finite(item.viewportLine.x2),y2:finite(item.viewportLine.y2)}:null,
+   ellipse:item.ellipse&&typeof item.ellipse==='object'?{
+    cx:finite(item.ellipse.cx),cy:finite(item.ellipse.cy),
+    rx:finite(item.ellipse.rx),ry:finite(item.ellipse.ry)}:null,
+   points:Array.isArray(item.viewportPoints)?item.viewportPoints.slice(0,16).map(safePoint).filter(Boolean):[]}
 });
 const error=(res,msg)=>{res.writeHead(400);res.end(JSON.stringify({ok:false,error:String(msg).slice(0,120)}));};
 async function exactTarget(){
