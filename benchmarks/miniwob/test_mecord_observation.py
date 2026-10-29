@@ -164,4 +164,54 @@ class Grounding(unittest.TestCase):
  def test_sortable_nonlist_elements_not_exposed(self):
     a=item(role="",active=False);a["tag"]="div";a["semanticPath"]="body>div"
     self.assertEqual(observed_mecord_candidates(obs([], [a])),[])
+
+ def test_stable_identity_denies_duplicate_across_fresh_refs(self):
+    old=observed_mecord_candidates(obs([item()]))[0]
+    new=observed_mecord_candidates(obs([item(ref="b-abc123-7-2")]))[0]
+    self.assertEqual(old["identity"],new["identity"])
+    with self.assertRaisesRegex(MecordObservationError,"UNSAFE_REPLAY_STABLE_TARGET"):
+     verified_action({"op":"click","bid":new["bid"]},[new],
+       [{"op":"click","bid":old["bid"],"identity":old["identity"],"value":""}]*2)
+ def test_wait_without_target_and_wait_with_target_rejected(self):
+    cs=observed_mecord_candidates(obs([item()]))
+    self.assertEqual(verified_action({"op":"wait","bid":"","value":"","key":""},cs,[])["op"],"wait")
+    with self.assertRaisesRegex(MecordObservationError,"WAIT_MUST_HAVE_NO_TARGET"):
+     verified_action({"op":"wait","bid":cs[0]["bid"]},cs,[])
+ def test_clear_textbox_to_empty_is_supported(self):
+    cs=observed_mecord_candidates(obs([item(role="textbox")]))
+    self.assertEqual(verified_action({"op":"set_value","bid":cs[0]["bid"],"value":""},cs,[])["value"],"")
+ def test_observed_control_state_is_preserved(self):
+    a=item(role="checkbox")
+    a.update({"checked":True,"selected":False,"expanded":True,"value":"abc","placeholder":"Search"})
+    c=observed_mecord_candidates(obs([a]))[0]
+    self.assertIs(c["checked"],True)
+    self.assertIs(c["selected"],False)
+    self.assertEqual(c["currentValue"],"abc")
+ def test_visuals_are_not_starved_by_many_controls(self):
+    controls=[item(ref=f"b-abc123-7-{i+1}",name=f"Button {i}") for i in range(120)]
+    visual=item(ref="b-abc123-7-z",role="",active=False)
+    visual["tag"]="circle"
+    cs=observed_mecord_candidates(obs(controls,[visual]),limit=90)
+    self.assertEqual(len(cs),90)
+    self.assertIn("b-abc123-7-z",[c["bid"] for c in cs])
+ def test_large_bounded_scroll_and_invalid_scroll(self):
+    a=item(role="combobox");a["scrollable"]=True
+    cs=observed_mecord_candidates(obs([a]))
+    self.assertEqual(verified_action({"op":"scroll","bid":cs[0]["bid"],"value":"down:320"},cs,[])["value"],"down:320")
+    with self.assertRaisesRegex(MecordObservationError,"SCROLL_TARGET_OR_DIRECTION_INVALID"):
+     verified_action({"op":"scroll","bid":cs[0]["bid"],"value":"down:2000"},cs,[])
+ def test_bounded_extended_editing_and_displacement(self):
+    cs=observed_mecord_candidates(obs([item(role="textbox")]))
+    bid=cs[0]["bid"]
+    for op,value in [("keyboard_text","hello"),("format_text","bold"),("select_text_range","1:3"),("drag_by","right:80"),("resize","down:40")]:
+     with self.subTest(op=op):
+      self.assertEqual(verified_action({"op":op,"bid":bid,"value":value},cs,[])["op"],op)
+    with self.assertRaisesRegex(MecordObservationError,"DISPLACEMENT_INVALID"):
+     verified_action({"op":"drag_by","bid":bid,"value":"right:2000"},cs,[])
+ def test_hotkey_allowlist_and_rejection(self):
+    cs=observed_mecord_candidates(obs([item()]))
+    bid=cs[0]["bid"]
+    self.assertEqual(verified_action({"op":"hotkey","bid":bid,"key":"CTRL+A"},cs,[])["key"],"CTRL+A")
+    with self.assertRaisesRegex(MecordObservationError,"HOTKEY_INVALID"):
+     verified_action({"op":"hotkey","bid":bid,"key":"CTRL+ALT+DELETE"},cs,[])
 if __name__=="__main__":unittest.main(verbosity=2)
