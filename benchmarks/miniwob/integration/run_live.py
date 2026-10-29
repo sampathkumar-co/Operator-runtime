@@ -324,7 +324,7 @@ try:
                             "Return one complete JSON object with exactly op,bid,value,key. "
                             "All fields must be strings and bid must be copied from current candidates.",
                             output_limit=3072 if status=="truncated" else max_out_tokens,
-                             screenshot=screenshot
+                             screenshot=screenshot)
                         event["corrective_model_status"] = status
                     event["api_calls_after"] = api_calls
                     event["input_tokens_used"] = in_tokens - event["input_tokens_before"]
