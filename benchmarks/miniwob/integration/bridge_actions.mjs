@@ -5,17 +5,19 @@ export function providerOperationForInput(op, observedRole) {
 }
 
 export function boundedScrollDelta(value) {
-  const match=/^(up|down)(?::(80|160|320))?$/.exec(value);
-  if(!match) throw new Error('INVALID_SCROLL_DIRECTION');
-  return (match[1]==='up'?-1:1)*Number(match[2]||80);
+ const m=/^(up|down|left|right)(?::(40|80|160|320|640))?$/.exec(value);
+ if(!m)throw new Error('INVALID_SCROLL_DIRECTION');
+ const d=Number(m[2]||80);
+ return {deltaX:m[1]==='left'?-d:m[1]==='right'?d:0,
+         deltaY:m[1]==='up'?-d:m[1]==='down'?d:0};
 }
 
 export function boundedDisplacement(value) {
-  const match=/^(left|right|up|down):(40|80|160)$/.exec(value);
-  if(!match) throw new Error('INVALID_DISPLACEMENT');
-  const d=Number(match[2]);
-  return {deltaX:match[1]==='left'?-d:match[1]==='right'?d:0,
-          deltaY:match[1]==='up'?-d:match[1]==='down'?d:0};
+ const m=/^(left|right|up|down|up-left|up-right|down-left|down-right):(10|20|40|80|160|320)$/.exec(value);
+ if(!m)throw new Error('INVALID_DISPLACEMENT');
+ const d=Number(m[2]);const direction=m[1];
+ return {deltaX:direction.includes('left')?-d:direction.includes('right')?d:0,
+         deltaY:direction.includes('up')?-d:direction.includes('down')?d:0};
 }
 
 // Model chooses one of nine bounded positions within an observed element.
@@ -28,4 +30,15 @@ export function relativePointForLabel(label) {
  if(label===''||label===undefined)label='center';
  if(!Object.hasOwn(points,label))throw Error('INVALID_RELATIVE_POINT');
  return {xRatio:points[label][0],yRatio:points[label][1]};
+}
+
+// Bounded ratios are always inside a current observed element; the CDP provider
+// performs its own pointer hit-test. There is no unrestricted screen click.
+export function boundedRelativePoint(value){
+ if(typeof value!=='string')throw new Error('INVALID_RELATIVE_POINT');
+ if(/^(?:0\\.[0-9]{1,2}|1(?:\\.0{1,2})?|0):(?:0\\.[0-9]{1,2}|1(?:\\.0{1,2})?|0)$/.test(value)){
+  const [xRatio,yRatio]=value.split(':').map(Number);
+  return {xRatio,yRatio};
+ }
+ return relativePointForLabel(value);
 }
