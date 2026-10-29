@@ -2,6 +2,7 @@
 import http from 'node:http';import path from 'node:path';
 import {timingSafeEqual} from 'node:crypto';
 import {providerOperationForInput,boundedScrollDelta,boundedDisplacement} from './bridge_actions.mjs';
+import {captureSyntheticView,allowedSyntheticFrameUrl} from './browser_visual.mjs';
 import {pathToFileURL} from 'node:url';import {readFile} from 'node:fs/promises';
 const dir=process.env.MECORD_MINIWOB_WORKDIR ? path.resolve(process.env.MECORD_MINIWOB_WORKDIR) : null;
 if(!dir)throw Error('MECORD_MINIWOB_WORKDIR_REQUIRED');
@@ -10,10 +11,14 @@ if(!root)throw Error('MECORD_MINIWOB_RUNTIME_PATH_REQUIRED');
 const manifest=JSON.parse(await readFile(path.join(root,'runtime','runtime-manifest.json'),'utf8'));
 if(manifest.version!=='2.0.7-rc.6'||manifest.sourceCommit!=='beef93d3aa9c2c1363e92a6b3b78c893bf1a0ad4')throw Error('UNPINNED_RUNTIME');
 const {BrowserCdpProvider}=await import(pathToFileURL(path.join(root,'runtime','app','src','capabilities','browser-cdp.js')).href);
+const {CdpConnection}=await import(pathToFileURL(path.join(root,'runtime','app','src','capabilities','browser-cdp-connection.js')).href);
 const port=Number(process.env.MECORD_BENCH_CDP_PORT||9330);
 if(!Number.isInteger(port)||port<9300||port>9399)throw Error('INVALID_LOCAL_CDP_PORT');
 const endpoint='http://127.0.0.1:'+port;
 const prefix=pathToFileURL(path.join(dir,'miniwob-plusplus','miniwob','html','miniwob')+path.sep).href;
+const frameOrigins=(process.env.MECORD_MINIWOB_FRAME_ORIGINS||'').split(',').filter(Boolean);
+for(const origin of frameOrigins){const u=new URL(origin);
+ if(u.origin!==origin||!['http:','https:'].includes(u.protocol)||u.username||u.password)throw Error('FRAME_ORIGIN_INVALID');}
 const refRE=/^b-([a-z0-9]+)-([a-z0-9]+)-([a-z0-9]+)$/;
 const bridgeToken=process.env.MECORD_MINIWOB_BRIDGE_TOKEN||'';
 if(!/^[0-9a-f]{64}$/.test(bridgeToken))throw Error('BENCHMARK_BRIDGE_TOKEN_REQUIRED');
@@ -24,7 +29,8 @@ const authorized=header=>{
  return got.length===expectedAuth.length&&timingSafeEqual(got,expectedAuth);
 };
 let provider=new BrowserCdpProvider(endpoint),inspectState=null,sequence=0,busy=false;
-const project=item=>({
+const project=(item,sourceGeneration='',frameTargetId='')=>({
+ observationGeneration:sourceGeneration,sourceFrameTargetId:frameTargetId,
  ref:item.ref,role:item.role||'',tag:item.tag||'',primitive:item.primitive||'',
  name:item.name||'',type:item.type||'',actionable:item.actionable===true,disabled:item.disabled===true,
  groupRole:item.groupRole||'',semanticPath:item.semanticPath||'',scrollable:item.scrollable===true,
@@ -46,7 +52,7 @@ async function exactTarget(){
  if(!Array.isArray(items))throw Error('INVALID_CDP_TABS');
  const tabs=items.filter(t=>t&&t.type==='page'&&typeof t.url==='string'&&t.url.startsWith(prefix));
  if(tabs.length!==1)throw Error('TASK_TAB_NOT_UNIQUE');
- return tabs[0].id;
+ return tabs[0];
 }
 const svr=http.createServer(async(req,res)=>{
  res.setHeader('content-type','application/json');res.setHeader('cache-control','no-store');
@@ -59,9 +65,11 @@ const svr=http.createServer(async(req,res)=>{
   for await(const chunk of req){body+=chunk.toString();if(body.length>10000)throw Error('ACTION_TOO_LARGE');}
   const input=JSON.parse(body);
   if(!input||typeof input!=='object'||Array.isArray(input))throw Error('INVALID_ACTION');
-  const targetId=await exactTarget();
+  const taskTab=await exactTarget();
+  const targetId=taskTab.id;
   if(input.op==='inspect'){
-   if(Object.keys(input).some(k=>k!=='op'))throw Error('EXTRA_INSPECT_PARAMETERS');
+   if(Object.keys(input).some(k=>!['op','visual'].includes(k))||
+      (input.visual!==undefined&&typeof input.visual!=='boolean'))throw Error('EXTRA_INSPECT_PARAMETERS');
    inspectState=null;
    const action={id:'miniwob-inspect-'+(++sequence),capability:'browser.inspect',risk:'read',
     input:{targetId,observation:{maxControls:160,maxVisuals:160,maxBytes:131072}}};
@@ -72,19 +80,34 @@ const svr=http.createServer(async(req,res)=>{
    if(!semantic||typeof semantic.observationGeneration!=='string')throw Error('NO_SEMANTIC_OBSERVATION');
    if(!Array.isArray(semantic.controls)||!Array.isArray(semantic.visuals))throw Error('MISSING_OBSERVATION_ARRAYS');
    const generation=semantic.observationGeneration;
-   const controls=semantic.controls.slice(0,160).map(project),visuals=semantic.visuals.slice(0,160).map(project);
+   const controls=semantic.controls.slice(0,160).map(i=>project(i,generation)),
+    visuals=semantic.visuals.slice(0,160).map(i=>project(i,generation));
+   let acceptedFrames=0,rejectedFrames=0;
+   const frames=out.output?.page?.frames||[];
+   if(Array.isArray(frames))for(const frame of frames.slice(0,16)){
+    if(!frame||!frame.semantic||typeof frame.semantic.observationGeneration!=='string'||
+      typeof frame.targetId!=='string'||!allowedSyntheticFrameUrl(frame.url,prefix,frameOrigins)){
+     rejectedFrames++;continue;
+    }
+    const g=frame.semantic.observationGeneration;
+    for(const item of (Array.isArray(frame.semantic.controls)?frame.semantic.controls:[]).slice(0,120))
+     controls.push(project(item,g,frame.targetId));
+    for(const item of (Array.isArray(frame.semantic.visuals)?frame.semantic.visuals:[]).slice(0,120))
+     visuals.push(project(item,g,frame.targetId));
+    acceptedFrames++;
+   }
    // A genuine observed page-scroller ref is not in normal controls/visuals.
    const ps=semantic.pageScroll;
    if(ps&&typeof ps.ref==='string'&&refRE.test(ps.ref)&&ps.ref.startsWith('b-'+generation+'-')&&ps.geometry){
     visuals.unshift(project({ref:ps.ref,role:'scrollbar',tag:'div',name:'Page scroller',
-     actionable:false,scrollable:true,context:{frameDepth:0,shadowDepth:0},geometry:ps.geometry}));
+     actionable:false,scrollable:true,context:{frameDepth:0,shadowDepth:0},geometry:ps.geometry},generation));
    }
    const refs=new Set(),relativeRefs=new Set(),sortableRefs=new Set(),scrollRefs=new Set(),controlInfo=new Map();
    const svgGeometry=new Set(['text','circle','ellipse','rect','path','polygon','polyline','line']);
    for(const item of [...controls,...visuals]){
     if(item.disabled===true||typeof item.ref!=='string')continue;
-    if(!refRE.test(item.ref)||!item.ref.startsWith('b-'+generation+'-'))continue;
-    if(item.context.frameDepth!==0)continue;
+    if(!refRE.test(item.ref)||!item.ref.startsWith('b-'+item.observationGeneration+'-'))continue;
+    if(!Number.isInteger(item.context.frameDepth)||item.context.frameDepth<0||item.context.frameDepth>4)continue;
     controlInfo.set(item.ref,item);
     if(item.actionable===true)refs.add(item.ref);
     else if(visuals.includes(item)&&svgGeometry.has(item.tag))relativeRefs.add(item.ref);
@@ -94,10 +117,19 @@ const svr=http.createServer(async(req,res)=>{
        new Set(['div','li','span']).has(item.tag))sortableRefs.add(item.ref);
    }
    inspectState={targetId,generation,refs,relativeRefs,sortableRefs,scrollRefs,controlInfo};
+   let screenshot=null,screenshotStatus='NOT_REQUESTED';
+   if(input.visual===true){
+    try {screenshot=await captureSyntheticView(CdpConnection,taskTab,prefix);screenshotStatus='READY';}
+    catch(e){screenshotStatus=String(e?.message||'VISUAL_CAPTURE_FAILED').slice(0,60);}
+   }
    res.end(JSON.stringify({ok:true,provider:out.provider,durationMs:out.durationMs,
     textExcerpt:typeof semantic.textExcerpt==='string'?semantic.textExcerpt.slice(0,1200):'',
     headings:Array.isArray(semantic.headings)?semantic.headings.filter(x=>typeof x==='string').slice(0,20):[],
     pagination:semantic.pagination||null,
+    frameCoverage:out.output?.page?.frameCoverage||null,
+    acceptedFrames,rejectedFrames,
+    screenshotStatus,screenshot:screenshot?.data||null,
+    screenshotBytes:screenshot?.bytes||0,screenshotSha256:screenshot?.digest||null,
     page:{semantic:{observationGeneration:generation,controls,visuals}},
     observedRefCount:refs.size,visualRelativeRefs:relativeRefs.size,sortableRefs:sortableRefs.size,scrollRefs:scrollRefs.size,truncated:out.output?.truncated===true}));
    return;
@@ -155,7 +187,9 @@ const svr=http.createServer(async(req,res)=>{
    actionInput.keys=input.key.split('+');
   }
   if(input.op==='drag_between'){
+   const sourceFrame=inspectState.controlInfo.get(ref)?.sourceFrameTargetId||'';
    const toRef=input.value;
+   if((inspectState.controlInfo.get(toRef)?.sourceFrameTargetId||'')!==sourceFrame)throw Error('CROSS_FRAME_DRAG_DENIED');
    if(typeof toRef!=='string'||!refRE.test(toRef)||toRef===ref||!inspectState.sortableRefs.has(toRef)||
       toRef.slice(0,toRef.lastIndexOf('-'))!==ref.slice(0,ref.lastIndexOf('-')))throw Error('DRAG_TARGETS_NOT_CURRENT_SORTABLE');
    actionInput.toTarget={ref:toRef};
