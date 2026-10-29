@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
+import path from 'node:path';
 
 export const CONTROL_CENTER_COOKIE = 'mecord_cc_session';
 const CODE_LIFETIME_MS = 90_000;
@@ -72,6 +74,18 @@ export class ControlCenterSessions {
     return key;
   }
 
+  /** Only call after a separate trusted native Windows owner gesture. */
+  issueNativeOwnerSession(now = Date.now()): string {
+    this.sweep(now);
+    const secret = crypto.randomBytes(32).toString('base64url');
+    if (this.sessions.size >= 16) {
+      const oldest = this.sessions.keys().next().value;
+      if (oldest) this.sessions.delete(oldest);
+    }
+    this.sessions.set(digest(secret), { idleUntil: now + SESSION_IDLE_MS, expiresAt: now + SESSION_ABSOLUTE_MS });
+    return secret;
+  }
+
   revoke(sessionKey: string): void {
     this.sessions.delete(sessionKey);
   }
@@ -122,4 +136,45 @@ export function browserUiRouteAllowed(method: string, pathname: string): boolean
       || /^\/v1\/desired-state\/[^/]+\/(?:reconcile|pause|resume)$/.test(pathname);
   }
   return false;
+}
+
+
+/** Terminal-free local Control Center login requires an independent Windows Yes/No gesture. */
+export async function confirmLocalBrowserLoginOnWindows(): Promise<boolean> {
+  if (process.platform !== 'win32' || process.env.MECORD_DISABLE_APPROVAL_UI === '1') return false;
+  const systemRoot = String(process.env.SystemRoot ?? '').trim();
+  if (!/^[A-Za-z]:\\Windows$/i.test(systemRoot)) return false;
+  const executable = path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const script = [
+    'Add-Type -AssemblyName System.Windows.Forms',
+    "$message = 'Allow this browser on the ORIGINAL Windows PC to sign in to Mecord Control Center? This only creates a time-limited dashboard session. It does NOT approve remote actions or recover protected receipts.'",
+    "$response = [System.Windows.Forms.MessageBox]::Show($message,'Mecord Control Center sign-in',",
+    '  [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question,',
+    '  [System.Windows.Forms.MessageBoxDefaultButton]::Button2)',
+    "if ($response -eq [System.Windows.Forms.DialogResult]::Yes) { [Console]::Out.Write('YES'); exit 0 }",
+    'exit 1'
+  ].join('\r\n');
+  return await new Promise<boolean>(resolve => {
+    let settled = false;
+    let stdout = '';
+    const child = spawn(executable, [
+      '-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-STA',
+      '-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')
+    ], { shell: false, windowsHide: true, stdio: ['ignore','pipe','ignore'] });
+    const finish = (allowed: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(allowed);
+    };
+    const timeout = setTimeout(() => { child.kill(); finish(false); }, 90_000);
+    timeout.unref?.();
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data',(chunk: string) => {
+      stdout += chunk;
+      if (stdout.length > 12) { child.kill(); finish(false); }
+    });
+    child.once('error', () => finish(false));
+    child.once('close', code => finish(code === 0 && stdout === 'YES'));
+  });
 }
