@@ -214,7 +214,7 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
                 or action.bid==to_ref
                 or action.bid.rsplit("-",1)[0]!=to_ref.rsplit("-",1)[0]
                 or chosen.get("frameTargetId")!=other[0].get("frameTargetId")):
-            raise MecordObservationError("DRAG_TARGETS_NOT_CURRENT")
+            raise MecordObservationError("DRAG_TARGETS_NOT_CURRENT_SORTABLE" if raw.get("op")=="drag_between" else "DRAG_TARGETS_NOT_CURRENT")
         action=Decision(raw["op"],action.bid,to_ref,"")
     if raw.get("op") in {"drag_by", "resize"}:
         if re.fullmatch(r"(left|right|up|down|up-left|up-right|down-left|down-right):(10|20|40|80|160|320)", str(raw.get("value"))) is None:
@@ -247,7 +247,7 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
         value=raw.get("value","")
         valid_grid=value in {"","center","left","right","top","bottom",
                  "top-left","top-right","bottom-left","bottom-right"}
-        valid_ratio=re.fullmatch(r"(?:0(?:\\.[0-9]{1,2})?|1(?:\\.0{1,2})?):(?:0(?:\\.[0-9]{1,2})?|1(?:\\.0{1,2})?)",value) is not None
+        valid_ratio=re.fullmatch(r"(?:0(?:\.[0-9]{1,2})?|1(?:\.0{1,2})?):(?:0(?:\.[0-9]{1,2})?|1(?:\.0{1,2})?)",value) is not None
         if not (valid_grid or valid_ratio):
             raise MecordObservationError("RELATIVE_POINT_NOT_ENUMERATED")
         if match[0].get("description") != "visual-geometry":
