@@ -134,7 +134,7 @@ JSON_ACTION_SCHEMA = {
     "type":"json_schema",
     "json_schema":{"name":"mecord_browser_action","strict":True,"schema":{
         "type":"object","properties":{
-            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative","select_date"]},
+            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative","select_date","scroll","drag_between"]},
             "bid":{"type":"string"},"value":{"type":"string"},"key":{"type":"string"}
         },
         "required":["op","bid","value","key"],"additionalProperties":False
@@ -238,7 +238,11 @@ try:
                         "Use the exact current bid (a generation-bound Mecord ref); never invent CSS, "
                         "coordinates, refs or authority. Return ONLY JSON with exactly four strings: "
                         '{"op":"click","bid":"b-current-observed-ref","value":"","key":""}. '
-                        "Supported actions: click,set_value,type,select,key_press,hover,click_relative. "
+                        "Supported actions: click,set_value,type,select,key_press,hover,click_relative,select_date,scroll,drag_between. "
+                        "For scrollable candidates use scroll with value exactly up or down. "
+                        "For sortable-geometry candidates use drag_between with bid as observed source ref "
+                        "and value as observed destination ref (same generation). "
+                        "Do not invent either ref. "
                         "For candidates with description visual-geometry, use click_relative. "
                         "Its center is verified and hit-tested by Mecord, with no model-supplied coordinates. "
                         "For date inputs with inputType date use select_date and ISO YYYY-MM-DD. "
@@ -272,7 +276,7 @@ try:
                     op=grounded["op"]
                     bid=grounded["ref"]
                     request = {"op":op,"ref":bid}
-                    if op in {"set_value","type","select","select_date"}:
+                    if op in {"set_value","type","select","select_date","scroll","drag_between"}:
                         request["value"]=grounded["value"]
                     if op=="key_press":request["key"]=grounded["key"]
                     result = bridge_call(port, request)
@@ -287,7 +291,11 @@ try:
                     if done or truncated: break
             except Exception as exc:
                 outcome["error"] = type(exc).__name__ + ":" + str(exc)[:100]
-                if str(exc) in {"BUDGET_CAP_REACHED","MODEL_USAGE_MISSING"} or str(exc).startswith("META_HTTP_429"):
+                if isinstance(exc,(urllib.error.URLError,TimeoutError,ConnectionError)):
+                    campaign_stop = "META_TRANSPORT_UNCERTAIN"
+                    outcome["reward"] = None
+                    outcome["unscored"] = True
+                if str(exc) in {"BUDGET_CAP_REACHED","MODEL_USAGE_MISSING"} or str(exc).startswith(("META_HTTP_429","META_HTTP_503","META_HTTP_504")):
                     campaign_stop = "API_BUDGET_OR_PROVIDER_STOP"
                     # No independently scored task result is inferred when
                     # the call never ran or token accounting is inconclusive.
