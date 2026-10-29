@@ -29,6 +29,7 @@ arg.add_argument("--task-id", type=str, default=None)
 arg.add_argument("--start-at",type=int,default=0)
 arg.add_argument("--count",type=int,default=None)
 arg.add_argument("--campaign-tag",type=str,default="v6")
+arg.add_argument("--vision",action="store_true",help="Opt-in CDP screenshot input for Meta")
 args = arg.parse_args()
 assert 1 <= args.limit <= 125 and 1 <= args.workers <= 4
 assert 0 <= args.worker < args.workers and 1 <= args.max_steps <= 10
@@ -158,7 +159,8 @@ bridge_token = secrets.token_hex(32)
 # Explicit minimal environment: never pass unrelated host credentials to CDP.
 BRIDGE_ENV_ALLOWED = {"PATH","Path","PATHEXT","SystemRoot","SYSTEMROOT","WINDIR",
     "HOME","USERPROFILE","LOCALAPPDATA","APPDATA","TEMP","TMP",
-    "MECORD_MINIWOB_WORKDIR","MECORD_MINIWOB_RUNTIME_PATH","MECORD_BENCH_CDP_PORT"}
+    "MECORD_MINIWOB_WORKDIR","MECORD_MINIWOB_RUNTIME_PATH","MECORD_BENCH_CDP_PORT",
+    "MECORD_MINIWOB_FRAME_ORIGINS"}
 bridge_env = {k:v for k,v in os.environ.items() if k in BRIDGE_ENV_ALLOWED}
 bridge_env["MECORD_MINIWOB_BRIDGE_TOKEN"] = bridge_token
 bridge = subprocess.Popen(["node",str(Path(__file__).with_name("mecord_bridge.mjs"))],
@@ -174,17 +176,28 @@ JSON_ACTION_SCHEMA = {
         "required":["op","bid","value","key"],"additionalProperties":False
     }}
 }
-def request_model(prompt, *, output_limit=None):
+def request_model(prompt, *, output_limit=None, screenshot=None):
     global cost,in_tokens,out_tokens,api_calls
     tokens = output_limit if output_limit is not None else max_out_tokens
     if type(tokens) is not int or not 256 <= tokens <= 3072:
         raise RuntimeError("MODEL_OUTPUT_CAP_INVALID")
     # Reserve against a conservative byte-level input bound plus protocol
     # overhead rather than assuming one token per ten UTF-8 bytes.
-    reserve = ((len(prompt.encode("utf8")) + 1024)*0.10 + tokens*0.20)/1e6
+    if screenshot is not None:
+        if (type(screenshot) is not str or not 0 < len(screenshot) <= 250000 or
+                re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", screenshot) is None):
+            raise RuntimeError("SCREENSHOT_INPUT_INVALID")
+        # Conservative image-token reservation; authoritative usage is provider-reported.
+        image_reserve_tokens = 32768
+        content = [{"type":"text","text":prompt},
+            {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,"+screenshot}}]
+    else:
+        image_reserve_tokens = 0
+        content = prompt
+    reserve = ((len(prompt.encode("utf8")) + 1024 + image_reserve_tokens)*0.10 + tokens*0.20)/1e6
     reserve_budget(reserve)
     payload={"model":"muse-spark-1.3-contributor",
-             "messages":[{"role":"user","content":prompt}],
+             "messages":[{"role":"user","content":content}],
              "response_format":JSON_ACTION_SCHEMA,
              "reasoning_effort":"low",
              "max_tokens":tokens}
@@ -279,7 +292,7 @@ try:
                        "reward": 0.0, "steps": 0, "agent": "meta-muse-spark-1.3-contributor",
                        "executor": "mecord-browser.cdp-isolated", "error": None,
                         "trace":[], "step_limit":args.max_steps, "frozen_plan_sha256":frozen_plan_sha256,
-                        "global_campaign_sha256":global_plan_sha256}
+                        "global_campaign_sha256":global_plan_sha256,"vision_enabled":args.vision}
             env = None
             try:
                 env = gym.make(task_id, headless=True)
@@ -293,7 +306,7 @@ try:
                         raise RuntimeError("TASK_WALL_TIMEOUT")
                     # Mecord RC6, not BrowserGym AX, is the dispatch authority.
                     # Each turn receives fresh generation-bound refs and visual geometry.
-                    mecord_inspection = bridge_call(port, {"op":"inspect"})
+                    mecord_inspection = bridge_call(port, {"op":"inspect","visual":args.vision})
                     if not mecord_inspection.get("ok") or mecord_inspection.get("provider") != "browser.cdp":
                         raise RuntimeError("MECORD_OBSERVATION_FAILED")
                     candidates = observed_mecord_candidates(mecord_inspection,limit=90)
@@ -303,7 +316,12 @@ try:
                     event.update({"observed_candidates":len(candidates),
                         "hidden_candidates":hidden_count,
                         "observation_generation":mecord_inspection["page"]["semantic"]["observationGeneration"],
-                        "observation_pagination":mecord_inspection.get("pagination")})
+                        "observation_pagination":mecord_inspection.get("pagination"),
+                         "accepted_frames":mecord_inspection.get("acceptedFrames"),
+                         "rejected_frames":mecord_inspection.get("rejectedFrames"),
+                         "frame_coverage":mecord_inspection.get("frameCoverage"),
+                         "screenshot_status":mecord_inspection.get("screenshotStatus"),
+                         "screenshot_sha256":mecord_inspection.get("screenshotSha256")})
                     prompt = (
                         "You control an isolated synthetic MiniWoB page. Choose one next action "
                         "from Mecord's CURRENT verified actionable controls and visual objects. "
@@ -318,8 +336,8 @@ try:
                         "For sortable-geometry candidates use drag_between with bid as observed source ref "
                         "and value as observed destination ref (same generation). "
                         "Do not invent either ref. "
-                        "For candidates with description visual-geometry, use click_relative. "
-                        "Its center is verified and hit-tested by Mecord, with no model-supplied coordinates. "
+                        "For visual-geometry, use click_relative with value center,left,right,top,bottom,top-left,top-right,bottom-left,bottom-right. "
+                        "Every enumerated point is inside the observed target and independently hit-tested by Mecord. "
                         "For date inputs with inputType date use select_date and ISO YYYY-MM-DD. "
                         "For textbox values use set_value. Do not claim completion. "
                         f"Goal: {str(obs.get('goal') or '')[:1300]}\n"
@@ -334,7 +352,10 @@ try:
                     event["api_calls_before"] = api_calls
                     event["input_tokens_before"] = in_tokens
                     event["output_tokens_before"] = out_tokens
-                    model_action, status = request_model(prompt)
+                    screenshot=mecord_inspection.get("screenshot") if args.vision else None
+                    if args.vision and screenshot is None:
+                        raise RuntimeError("MECORD_VISION_UNAVAILABLE")
+                    model_action, status = request_model(prompt,screenshot=screenshot)
                     event["model_status"] = status
                     try:
                         grounded = verified_action(model_action,candidates,history) if status=="completed" else None
@@ -347,7 +368,8 @@ try:
                             prompt + "\nPrevious response was incomplete or an invalid operation. "
                             "Return one complete JSON object with exactly op,bid,value,key. "
                             "All fields must be strings and bid must be copied from current candidates.",
-                            output_limit=3072 if status=="truncated" else max_out_tokens)
+                            output_limit=3072 if status=="truncated" else max_out_tokens,
+                             screenshot=screenshot
                         event["corrective_model_status"] = status
                     event["api_calls_after"] = api_calls
                     event["input_tokens_used"] = in_tokens - event["input_tokens_before"]
@@ -455,6 +477,7 @@ try:
         "workspace_reserved_usd":round(historical_reservations,7),
         "lifetime_cap_usd":lifetime_cap_usd,"cap_usd":args.cap_usd,
         "path": str(output_path), "worker": args.worker, "workers": args.workers,
+        "vision_enabled":args.vision,
         "note": "Synthetic MiniWoB, real Mecord browser.cdp, no production relay."}), flush=True)
 finally:
     bridge.terminate()
