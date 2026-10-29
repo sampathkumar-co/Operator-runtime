@@ -56,3 +56,44 @@ python -m unittest discover -s benchmarks/miniwob -p 'test_*.py' -v
 ```
 
 The current MiniWoB evaluation remains **partial** until a complete independent 125-task campaign with authenticated scores and the separate release gates passes.
+## Frozen 50-task development gate (29 October 2026)
+
+The first development attempt used a deterministic evenly spaced 50-task roster
+from 125 registered BrowserGym tasks, seed 42, contributor model, explicit
+`reasoning_effort=low`, initial `max_tokens=2048`, truncation-only retry
+`max_tokens=3072`, six steps per task, and real Mecord RC6 actions.
+
+**Paused after seven episodes:** two independently verified reward-1.0 successes;
+four ordinary failed/unfinished episodes and one Meta SSL/TLS handshake timeout
+which must **not** be interpreted as a model action mistake. The runner was
+stopped and its raw results retained; it did not complete the remaining 43
+episodes or establish a 70% success rate. Raw evidence is in the owner's
+isolated workspace
+`results/meta_rc6_grounded_portable_50_seed42_worker0of4.jsonl`.
+The old run reserved USD 0.0104692 of conservative output-token budget in
+`results/mecord-api-reservations.jsonl`. Model-usage receipts for the
+completed sixteeen calls reported USD 0.002683, with one additional
+pre-reservation for an interrupted call. Provider billing may differ.
+
+A source audit of the failures found **previously unused Mecord capabilities**:
+native observed-target scrolling on a listbox and `drag_between` of
+observed sortable-list elements. Both were implemented as generic strictly
+bounded actions, not task-name conditionals. The pure adapter suite is
+**35/35 PASS**; **real no-model Mecord provider probes** on
+`click-scroll-list` and `drag-items-grid` returned `browser.cdp`
+`ok:true` without scoring the whole tasks. This is engineering evidence,
+**not** a new AI-model benchmark score.
+
+The next frozen run has checkpoint options `--limit 50 --workers 1 --start-at
+0 --count 10 --campaign-tag v6`, preserving the full 50-task roster hash and
+using a separate result filename. That paid checkpoint was **not executed**
+because the remote action was blocked by the execution host's safety checks;
+no new process or result was created. It must not be reported as completed.
+
+Proceed only with budget authorization and genuine execution permission.
+Measure each checkpoint's independently scored successes and separately report
+model/transport/bridge/grounding failures. If the score is below 70% at a
+checkpoint, pause and diagnose rather than quietly switching task selections.
+The full 50-task threshold is 35 successful episodes; stopping early does
+not entitle the project to claim the benchmark passed.
+
