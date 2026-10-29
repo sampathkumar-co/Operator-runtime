@@ -134,7 +134,7 @@ JSON_ACTION_SCHEMA = {
     "type":"json_schema",
     "json_schema":{"name":"mecord_browser_action","strict":True,"schema":{
         "type":"object","properties":{
-            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative"]},
+            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative","select_date"]},
             "bid":{"type":"string"},"value":{"type":"string"},"key":{"type":"string"}
         },
         "required":["op","bid","value","key"],"additionalProperties":False
@@ -239,6 +239,7 @@ try:
                         "Supported actions: click,set_value,type,select,key_press,hover,click_relative. "
                         "For candidates with description visual-geometry, use click_relative. "
                         "Its center is verified and hit-tested by Mecord, with no model-supplied coordinates. "
+                        "For date inputs with inputType date use select_date and ISO YYYY-MM-DD. "
                         "For textbox values use set_value. Do not claim completion. "
                         f"Goal: {str(obs.get('goal') or '')[:800]}\\n"
                         "CURRENT Mecord controls/visual objects: " + json.dumps(candidates,ensure_ascii=True)[:12500]
@@ -269,7 +270,7 @@ try:
                     op=grounded["op"]
                     bid=grounded["ref"]
                     request = {"op":op,"ref":bid}
-                    if op in {"set_value","type","select"}:
+                    if op in {"set_value","type","select","select_date"}:
                         request["value"]=grounded["value"]
                     if op=="key_press":request["key"]=grounded["key"]
                     result = bridge_call(port, request)
