@@ -870,6 +870,43 @@ export function createLocalAgentServer(options: {
       return;
     }
 
+    // A browser-session may view the EXISTING opaque, metadata-only original
+    // recovery projection. This never changes, approves, replays or adjudicates
+    // an action. The stronger bearer-only original endpoint remains unchanged.
+    if (pathname === '/v1/control-center/original-recovery/browser' && req.method === 'GET') {
+      if (!browserSession || relayRequest) {
+        send(res, 403, { ok: false, error: { code: 'ORIGINAL_RECOVERY_BROWSER_SESSION_REQUIRED',
+          message: 'Sign in locally to review original-device recovery metadata.' } });
+        return;
+      }
+      if (!options.actionExecutions || !options.agentKernel) {
+        send(res, 503, { ok: false, error: { code: 'ORIGINAL_RECOVERY_REVIEW_NOT_CONFIGURED',
+          message: 'Original-device recovery evidence is not configured.' } });
+        return;
+      }
+      const rawLimit = requestUrl.searchParams.get('limit');
+      const limit = rawLimit === null ? 200 : /^(?:[1-9][0-9]{0,2})$/.test(rawLimit) ? Number(rawLimit) : NaN;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+        send(res, 400, { ok: false, error: { code: 'ORIGINAL_RECOVERY_REVIEW_LIMIT_INVALID',
+          message: 'Review limit must be between 1 and 200.' } });
+        return;
+      }
+      try {
+        // Two separately acquired snapshots are NOT an atomic owner-proof,
+        // and an "interrupted" state never grants permission for a retry.
+        const [pending, journal] = await Promise.all([
+          options.actionExecutions.listOperatorPendingReceipts(limit),
+          options.agentKernel.journal.list(1000)
+        ]);
+        send(res, 200, { ok: true, configured: true,
+          model: buildOriginalRecoveryReviewModel(pending, journal) });
+      } catch {
+        send(res, 409, { ok: false, error: { code: 'ORIGINAL_RECOVERY_REVIEW_UNAVAILABLE',
+          message: 'Original-device evidence is inconsistent or temporarily unavailable.' } });
+      }
+      return;
+    }
+
     // Original-device recovery is observational ONLY. A normal browser login,
     // relay origin or enterprise context cannot substitute for the trusted
     // local agent bearer. No website mutation/step-up route is installed here.
