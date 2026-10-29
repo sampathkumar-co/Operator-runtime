@@ -227,8 +227,6 @@ def bridge_call(port, payload):
     try:
         with urllib.request.urlopen(req, timeout=21) as response:
             return json.load(response)
-    except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
-        raise RuntimeError("LOCAL_BRIDGE_TRANSPORT_" + type(exc).__name__) from None
     except urllib.error.HTTPError as exc:
         try:
             detail=json.loads(exc.read(1024).decode("utf8","replace"))
@@ -238,6 +236,8 @@ def bridge_call(port, payload):
         # Never turn an execution rejection into an accepted browser action.
         return {"ok":False,"provider":None,
                 "error":("BRIDGE_HTTP_"+str(exc.code)+"_"+str(reason or "UNKNOWN"))[:110]}
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        raise RuntimeError("LOCAL_BRIDGE_TRANSPORT_" + type(exc).__name__) from None
 
 try:
     headers = queue.Queue(maxsize=1)
@@ -307,10 +307,13 @@ try:
                         + "\nPrevious actions: " + json.dumps(history[-4:],ensure_ascii=True)[:2200]
                         + "\nSelect exactly one next action, with a bid from CURRENT controls."
                     )
+                    event["candidate_digest"] = sha256(candidate_json.encode("utf8")).hexdigest()[:20]
                     model_action, status = request_model(prompt)
+                    event["model_status"] = status
                     try:
                         grounded = verified_action(model_action,candidates,history) if status=="completed" else None
-                    except MecordObservationError:
+                    except MecordObservationError as invalid:
+                        event["first_action_error"] = str(invalid)[:80]
                         grounded = None
                     if grounded is None:
                         # One bounded model correction only; do not guess or dispatch invalid actions.
@@ -319,11 +322,16 @@ try:
                             "Return one complete JSON object with exactly op,bid,value,key. "
                             "All fields must be strings and bid must be copied from current candidates.",
                             output_limit=3072 if status=="truncated" else max_out_tokens)
+                        event["corrective_model_status"] = status
                     if status != "completed":
                         raise RuntimeError("MODEL_RESPONSE_" + status.upper())
                     if grounded is None:
                         grounded = verified_action(model_action,candidates,history)
+                    event["decision"] = {"op":grounded["op"],
+                        "target":grounded.get("ref",""),
+                        "value_hash":sha256(grounded.get("value","").encode()).hexdigest()[:16]}
                     if grounded.get("op")=="wait":
+                        event["wait"] = True
                         obs,reward,done,truncated,info=env.step("noop()")
                         outcome["reward"]=float(reward)
                         if done or truncated:break
@@ -331,23 +339,46 @@ try:
                     op=grounded["op"]
                     bid=grounded["ref"]
                     request = {"op":op,"ref":bid}
-                    if op in {"set_value","type","select","select_date","scroll","drag_between"}:
+                    if op in {"set_value","type","select","select_date","scroll","drag_between","drag_by","resize","keyboard_text","format_text","select_text_range"}:
                         request["value"]=grounded["value"]
-                    if op=="key_press":request["key"]=grounded["key"]
+                    if op in {"key_press","hotkey"}:request["key"]=grounded["key"]
                     result = bridge_call(port, request)
+                    event.update({"provider_ok":result.get("ok") is True,
+                        "provider_error":result.get("error"),
+                        "provider_ms":result.get("durationMs"),
+                        "state_progress":result.get("stateProgress"),
+                        "side_effect_state":result.get("sideEffectState"),
+                        "execution_phase":result.get("executionPhase")})
                     if not result.get("ok") or result.get("provider") != "browser.cdp":
+                        # Only a proven pre-dispatch/no-effect refusal may be
+                        # followed by a fresh observation and a NEW decision.
+                        if result.get("executionPhase")=="pre_dispatch" and result.get("sideEffectState")=="none":
+                            event["recovery"] = "REOBSERVE_WITHOUT_REPLAY"
+                            continue
                         raise RuntimeError("MECORD_EXECUTION_" + str(result.get("error") or "UNKNOWN")[:70])
+                    selected = next(x for x in candidates if x["bid"]==bid)
                     history.append({"op":op,"bid":bid,"value":request.get("value",""),
-                                    "role":next(x["role"] for x in candidates if x["bid"]==bid),
+                                    "identity":selected.get("identity"),
+                                    "name":selected.get("name","")[:80],
+                                    "role":selected["role"],
+                                    "progress":result.get("stateProgress"),
                                     "provider_ms":result.get("durationMs")})
                     obs, reward, done, truncated, info = env.step("noop()")
                     outcome["steps"] += 1
                     outcome["reward"] = float(reward)
+                    event["reward"] = float(reward)
+                    event["episode_done"] = bool(done or truncated)
                     if done or truncated: break
             except Exception as exc:
                 outcome["error"] = type(exc).__name__ + ":" + str(exc)[:100]
+                if outcome["trace"]:
+                    outcome["trace"][-1]["failure"] = outcome["error"]
                 if isinstance(exc,(urllib.error.URLError,TimeoutError,ConnectionError)):
                     campaign_stop = "META_TRANSPORT_UNCERTAIN"
+                    outcome["reward"] = None
+                    outcome["unscored"] = True
+                if str(exc).startswith("LOCAL_BRIDGE_TRANSPORT_"):
+                    campaign_stop = "LOCAL_BRIDGE_TRANSPORT_UNCERTAIN"
                     outcome["reward"] = None
                     outcome["unscored"] = True
                 if str(exc) in {"BUDGET_CAP_REACHED","MODEL_USAGE_MISSING"} or str(exc).startswith(("META_HTTP_429","META_HTTP_503","META_HTTP_504")):
@@ -373,7 +404,7 @@ try:
         "frozen_plan_sha256":frozen_plan_sha256,
         "start_at":args.start_at,"count":len(task_plan),"campaign_tag":args.campaign_tag,
         "scored":attempted_count - (1 if campaign_stop else 0),
-        "status":"COMPLETE" if attempted_count==len(task_plan) else "PARTIAL",
+        "status":"COMPLETE" if not campaign_stop and attempted_count==len(task_plan) else "PARTIAL",
         "campaign_stop":campaign_stop,
         "api_calls":api_calls,
         "input_tokens": in_tokens, "output_tokens": out_tokens,
