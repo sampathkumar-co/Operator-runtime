@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from hashlib import sha256
 from integration.aggregate_campaign import aggregate,CampaignError
+from integration.budget_ledger import BudgetLedger,BudgetError
+from concurrent.futures import ThreadPoolExecutor
 
 class CampaignAggregation(unittest.TestCase):
  def make_campaign(self,folder,expected=8,workers=4):
@@ -54,4 +56,25 @@ class CampaignAggregation(unittest.TestCase):
      self.assertEqual(out["unscored"],1)
      self.assertEqual(out["qualification"],"UNSCORED_EPISODES_PRESENT")
 
+
+ def test_atomic_ledger_under_four_concurrent_workers(self):
+    with tempfile.TemporaryDirectory() as d:
+     folder=Path(d)
+     ledgers=[BudgetLedger(folder,lifetime_cap=0.05,run_cap=0.03,
+       worker=i,workers=4,manifest="a"*64) for i in range(4)]
+     def work(ledger):
+      successes=0
+      for _ in range(5):
+       try:
+        ledger.reserve(0.003)
+        successes+=1
+       except BudgetError as err:
+        self.assertEqual(str(err),"BUDGET_CAP_REACHED")
+      return successes
+     with ThreadPoolExecutor(max_workers=4) as pool:
+      counts=list(pool.map(work,ledgers))
+     data=[json.loads(s) for s in (folder/"mecord-api-reservations.jsonl").read_text().splitlines()]
+     self.assertEqual(len(data),sum(counts))
+     self.assertLessEqual(sum(row["usd"] for row in data),0.05+1e-9)
+     self.assertFalse((folder/".mecord-budget.lock").exists())
 if __name__=="__main__":unittest.main()
