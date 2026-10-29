@@ -32,8 +32,6 @@ arg.add_argument("--campaign-tag",type=str,default="v6")
 args = arg.parse_args()
 assert 1 <= args.limit <= 125 and 1 <= args.workers <= 4
 assert 0 <= args.worker < args.workers and 1 <= args.max_steps <= 10
-if args.workers != 1 or args.worker != 0:
-    raise RuntimeError("PARALLEL_WORKERS_REQUIRE_COORDINATED_BUDGET_LEDGER")
 if not math.isfinite(args.cap_usd) or not 0.001 <= args.cap_usd <= 0.07:
     raise RuntimeError("BENCHMARK_CAP_INVALID")
 cdp_port = 9330 + args.worker
@@ -69,7 +67,11 @@ all_tasks = sorted(str(t) for t in gym.envs.registry if str(t).startswith("brows
 assert len(all_tasks) == 125, len(all_tasks)
 indices = (list(range(125)) if args.limit == 125 else
            [round(i * 124 / (args.limit - 1)) for i in range(args.limit)] if args.limit > 1 else [0])
-task_plan = [(i, all_tasks[index]) for i, index in enumerate(indices) if i % args.workers == args.worker]
+# Hash the GLOBAL campaign first, before sharding. Every worker then reports
+# the same immutable roster digest; worker-specific partitions are recorded too.
+full_campaign_plan = [(i, all_tasks[index]) for i, index in enumerate(indices)]
+global_plan_sha256 = sha256(json.dumps(full_campaign_plan,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
+task_plan = [row for row in full_campaign_plan if row[0] % args.workers == args.worker]
 if args.task_id:
     if args.task_id not in all_tasks:
         raise RuntimeError("TASK_ID_NOT_IN_FROZEN_BROWSERGYM_ROSTER")
@@ -93,47 +95,64 @@ case_label = (args.task_id.split(".")[-1] if args.task_id else f"{args.limit}")
 output_path = output_dir / f"meta_rc6_grounded_{args.campaign_tag}_{case_label}_seed{args.seed}_worker{args.worker}of{args.workers}_offset{args.start_at}_count{len(task_plan)}.jsonl"
 if output_path.exists():
     raise RuntimeError("RESULTS_ALREADY_EXIST_REFUSE_OVERWRITE")
-# Lock per benchmark workspace and reserve the maximum estimated API charge
-# DURABLY before any outbound request. Charges are never refunded for transport
-# errors because a provider could have processed the request before timing out.
+# A shared, short-lived O_EXCL lock serializes budget reservations across all
+# workers. Never hold this lock while a browser or Meta call is running.
+# The append-only ledger is the authority; a timed-out owner must not be stolen.
 budget_lock = output_dir / ".mecord-budget.lock"
-try:
-    lock_fd = os.open(budget_lock,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
-    os.write(lock_fd,str(os.getpid()).encode())
-    os.close(lock_fd)
-except FileExistsError:
-    raise RuntimeError("BENCHMARK_BUDGET_LOCK_EXISTS")
-def _unlock_owned_workspace():
-    # Never clear a lock recreated by another process.
-    try:
-        if budget_lock.read_text(encoding="ascii") == str(os.getpid()):
-            budget_lock.unlink()
-    except OSError:
-        pass
-atexit.register(_unlock_owned_workspace)
 ledger_path = output_dir / "mecord-api-reservations.jsonl"
-lifetime_cap_usd = 0.07  # < INR 7 at ~95.3/USD; leaves buffer for prior use + FX
+lifetime_cap_usd = 0.07
 historical_reservations = 0.0
-if ledger_path.exists():
-    for line in ledger_path.read_text(encoding="utf8").splitlines():
-        entry=json.loads(line)
-        amount=entry.get("usd")
-        if type(amount) not in (int,float) or not math.isfinite(amount) or amount<=0:
-            raise RuntimeError("MODEL_LEDGER_CORRUPT")
-        historical_reservations+=amount
 run_reserved = 0.0
+
+def _read_reserved():
+    total = 0.0
+    if ledger_path.exists():
+        for line in ledger_path.read_text(encoding="utf8").splitlines():
+            try: entry = json.loads(line)
+            except (ValueError,TypeError): raise RuntimeError("MODEL_LEDGER_CORRUPT") from None
+            amount = entry.get("usd") if type(entry) is dict else None
+            if type(amount) not in (int,float) or not math.isfinite(amount) or amount <= 0:
+                raise RuntimeError("MODEL_LEDGER_CORRUPT")
+            total += amount
+    return total
+
 def reserve_budget(usd):
     global historical_reservations,run_reserved
     if not math.isfinite(usd) or usd<=0:
         raise RuntimeError("INVALID_API_RESERVATION")
-    if run_reserved+usd > args.cap_usd or historical_reservations+usd > lifetime_cap_usd:
-        raise RuntimeError("BUDGET_CAP_REACHED")
-    with ledger_path.open("a",encoding="utf8") as ledger:
-        ledger.write(json.dumps({"usd":round(usd,9),"type":"api_reservation"})+"\n")
-        ledger.flush()
-        os.fsync(ledger.fileno())
-    historical_reservations+=usd
-    run_reserved+=usd
+    marker = f"{os.getpid()}-{secrets.token_hex(16)}"
+    deadline = time.monotonic()+12
+    while True:
+        try:
+            fd = os.open(budget_lock,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+            try:
+                os.write(fd,marker.encode("ascii"))
+                os.fsync(fd)
+            finally:os.close(fd)
+            break
+        except FileExistsError:
+            if time.monotonic() > deadline:
+                raise RuntimeError("BENCHMARK_BUDGET_LOCK_BUSY")
+            time.sleep(0.04)
+    try:
+        current = _read_reserved()
+        if run_reserved+usd > args.cap_usd or current+usd > lifetime_cap_usd:
+            raise RuntimeError("BUDGET_CAP_REACHED")
+        with ledger_path.open("a",encoding="utf8") as ledger:
+            ledger.write(json.dumps({"usd":round(usd,9),"type":"api_reservation",
+                "worker":args.worker,"workers":args.workers,
+                "global_manifest":global_plan_sha256})+"\\n")
+            ledger.flush()
+            os.fsync(ledger.fileno())
+        historical_reservations=current+usd
+        run_reserved+=usd
+    finally:
+        # The owner that created this exact lock must be the one to remove it.
+        try:
+            if budget_lock.read_text(encoding="ascii") == marker:
+                budget_lock.unlink()
+        except OSError:
+            pass
 
 bridge_token = secrets.token_hex(32)
 # Explicit minimal environment: never pass unrelated host credentials to CDP.
@@ -259,7 +278,8 @@ try:
             outcome = {"task_id": task_id, "plan_index": original_index, "seed": args.seed,
                        "reward": 0.0, "steps": 0, "agent": "meta-muse-spark-1.3-contributor",
                        "executor": "mecord-browser.cdp-isolated", "error": None,
-                        "trace":[], "step_limit":args.max_steps, "frozen_plan_sha256":frozen_plan_sha256}
+                        "trace":[], "step_limit":args.max_steps, "frozen_plan_sha256":frozen_plan_sha256,
+                        "global_campaign_sha256":global_plan_sha256}
             env = None
             try:
                 env = gym.make(task_id, headless=True)
@@ -417,6 +437,7 @@ try:
     print("META_MECORD_SUMMARY=" + json.dumps({
         "attempted":attempted_count,"scheduled":len(task_plan),
         "frozen_plan_sha256":frozen_plan_sha256,
+        "global_campaign_sha256":global_plan_sha256,
         "start_at":args.start_at,"count":len(task_plan),"campaign_tag":args.campaign_tag,
         "scored":scored_successes+scored_failures,
         "successes":scored_successes,"failures":scored_failures,
@@ -425,7 +446,7 @@ try:
             if scored_successes+scored_failures else None),
         "status":"COMPLETE" if not campaign_stop and attempted_count==len(task_plan) else "PARTIAL",
         "full_50_task_70_percent_gate":("PASS" if scored_successes>=35 else "FAIL")
-            if args.limit==50 and args.count is None and args.start_at==0
+            if args.limit==50 and args.workers==1 and args.count is None and args.start_at==0
             and attempted_count==50 and not campaign_stop else "NOT_RUN",
         "campaign_stop":campaign_stop,
         "api_calls":api_calls,
@@ -441,4 +462,4 @@ finally:
     except:bridge.kill()
     key = None
     BrowserType.launch = _ORIGINAL_LAUNCH
-    _unlock_owned_workspace()
+    pass  # Short-lived reservations release their own shared lock
