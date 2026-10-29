@@ -86,7 +86,7 @@ JSON_ACTION_SCHEMA = {
     "type":"json_schema",
     "json_schema":{"name":"mecord_browser_action","strict":True,"schema":{
         "type":"object","properties":{
-            "op":{"type":"string","enum":["click","set_value","type","select","key_press"]},
+            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover"]},
             "bid":{"type":"string"},"value":{"type":"string"},"key":{"type":"string"}
         },
         "required":["op","bid","value","key"],"additionalProperties":False
@@ -94,7 +94,7 @@ JSON_ACTION_SCHEMA = {
 }
 def request_model(prompt):
     global cost,in_tokens,out_tokens,api_calls
-    reserve = ((len(prompt)/2.5)*0.10+max_out_tokens*0.20)/1e6
+    reserve = ((len(prompt)/1.0)*0.10+max_out_tokens*0.20)/1e6
     if cost+reserve>args.cap_usd:raise RuntimeError("BUDGET_CAP_REACHED")
     payload={"model":"muse-spark-1.3-contributor",
              "messages":[{"role":"user","content":prompt}],
