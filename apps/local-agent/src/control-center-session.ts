@@ -117,6 +117,7 @@ export function browserUiRouteAllowed(method: string, pathname: string): boolean
       || /^\/v1\/teams\/[^/]+\/(?:start|pause|resume|cancel)$/.test(pathname)
       || /^\/v1\/studio\/workflows\/[^/]+\/run$/.test(pathname)
       || /^\/v1\/studio\/runs\/[^/]+\/(?:execute|cancel)$/.test(pathname)
+      || pathname === '/v1/control-center/original-recovery/browser/resolve'
       || pathname === '/v1/desired-state'
       || /^\/v1\/desired-state\/[^/]+\/(?:reconcile|pause|resume)$/.test(pathname);
   }
