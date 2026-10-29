@@ -46,6 +46,18 @@ function opaqueReviewReference(actionId: string): string {
 
 const SAFE_CAPABILITY = /^[a-z][a-z0-9._-]{0,127}$/;
 
+/** Internal-only HMAC identity lookup. Original action IDs never reach the browser. */
+export function locateOriginalRecoveryActionId(
+  reference: unknown, receipts: readonly LocalActionExecutionRecord[]
+): string | null {
+  if (typeof reference !== 'string' || !/^review:[0-9a-f]{64}$/.test(reference) ||
+      !Array.isArray(receipts) || receipts.length > MAX_ROWS) return null;
+  const matches = receipts.filter(r => r && r.status === 'processing' &&
+    typeof r.actionId === 'string' && SAFE_REFERENCE.test(r.actionId) &&
+    opaqueReviewReference(r.actionId) === reference);
+  return matches.length === 1 ? matches[0]!.actionId : null;
+}
+
 function invalid(): never {
   throw new OperatorError('ORIGINAL_RECOVERY_REVIEW_INVALID',
     'Recovery metadata is missing, oversized, duplicate or malformed; owner review remains blocked.');
