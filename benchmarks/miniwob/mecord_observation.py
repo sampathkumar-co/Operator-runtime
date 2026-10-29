@@ -16,6 +16,30 @@ MAX_CONTROLS = 125
 class MecordObservationError(ValueError):
     pass
 
+def _frame_fair(items: list) -> list:
+    """Keep registered frame targets visible even on crowded main pages."""
+    if len(items) < 2:
+        return items
+    from collections import deque
+    buckets: dict[str,list] = {}
+    for item in items:
+        key = (item.get("sourceFrameTargetId") or "") if type(item) is dict else ""
+        if type(key) is not str:
+            key = ""
+        buckets.setdefault(key,[]).append(item)
+    if len(buckets) == 1:
+        return items
+    order = ([""] if "" in buckets else []) + sorted(k for k in buckets if k)
+    pending = {key:deque(buckets[key]) for key in order}
+    out=[]
+    while any(pending[key] for key in order):
+        for key in order:
+            count = 2 if key == "" else 1
+            for _ in range(count):
+                if pending[key]:
+                    out.append(pending[key].popleft())
+    return out
+
 def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list[dict[str, Any]]:
     """Projection only; bridge verifies same target/ref/generation before dispatch."""
     if type(payload) is not dict or payload.get("ok") is not True or payload.get("provider") != "browser.cdp":
@@ -47,9 +71,9 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
     # Keep a visual reservation instead of allowing the first 90 controls to
     # crowd every graphical target out of the model's view.
     first_controls = max(1, limit * 2 // 3)
-    ordered = ([("semantic", item) for item in semantic["controls"][:first_controls]]
-               + [("visual", item) for item in semantic["visuals"]]
-               + [("semantic", item) for item in semantic["controls"][first_controls:]])
+    ordered = ([("semantic", item) for item in _frame_fair(semantic["controls"])[:first_controls]]
+               + [("visual", item) for item in _frame_fair(semantic["visuals"])]
+               + [("semantic", item) for item in _frame_fair(semantic["controls"])[first_controls:]])
     for category, item in ordered:
         if len(candidates) >= limit:
             return candidates
