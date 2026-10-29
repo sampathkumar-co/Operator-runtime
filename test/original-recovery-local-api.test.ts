@@ -5,6 +5,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
+import { OriginalRecoveryOwnerResolution } from '../apps/local-agent/src/operator-pre-dispatch-adjudication.ts';
+import { buildOriginalRecoveryReviewModel } from '../src/core/original-recovery-ux.ts';
 import { LocalActionExecutionStore } from '../apps/local-agent/src/action-execution-store.ts';
 import { ActionTransitionJournal } from '../src/core/action-transition-journal.ts';
 import { OperatorRuntime } from '../src/core/runtime.ts';
@@ -144,4 +146,110 @@ test('authenticated local Control Center reviews original receipts in one click 
   assert.equal((await receipts.listOperatorPendingReceipts()).length, 1);
   assert.equal((await journal.inspect(action.id)).state, 'PREPARED');
   await assert.rejects(fs.access(path.join(root, 'PRIVATE_FIXTURE.txt')));
+});
+
+
+test('native owner resolution refuses forged or ineligible case and keeps journal untouched on denial', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-native-denial-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const receipts = new LocalActionExecutionStore(root);
+  const journal = new ActionTransitionJournal(root);
+  const action: ActionRequest = { id: crypto.randomUUID(), capability: 'file.create', risk: 'write',
+    input: { path: path.join(root, 'NEVER_CREATED.txt'), content: 'SENSITIVE' }, provenance: { kind: 'chatgpt' } };
+  await receipts.begin(action);
+  await journal.prepare({ action, ownerKind: 'local-api', ownerId: action.id, resourceKeys: [] });
+  const { items } = buildOriginalRecoveryReviewModel(
+    await receipts.listOperatorPendingReceipts(200), await journal.list(1000));
+  assert.equal(items.length, 1);
+  assert.equal(items[0]!.status, 'REVIEW_REQUIRED');
+  let inspected = 0; let adjudicated = 0;
+  const stub = {
+    inspect: async (id: string) => { inspected++; assert.equal(id, action.id); return { caseDigest: 'a'.repeat(64) }; },
+    adjudicate: async () => { adjudicated++; throw new Error('must never sign on denial'); }
+  } as any;
+  const resolver = new OriginalRecoveryOwnerResolution(root, {
+    adjudicator: stub, confirmOwner: async () => false
+  });
+  await assert.rejects(resolver.resolve('review:' + '0'.repeat(64)));
+  await assert.rejects(resolver.resolve(action.id), 'raw action IDs must not work');
+  assert.equal(inspected, 0);
+  await assert.rejects(resolver.resolve(items[0]!.actionId));
+  assert.equal(inspected, 1);
+  assert.equal(adjudicated, 0);
+  assert.equal((await journal.inspect(action.id)).state, 'PREPARED');
+  assert.equal((await receipts.listOperatorPendingReceipts()).length, 1);
+  await assert.rejects(fs.access(path.join(root, 'NEVER_CREATED.txt')));
+});
+
+test('signed original recovery is local cookie only, native gesture and CAS proof are server-side', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-native-browser-route-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const receipts = new LocalActionExecutionStore(root);
+  const journal = new ActionTransitionJournal(root);
+  const action: ActionRequest = { id: crypto.randomUUID(), capability: 'file.create', risk: 'write',
+    input: { path: path.join(root, 'NEVER_EXECUTED.txt'), content: 'SECRET' }, provenance: { kind: 'chatgpt' } };
+  await receipts.begin(action);
+  await journal.prepare({ action, ownerKind: 'local-api', ownerId: action.id, resourceKeys: [] });
+  const token = 'e'.repeat(64);
+  let nativeGestures = 0; let signings = 0;
+  const digest = 'a'.repeat(64);
+  const resolution = new OriginalRecoveryOwnerResolution(root, {
+    adjudicator: {
+      inspect: async (id: string) => { assert.equal(id, action.id); return { caseDigest: digest }; },
+      adjudicate: async (input: any) => {
+        signings++;
+        assert.equal(input.actionId, action.id);
+        assert.equal(input.caseDigest, digest);
+        assert.equal(input.confirmation, 'AUTHORIZE-NO-REPLAY:' + digest);
+        assert.equal(input.ownerAttestation, 'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED');
+        return { actionId: action.id, state: 'INTERRUPTED', epoch: 1, caseDigest: digest };
+      }
+    } as any,
+    confirmOwner: async () => { nativeGestures++; return true; }
+  });
+  const runtime = new OperatorRuntime();
+  const agent = createLocalAgentServer({ runtime, token,
+    permissions: { allowedCapabilities: ['file.create'], allowedRoots: [root] },
+    actionExecutions: receipts, agentKernel: { journal } as any,
+    originalRecoveryResolution: resolution
+  });
+  t.after(async () => { await agent.close(); await runtime.close(); });
+  const bound = await agent.listen('127.0.0.1', 0);
+  const base = 'http://127.0.0.1:' + bound.port;
+  const route = base + '/v1/control-center/original-recovery/browser/resolve';
+  const header = { origin: base, 'x-mecord-control-center': '1', 'content-type': 'application/json' };
+  const issue = await fetch(base + '/v1/control-center/browser-login/code', {
+    method: 'POST', headers: { authorization: 'Bearer ' + token } });
+  const code = ((await issue.json()) as { code: string }).code;
+  const login = await fetch(base + '/v1/control-center/browser-login', {
+    method: 'POST', headers: header, body: JSON.stringify({ code }) });
+  assert.equal(login.status, 200);
+  const cookie = login.headers.get('set-cookie')!.split(';')[0];
+  const headers = { ...header, cookie };
+  const read = await fetch(base + '/v1/control-center/original-recovery/browser', { headers: { cookie } });
+  const model = await read.json() as any;
+  const reference = model.model.items[0].actionId;
+  const body = JSON.stringify({ reference });
+  assert.equal((await fetch(route, { method: 'POST', headers: header, body })).status, 401);
+  assert.equal((await fetch(route, { method: 'POST',
+    headers: { ...headers, origin: 'https://attacker.invalid' }, body })).status, 401);
+  assert.equal((await fetch(route, { method: 'POST',
+    headers: { ...headers, authorization: 'Bearer ' + token }, body })).status, 403);
+  assert.equal((await fetch(route, { method: 'POST',
+    headers: { ...headers, 'x-operator-relay-request': '1' }, body })).status !== 200, true);
+  assert.equal((await fetch(route, { method: 'POST', headers, body: JSON.stringify({ reference: action.id }) })).status, 400);
+  assert.equal((await fetch(route, { method: 'POST', headers,
+    body: JSON.stringify({ reference: 'review:' + '0'.repeat(64) }) })).status, 409);
+  assert.equal(nativeGestures, 0);
+  const signed = await fetch(route, { method: 'POST', headers, body });
+  assert.equal(signed.status, 200);
+  const response = await signed.json() as any;
+  assert.equal(response.outcome.status, 'FENCED_NO_REPLAY');
+  assert.equal(nativeGestures, 1);
+  assert.equal(signings, 1);
+  assert.equal(JSON.stringify(response).includes(action.id), false);
+  assert.equal(JSON.stringify(response).includes(digest), false);
+  // The stub emulates the signer only: HTTP and service do NOT run provider actions.
+  assert.equal((await journal.inspect(action.id)).state, 'PREPARED');
+  await assert.rejects(fs.access(path.join(root, 'NEVER_EXECUTED.txt')));
 });
