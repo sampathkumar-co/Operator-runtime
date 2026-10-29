@@ -25,7 +25,7 @@ const authorized=header=>{
 let provider=new BrowserCdpProvider(endpoint),inspectState=null,sequence=0,busy=false;
 const project=item=>({
  ref:item.ref,role:item.role||'',tag:item.tag||'',primitive:item.primitive||'',
- name:item.name||'',actionable:item.actionable===true,disabled:item.disabled===true,
+ name:item.name||'',type:item.type||'',actionable:item.actionable===true,disabled:item.disabled===true,
  editable:item.editable===true,
  context:{frameDepth:item.context?.frameDepth,shadowDepth:item.context?.shadowDepth},
  geometry:item.geometry||item.rect,
@@ -81,7 +81,7 @@ const svr=http.createServer(async(req,res)=>{
     observedRefCount:refs.size,visualRelativeRefs:relativeRefs.size,truncated:out.output?.truncated===true}));
    return;
   }
-  const allowed=new Set(['click','hover','set_value','type','select','key_press','click_relative']);
+  const allowed=new Set(['click','hover','set_value','type','select','select_date','key_press','click_relative']);
   if(!allowed.has(input.op))throw Error('UNSUPPORTED_INTERACTION');
   if(!inspectState||inspectState.targetId!==targetId)throw Error('FRESH_INSPECTION_REQUIRED');
   const ref=input.ref;
@@ -93,6 +93,7 @@ const svr=http.createServer(async(req,res)=>{
    const role=String(observed?.role||observed?.tag||'').toLowerCase();
    if(!observed||(observed.editable!==true&&!new Set(['textbox','searchbox','combobox','spinbutton','input','textarea']).has(role)))throw Error('TARGET_NOT_EDITABLE');
   }
+  if(input.op==='select_date' && observed?.type!=='date')throw Error('DATE_TARGET_NOT_DATE_INPUT');
   if(input.op==='select'){
    const role=String(observed?.role||observed?.tag||'').toLowerCase();
    if(!observed||!new Set(['select','combobox','listbox','option']).has(role))throw Error('TARGET_NOT_SELECTABLE');
@@ -100,8 +101,9 @@ const svr=http.createServer(async(req,res)=>{
   if(Object.keys(input).some(k=>!['op','ref','value','key'].includes(k)))throw Error('EXTRA_MODEL_PARAMETERS');
   const actionInput={targetId,operation:input.op,target:{ref}};
   if(input.op==='click_relative'){actionInput.xRatio=0.5;actionInput.yRatio=0.5;}
-  if(['type','set_value','select'].includes(input.op)){
+  if(['type','set_value','select','select_date'].includes(input.op)){
    if(typeof input.value!=='string'||!input.value||input.value.length>400)throw Error('INVALID_TEXT_VALUE');
+   if(input.op==='select_date'&&!/^\d{4}-\d{2}-\d{2}$/.test(input.value))throw Error('DATE_VALUE_INVALID');
    actionInput.value=input.value;
   }
   if(input.op==='key_press'){
