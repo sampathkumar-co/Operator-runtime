@@ -97,3 +97,55 @@ checkpoint, pause and diagnose rather than quietly switching task selections.
 The full 50-task threshold is 35 successful episodes; stopping early does
 not entitle the project to claim the benchmark passed.
 
+
+## Deep-audit corrective branch (29 October 2026)
+
+Fixes under stacked draft PR #695 are **benchmark-only** and not the
+shipping TaskOrchestrator. Do not interpret the source test score as an AI
+benchmark performance improvement or a production release acceptance.
+
+- The provider's `set_value` means slider updates, whereas its `type`
+  operation replaces textbox contents. The bridge now translates non-slider
+  `set_value` into `type` while preserving genuine slider actions.
+- Each fresh observation may regenerate a `bid`. Replay detection also uses
+  a bounded stable observation fingerprint, with the provider still retaining
+  its authoritative side-effect/no-progress controls.
+- Model observations now include bounded headings, text excerpt, checked and
+  selected states, input values, placeholder, and a real page-scroller ref.
+  The first tranche reserves room for visual candidates. Candidate JSON is
+  composed from whole records rather than cut mid-element.
+- Wait, keyboard text, bounded directional drag/resize, hotkey, text formatting
+  and selection-range operations now have a restrictive benchmark adapter
+  vocabulary. New operations must be accepted by the actual runtime provider;
+  offline tests cannot certify live DOM behavior.
+- Every episode retains sanitized step-level evidence, the controller sees
+  whether an interaction progressed, and an explicitly no-effect pre-dispatch
+  refusal may trigger a fresh decision. Uncertain post-dispatch operations
+  remain **non-replayable**.
+- Local bridge transport errors are distinguished from Meta transport errors.
+  The CDP bridge process receives an explicit environment allowlist.
+- The runner defaults to six steps per task. It **rejects --workers >1**
+  until a shared cross-process atomic spend ledger exists; distinct workspaces
+  must not be described as one enforced lifetime budget. Conservative model
+  reservations now use full UTF-8 input bytes plus fixed protocol allowance.
+  Actual provider billing remains independently authoritative.
+- Keep `--limit 50 --workers 1 --worker 0 --max-steps 6 --seed 42`
+  explicitly pinned for future development runs. This is not a like-for-like
+  reproduction of the older four-worker checkpoint; compare fixed **task IDs**
+  and manifests, not only the aggregate scores.
+- New CI checks Python syntax, Node bridge syntax and pure controller/bridge
+  fixtures without Meta credentials or browser execution.
+
+### Still not covered by this isolated source patch
+
+Real Meta multimodal screenshots, comprehensive iframe/cross-origin scope
+authority, a safe common four-worker billing coordinator, source-pinned 50/125
+model-driven qualifications, physical device acceptance, and production
+TaskOrchestrator integration. All require independent design/review and/or
+physical acceptance; no benchmark success is claimed for them.
+
+The benchmark runner's separate entry point expects explicit host-injected
+`MUSE_API_KEY`. The production signed benchmark wrapper intentionally
+filters ambient environment variables, including credentials; **do not
+weaken that boundary to make this harness work automatically**. A separately
+reviewed credential broker would be needed for approved integrated launch.
