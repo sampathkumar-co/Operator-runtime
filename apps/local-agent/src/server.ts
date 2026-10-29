@@ -34,6 +34,7 @@ import type { LocalDeviceResetResult } from './device-reset.ts';
 import { renderControlCenter } from './control-center.ts';
 import { buildRedactedControlCenterDiagnostics } from '../../../src/core/control-center-diagnostic-export.ts';
 import { buildOriginalRecoveryReviewModel } from '../../../src/core/original-recovery-ux.ts';
+import type { OriginalRecoveryOwnerResolution } from './operator-pre-dispatch-adjudication.ts';
 import { buildControlCenterRuntimeStatus } from '../../../src/core/control-center-runtime-status.ts';
 import { buildControlCenterTaskTimeline } from '../../../src/core/control-center-task-timeline.ts';
 import { projectDoctorOnboardingEvidence, type DoctorObservation } from '../../../src/core/control-center-doctor-evidence.ts';
@@ -116,6 +117,8 @@ export function createLocalAgentServer(options: {
   emergencyStop?: EmergencyStopStore;
   approvals?: ApprovalStore;
   actionExecutions?: LocalActionExecutionStore;
+  /** Native owner-confirmed, device-signed NO-REPLAY fence; never a browser signer. */
+  originalRecoveryResolution?: Pick<OriginalRecoveryOwnerResolution, 'resolve'>;
   beforeActionReceiptCompletion?: (input: { action: ActionRequest; result: ActionResult }) => Promise<void> | void;
   sessionApprovals?: SessionApprovalStore;
   recoveryToken?: string;
@@ -903,6 +906,35 @@ export function createLocalAgentServer(options: {
       } catch {
         send(res, 409, { ok: false, error: { code: 'ORIGINAL_RECOVERY_REVIEW_UNAVAILABLE',
           message: 'Original-device evidence is inconsistent or temporarily unavailable.' } });
+      }
+      return;
+    }
+
+    // Only a local browser owner session can initiate a native signed ceremony.
+    // A browser cannot furnish the original ID, signer or case digest.
+    if (pathname === '/v1/control-center/original-recovery/browser/resolve' && req.method === 'POST') {
+      if (!browserSession || relayRequest || req.headers.authorization) {
+        send(res, 403, { ok: false, error: { code: 'ORIGINAL_RECOVERY_BROWSER_OWNER_REQUIRED',
+          message: 'An authenticated local Control Center session is required.' } });
+        return;
+      }
+      if (!options.originalRecoveryResolution) {
+        send(res, 503, { ok: false, error: { code: 'ORIGINAL_RECOVERY_NATIVE_OWNER_UNAVAILABLE',
+          message: 'Trusted native original-device recovery is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as { reference?: unknown };
+        if (!body || typeof body.reference !== 'string' || !/^review:[0-9a-f]{64}$/.test(body.reference)) {
+          send(res, 400, { ok: false, error: { code: 'ORIGINAL_RECOVERY_REFERENCE_INVALID',
+            message: 'Choose a current redacted recovery case.' } });
+          return;
+        }
+        const outcome = await options.originalRecoveryResolution.resolve(body.reference);
+        send(res, 200, { ok: true, outcome });
+      } catch {
+        send(res, 409, { ok: false, error: { code: 'ORIGINAL_RECOVERY_NOT_AUTHORIZED',
+          message: 'Original-device owner proof or confirmation was unavailable; no action executed.' } });
       }
       return;
     }
