@@ -55,4 +55,26 @@ class Grounding(unittest.TestCase):
     with self.assertRaises(MecordObservationError):
      verified_action({"op":"click","bid":"b-abc123-7-1"},cs,
        [{"op":"click","bid":"b-abc123-7-1","value":""}]*2)
+ def test_observed_svg_nonactionable_relative(self):
+    svg=item(ref="b-abc123-7-3",active=False)
+    svg["tag"]="text"
+    choices=observed_mecord_candidates(obs([], [svg]))
+    self.assertEqual(len(choices),1)
+    self.assertEqual(choices[0]["description"],"visual-geometry")
+    self.assertEqual(verified_action({"op":"click_relative","bid":"b-abc123-7-3"},choices,[])["op"],"click_relative")
+ def test_visual_regular_click_denied(self):
+    svg=item(ref="b-abc123-7-3",active=False);svg["tag"]="text"
+    choices=observed_mecord_candidates(obs([], [svg]))
+    with self.assertRaisesRegex(MecordObservationError,"VISUAL_NEEDS_RELATIVE"):
+     verified_action({"op":"click","bid":"b-abc123-7-3"},choices,[])
+ def test_relative_nonvisual_denied(self):
+    choices=observed_mecord_candidates(obs([item()]))
+    with self.assertRaisesRegex(MecordObservationError,"RELATIVE_TARGET_NOT_VISUAL"):
+     verified_action({"op":"click_relative","bid":"b-abc123-7-1"},choices,[])
+ def test_visual_unknown_shape_denied(self):
+    svg=item(ref="b-abc123-7-3",active=False);svg["tag"]="iframe"
+    self.assertEqual(observed_mecord_candidates(obs([], [svg])),[])
+ def test_svg_generation_still_checked(self):
+    svg=item(ref="b-abc123-6-1",active=False);svg["tag"]="text"
+    self.assertEqual(observed_mecord_candidates(obs([], [svg])),[])
 if __name__=="__main__":unittest.main(verbosity=2)
