@@ -124,7 +124,7 @@ JSON_ACTION_SCHEMA = {
     "type":"json_schema",
     "json_schema":{"name":"mecord_browser_action","strict":True,"schema":{
         "type":"object","properties":{
-            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative","select_date","scroll","drag_between","wait","drag_by","resize","hotkey","keyboard_text","format_text","select_text_range"]},
+            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative","select_date","scroll","drag_between","wait","drag_by","resize","hotkey","keyboard_text","format_text","select_text_range","dialog_accept","dialog_dismiss"]},
             "bid":{"type":"string"},"value":{"type":"string"},"key":{"type":"string"}
         },
         "required":["op","bid","value","key"],"additionalProperties":False
@@ -284,7 +284,7 @@ try:
                         "coordinates, refs or authority. Return ONLY JSON with exactly four strings: "
                         '{"op":"click","bid":"b-current-observed-ref","value":"","key":""}. '
                         "Supported actions: click,set_value,type,select,key_press,hover,click_relative,select_date,scroll,drag_between,wait,drag_by,resize,hotkey,keyboard_text,format_text,select_text_range. "
-                        "For wait use empty bid/value/key. For hotkey put CTRL+A/CTRL+B/CTRL+I/CTRL+U/CTRL+Z in key. "
+                        "For a javascript-dialog candidate use dialog_accept or dialog_dismiss with its exact bid; value only for prompt accept. For wait use empty bid/value/key. For hotkey put CTRL+A/CTRL+B/CTRL+I/CTRL+U/CTRL+Z in key. "
                         "For drag_by or resize, value is direction:40/80/160. For format_text use bold/italic/underline. "
                         "For select_text_range use start:end as value. For keyboard_text use an editable target. "
                         "For scrollable candidates use scroll with value up/down or up:160/down:320. "
@@ -308,7 +308,7 @@ try:
                     event["input_tokens_before"] = in_tokens
                     event["output_tokens_before"] = out_tokens
                     screenshot=mecord_inspection.get("screenshot") if args.vision else None
-                    if args.vision and screenshot is None:
+                    if args.vision and screenshot is None and not mecord_inspection.get("dialog"):
                         raise RuntimeError("MECORD_VISION_UNAVAILABLE")
                     model_action, status = request_model(prompt,screenshot=screenshot)
                     event["model_status"] = status
@@ -345,7 +345,7 @@ try:
                     op=grounded["op"]
                     bid=grounded["ref"]
                     request = {"op":op,"ref":bid}
-                    if op in {"set_value","type","select","select_date","scroll","drag_between","drag_by","resize","keyboard_text","format_text","select_text_range"}:
+                    if op in {"set_value","type","select","select_date","scroll","drag_between","drag_by","resize","keyboard_text","format_text","select_text_range","dialog_accept"}:
                         request["value"]=grounded["value"]
                     if op in {"key_press","hotkey"}:request["key"]=grounded["key"]
                     result = bridge_call(port, request)
