@@ -124,7 +124,7 @@ JSON_ACTION_SCHEMA = {
     "type":"json_schema",
     "json_schema":{"name":"mecord_browser_action","strict":True,"schema":{
         "type":"object","properties":{
-            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative","select_date","scroll","drag_between","wait","drag_by","resize","hotkey","keyboard_text","format_text","select_text_range","dialog_accept","dialog_dismiss"]},
+            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative","select_date","scroll","drag_between","drag_to","wait","drag_by","resize","hotkey","keyboard_text","format_text","select_text_range","dialog_accept","dialog_dismiss"]},
             "bid":{"type":"string"},"value":{"type":"string"},"key":{"type":"string"}
         },
         "required":["op","bid","value","key"],"additionalProperties":False
@@ -283,15 +283,15 @@ try:
                         "Use the exact current bid (a generation-bound Mecord ref); never invent CSS, "
                         "coordinates, refs or authority. Return ONLY JSON with exactly four strings: "
                         '{"op":"click","bid":"b-current-observed-ref","value":"","key":""}. '
-                        "Supported actions: click,set_value,type,select,key_press,hover,click_relative,select_date,scroll,drag_between,wait,drag_by,resize,hotkey,keyboard_text,format_text,select_text_range. "
+                        "Supported actions: click,set_value,type,select,key_press,hover,click_relative,select_date,scroll,drag_between,drag_to,wait,drag_by,resize,hotkey,keyboard_text,format_text,select_text_range,dialog_accept,dialog_dismiss. "
                         "For a javascript-dialog candidate use dialog_accept or dialog_dismiss with its exact bid; value only for prompt accept. For wait use empty bid/value/key. For hotkey put CTRL+A/CTRL+B/CTRL+I/CTRL+U/CTRL+Z in key. "
-                        "For drag_by or resize, value is direction:40/80/160. For format_text use bold/italic/underline. "
+                        "For drag_by or resize, value is one of eight compass directions (e.g. down-right:80), with distance 10/20/40/80/160/320. For format_text use bold/italic/underline. "
                         "For select_text_range use start:end as value. For keyboard_text use an editable target. "
-                        "For scrollable candidates use scroll with value up/down or up:160/down:320. "
+                        "For scrollable candidates use scroll with up/down/left/right and optional :40/:80/:160/:320/:640. "
                         "For sortable-geometry candidates use drag_between with bid as observed source ref "
                         "and value as observed destination ref (same generation). "
-                        "Do not invent either ref. "
-                        "For visual-geometry, use click_relative with value center,left,right,top,bottom,top-left,top-right,bottom-left,bottom-right. "
+                        "For drag_to, use any two observed graphical or actionable refs from the same frame and generation. Never invent refs. "
+                        "For visual-geometry use click_relative with named points or a bounded two-axis 0.00..1.00 ratio like 0.35:0.72, or hover to move the pointer to its center. "
                         "Every enumerated point is inside the observed target and independently hit-tested by Mecord. "
                         "For date inputs with inputType date use select_date and ISO YYYY-MM-DD. "
                         "For textbox values use set_value. Do not claim completion. "
@@ -339,13 +339,16 @@ try:
                     if grounded.get("op")=="wait":
                         event["wait"] = True
                         obs,reward,done,truncated,info=env.step("noop()")
+                        outcome["steps"] += 1
                         outcome["reward"]=float(reward)
+                        event["reward"]=float(reward)
+                        event["episode_done"]=bool(done or truncated)
                         if done or truncated:break
                         continue
                     op=grounded["op"]
                     bid=grounded["ref"]
                     request = {"op":op,"ref":bid}
-                    if op in {"set_value","type","select","select_date","scroll","drag_between","drag_by","resize","keyboard_text","format_text","select_text_range","dialog_accept"}:
+                    if op in {"set_value","type","select","select_date","scroll","drag_between","drag_to","drag_by","resize","keyboard_text","format_text","select_text_range","dialog_accept"}:
                         request["value"]=grounded["value"]
                     if op in {"key_press","hotkey"}:request["key"]=grounded["key"]
                     result = bridge_call(port, request)
