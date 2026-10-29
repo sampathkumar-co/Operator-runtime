@@ -1,7 +1,7 @@
 """Reproducible synthetic MiniWoB: Meta Muse -> Mecord browser.cdp -> BrowserGym reward.
 No public relay, no personal browsing, no secret output. Task selection is systematic.
 """
-import os, json, re, time, argparse, subprocess, urllib.request, urllib.error, sys
+import os, json, re, time, argparse, subprocess, urllib.request, urllib.error, sys, secrets, queue, threading, math
 from pathlib import Path
 from hashlib import sha256
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,13 +23,14 @@ arg.add_argument("--limit", type=int, default=12)
 arg.add_argument("--worker", type=int, default=0)
 arg.add_argument("--workers", type=int, default=1)
 arg.add_argument("--max-steps", type=int, default=4)
-arg.add_argument("--cap-usd", type=float, default=0.20)
+arg.add_argument("--cap-usd", type=float, default=0.005)
 arg.add_argument("--seed", type=int, default=42)
 arg.add_argument("--task-id", type=str, default=None)
 args = arg.parse_args()
 assert 1 <= args.limit <= 125 and 1 <= args.workers <= 4
 assert 0 <= args.worker < args.workers and 1 <= args.max_steps <= 10
-assert 0.001 <= args.cap_usd <= 0.075
+if not math.isfinite(args.cap_usd) or not 0.001 <= args.cap_usd <= 0.07:
+    raise RuntimeError("BENCHMARK_CAP_INVALID")
 cdp_port = 9330 + args.worker
 os.environ["MECORD_BENCH_CDP_PORT"] = str(cdp_port)
 os.environ["MINIWOB_URL"] = (B / "miniwob-plusplus" / "miniwob" / "html" / "miniwob").as_uri() + "/"
@@ -79,9 +80,12 @@ case_label = (args.task_id.split(".")[-1] if args.task_id else f"{args.limit}")
 output_path = output_dir / f"meta_rc6_grounded_portable_{case_label}_seed{args.seed}_worker{args.worker}of{args.workers}.jsonl"
 if output_path.exists():
     raise RuntimeError("RESULTS_ALREADY_EXIST_REFUSE_OVERWRITE")
-bridge = subprocess.Popen(["node", "--experimental-strip-types", str(Path(__file__).with_name("mecord_bridge.mjs"))],
-                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                          text=True, bufsize=1)
+bridge_token = secrets.token_hex(32)
+bridge_env = dict(os.environ)
+bridge_env["MECORD_MINIWOB_BRIDGE_TOKEN"] = bridge_token
+bridge = subprocess.Popen(["node",str(Path(__file__).with_name("mecord_bridge.mjs"))],
+                          stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                          env=bridge_env,text=True,bufsize=1)
 JSON_ACTION_SCHEMA = {
     "type":"json_schema",
     "json_schema":{"name":"mecord_browser_action","strict":True,"schema":{
@@ -124,9 +128,11 @@ def request_model(prompt, *, output_limit=None):
     choice=choices[0]
     content=(choice.get("message") or {}).get("content") or ""
     if not isinstance(content,str):return {}, "incomplete"
+    status = "completed" if choice.get("finish_reason")=="stop" else (
+        "truncated" if choice.get("finish_reason")=="length" else "incomplete")
     try:action=json.loads(content)
-    except json.JSONDecodeError:return {}, "incomplete"
-    return action if isinstance(action,dict) else {}, ("completed" if choice.get("finish_reason")=="stop" else "truncated" if choice.get("finish_reason")=="length" else "incomplete")
+    except json.JSONDecodeError:return {},status if status=="truncated" else "incomplete"
+    return action if isinstance(action,dict) else {},status
 
 def compact_nodes(obs):
     allowed = {"button", "link", "textbox", "searchbox", "checkbox", "radio", "combobox",
@@ -144,12 +150,16 @@ def compact_nodes(obs):
 
 def bridge_call(port, payload):
     req = urllib.request.Request(f"http://127.0.0.1:{port}/execute", data=json.dumps(payload).encode(),
-                                 method="POST", headers={"Content-Type": "application/json"})
+                                 method="POST", headers={"Content-Type": "application/json",
+                                   "Authorization":"Bearer "+bridge_token})
     with urllib.request.urlopen(req, timeout=21) as response:
         return json.load(response)
 
 try:
-    header = bridge.stdout.readline().strip()
+    headers = queue.Queue(maxsize=1)
+    threading.Thread(target=lambda:headers.put(bridge.stdout.readline()),daemon=True).start()
+    try:header = headers.get(timeout=12).strip()
+    except queue.Empty:raise RuntimeError("BRIDGE_STARTUP_TIMEOUT") from None
     if not header.startswith("MECORD_BRIDGE_PORT="):
         raise RuntimeError("BRIDGE_FAILED_TO_START")
     port = int(header.split("=")[1])
