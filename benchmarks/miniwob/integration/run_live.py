@@ -150,6 +150,7 @@ def request_model(prompt, *, output_limit=None):
     payload={"model":"muse-spark-1.3-contributor",
              "messages":[{"role":"user","content":prompt}],
              "response_format":JSON_ACTION_SCHEMA,
+             "reasoning_effort":"low",
              "max_tokens":tokens}
     req=urllib.request.Request("https://api.meta.ai/v1/chat/completions",
                                data=json.dumps(payload).encode(),method="POST",
@@ -168,7 +169,8 @@ def request_model(prompt, *, output_limit=None):
     if not choices:return {}, "incomplete"
     choice=choices[0]
     content=(choice.get("message") or {}).get("content") or ""
-    if not isinstance(content,str):return {}, "incomplete"
+    if not isinstance(content,str):
+        return {}, "truncated" if choice.get("finish_reason")=="length" else "incomplete"
     status = "completed" if choice.get("finish_reason")=="stop" else (
         "truncated" if choice.get("finish_reason")=="length" else "incomplete")
     try:action=json.loads(content)
@@ -259,7 +261,7 @@ try:
                             "All fields must be strings and bid must be copied from current candidates.",
                             output_limit=3072 if status=="truncated" else max_out_tokens)
                     if status != "completed":
-                        raise RuntimeError("MODEL_RESPONSE_INCOMPLETE")
+                        raise RuntimeError("MODEL_RESPONSE_" + status.upper())
                     if grounded is None:
                         grounded = verified_action(model_action,candidates,history)
                     if grounded.get("op")=="wait":
