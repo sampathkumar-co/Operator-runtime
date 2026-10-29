@@ -66,16 +66,16 @@ const svr=http.createServer(async(req,res)=>{
    if(!Array.isArray(semantic.controls)||!Array.isArray(semantic.visuals))throw Error('MISSING_OBSERVATION_ARRAYS');
    const generation=semantic.observationGeneration;
    const controls=semantic.controls.slice(0,160).map(project),visuals=semantic.visuals.slice(0,160).map(project);
-   const refs=new Set(),relativeRefs=new Set();
+   const refs=new Set(),relativeRefs=new Set(),controlInfo=new Map();
    const svgGeometry=new Set(['text','circle','ellipse','rect','path','polygon','polyline','line']);
    for(const item of [...controls,...visuals]){
     if(item.disabled===true||typeof item.ref!=='string')continue;
     if(!refRE.test(item.ref)||!item.ref.startsWith('b-'+generation+'-'))continue;
     if(item.context.frameDepth!==0)continue;
-    if(item.actionable===true)refs.add(item.ref);
+    if(item.actionable===true){refs.add(item.ref);controlInfo.set(item.ref,item);}
     else if(visuals.includes(item)&&svgGeometry.has(item.tag))relativeRefs.add(item.ref);
    }
-   inspectState={targetId,generation,refs,relativeRefs};
+   inspectState={targetId,generation,refs,relativeRefs,controlInfo};
    res.end(JSON.stringify({ok:true,provider:out.provider,durationMs:out.durationMs,
     page:{semantic:{observationGeneration:generation,controls,visuals}},
     observedRefCount:refs.size,visualRelativeRefs:relativeRefs.size,truncated:out.output?.truncated===true}));
@@ -88,6 +88,15 @@ const svr=http.createServer(async(req,res)=>{
   if(typeof ref!=='string'||!refRE.test(ref))throw Error('BAD_REF_FORMAT');
   const allowedRefs=input.op==='click_relative'?inspectState.relativeRefs:inspectState.refs;
   if(!allowedRefs.has(ref))throw Error('REF_NOT_FROM_FRESH_INSPECTION');
+  const observed=inspectState.controlInfo.get(ref);
+  if(input.op==='type'||input.op==='set_value'){
+   const role=String(observed?.role||observed?.tag||'').toLowerCase();
+   if(!observed||(observed.editable!==true&&!new Set(['textbox','searchbox','combobox','spinbutton','input','textarea']).has(role)))throw Error('TARGET_NOT_EDITABLE');
+  }
+  if(input.op==='select'){
+   const role=String(observed?.role||observed?.tag||'').toLowerCase();
+   if(!observed||!new Set(['select','combobox','listbox','option']).has(role))throw Error('TARGET_NOT_SELECTABLE');
+  }
   if(Object.keys(input).some(k=>!['op','ref','value','key'].includes(k)))throw Error('EXTRA_MODEL_PARAMETERS');
   const actionInput={targetId,operation:input.op,target:{ref}};
   if(input.op==='click_relative'){actionInput.xRatio=0.5;actionInput.yRatio=0.5;}
