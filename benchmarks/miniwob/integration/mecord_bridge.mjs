@@ -111,7 +111,7 @@ const svr=http.createServer(async(req,res)=>{
     input.op==='scroll'?inspectState.scrollRefs:inspectState.refs);
   if(!allowedRefs.has(ref))throw Error('REF_NOT_FROM_FRESH_INSPECTION');
   const observed=inspectState.controlInfo.get(ref);
-  if(input.op==='type'||input.op==='set_value'){
+  if(input.op==='type'||input.op==='set_value'||input.op==='keyboard_text'||input.op==='format_text'||input.op==='select_text_range'){
    const role=String(observed?.role||observed?.tag||'').toLowerCase();
    if(!observed||(observed.editable!==true&&!new Set(['textbox','searchbox','combobox','spinbutton','input','textarea']).has(role)))throw Error('TARGET_NOT_EDITABLE');
   }
@@ -121,7 +121,10 @@ const svr=http.createServer(async(req,res)=>{
    if(!observed||!new Set(['select','combobox','listbox','option']).has(role))throw Error('TARGET_NOT_SELECTABLE');
   }
   if(Object.keys(input).some(k=>!['op','ref','value','key'].includes(k)))throw Error('EXTRA_MODEL_PARAMETERS');
-  const actionInput={targetId,operation:input.op,target:{ref}};
+  // Provider set_value is reserved for sliders; native text inputs use type
+  // (which safely replaces the current value, including clear-to-empty).
+  const dispatchOp=input.op==='set_value' && observed?.role!=='slider' ? 'type' : input.op;
+  const actionInput={targetId,operation:dispatchOp,target:{ref}};
   if(input.op==='click_relative'){actionInput.xRatio=0.5;actionInput.yRatio=0.5;}
   if(['type','set_value','select','select_date','keyboard_text','format_text','select_text_range'].includes(input.op)){
    if(typeof input.value!=='string'||(input.value.length===0&&input.op!=='set_value')||input.value.length>400)throw Error('INVALID_TEXT_VALUE');
