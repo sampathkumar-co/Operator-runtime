@@ -30,7 +30,8 @@ const authorized=header=>{
 };
 let provider=new BrowserCdpProvider(endpoint),inspectState=null,sequence=0,busy=false;
 const project=(item,sourceGeneration='',frameTargetId='')=>({
- observationGeneration:sourceGeneration,sourceFrameTargetId:frameTargetId,
+ observationGeneration:sourceGeneration,
+ sourceFrameTargetId:frameTargetId||(item.context?.frameDepth>0?'same-origin-main':''),
  ref:item.ref,role:item.role||'',tag:item.tag||'',primitive:item.primitive||'',
  name:item.name||'',type:item.type||'',actionable:item.actionable===true,disabled:item.disabled===true,
  groupRole:item.groupRole||'',semanticPath:item.semanticPath||'',scrollable:item.scrollable===true,
