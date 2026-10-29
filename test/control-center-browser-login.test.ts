@@ -42,6 +42,9 @@ test('browser authority only accepts exact local host, same-origin mutations and
   assert.equal(controlCenterBrowserRequestAllowed({ ...safe, 'x-mecord-control-center': undefined }, 43820, true), false);
   assert.equal(controlCenterBrowserRequestAllowed({ ...safe, 'sec-fetch-site': 'cross-site' }, 43820, false), false);
   assert.equal(browserUiRouteAllowed('GET', '/v1/control-center/approvals'), true);
+  assert.equal(browserUiRouteAllowed('GET', '/v1/control-center/original-recovery/browser'), true);
+  assert.equal(browserUiRouteAllowed('GET', '/v1/control-center/original-recovery'), false);
+  assert.equal(browserUiRouteAllowed('POST', '/v1/control-center/original-recovery/browser'), false);
   assert.equal(browserUiRouteAllowed('POST', '/v1/approvals/abc'), false);
   assert.equal(browserUiRouteAllowed('POST', '/v1/session-approval'), false);
   assert.equal(browserUiRouteAllowed('POST', '/v1/tasks/abc/run'), true);
