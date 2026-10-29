@@ -63,10 +63,16 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
         if item.get("actionable") is not True and not (visual_relative or sortable or scrollable):
             continue
         ref = item.get("ref")
-        if type(ref) is not str or REF.fullmatch(ref) is None or not ref.startswith("b-" + generation + "-") or ref in seen:
+        source_gen = item.get("observationGeneration") or generation
+        source_frame = item.get("sourceFrameTargetId") or ""
+        if (type(source_gen) is not str or re.fullmatch(r"[a-z0-9]+-[a-z0-9]+", source_gen) is None
+                or type(source_frame) is not str or len(source_frame) > 256):
+            continue
+        if type(ref) is not str or REF.fullmatch(ref) is None or not ref.startswith("b-" + source_gen + "-") or ref in seen:
             continue
         context = item.get("context")
-        if type(context) is not dict or context.get("frameDepth") != 0:
+        if (type(context) is not dict or type(context.get("frameDepth")) is not int
+                or not 0 <= context["frameDepth"] <= 4):
             continue
         rect = item.get("geometry") or item.get("rect")
         if type(rect) is not dict:
@@ -83,6 +89,7 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
         seen.add(ref)
         candidates.append({
             "bid":ref,"role":role[:40],"name":name[:130],
+            "frameTargetId":source_frame[:100], "frameDepth":context["frameDepth"],
             "description":("visual-geometry" if visual_relative else
                            "sortable-geometry" if sortable else
                            "scroll-geometry" if scrollable and item.get("actionable") is not True else category),
@@ -98,6 +105,7 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
                 item.get("groupRole") if type(item.get("groupRole")) is str else "",
                 item.get("semanticPath") if type(item.get("semanticPath")) is str else "",
                 item.get("repeatedOrdinal") if type(item.get("repeatedOrdinal")) is int else None,
+                source_frame,
                 round(x / 32), round(y / 32)
             ], ensure_ascii=True).encode()).hexdigest()[:20],
             "inputType": item.get("type") if type(item.get("type")) is str else "",
@@ -172,7 +180,8 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
         if (chosen.get("description")!="sortable-geometry"
                 or len(other)!=1 or other[0].get("description")!="sortable-geometry"
                 or action.bid==to_ref
-                or action.bid.rsplit("-",1)[0]!=to_ref.rsplit("-",1)[0]):
+                or action.bid.rsplit("-",1)[0]!=to_ref.rsplit("-",1)[0]
+                or chosen.get("frameTargetId")!=other[0].get("frameTargetId")):
             raise MecordObservationError("DRAG_TARGETS_NOT_CURRENT_SORTABLE")
         action=Decision("drag_between",action.bid,to_ref,"")
     if raw.get("op") in {"drag_by", "resize"}:
