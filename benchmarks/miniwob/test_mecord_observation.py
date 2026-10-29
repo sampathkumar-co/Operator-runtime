@@ -300,4 +300,15 @@ class Grounding(unittest.TestCase):
     cs=observed_mecord_candidates(obs([item(role="textbox")]))
     with self.assertRaisesRegex(MecordObservationError,"ACTION_FIELDS_INVALID"):
      verified_action({"op":"type","bid":cs[0]["bid"],"value":"x"*401},cs,[])
+
+ def test_observed_shape_colors_and_circle_geometry_reach_model(self):
+    graphic=item(active=False,name="Target color")
+    graphic["tag"]="circle"
+    graphic["colors"]={"fill":"rgb(255, 0, 0)","stroke":"rgb(0, 0, 0)"}
+    graphic["shape"]={"circle":{"cx":30,"cy":40,"r":12},"center":{"x":30,"y":40}}
+    graphic["numericValue"]=7
+    cs=observed_mecord_candidates(obs([], [graphic]))
+    self.assertEqual(cs[0]["colors"]["fill"],"rgb(255, 0, 0)")
+    self.assertEqual(cs[0]["shape"]["circle"]["r"],12)
+    self.assertEqual(cs[0]["numericValue"],7)
 if __name__=="__main__":unittest.main(verbosity=2)
