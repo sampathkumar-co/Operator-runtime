@@ -240,4 +240,24 @@ class Grounding(unittest.TestCase):
     self.assertEqual(verified_action({"op":"click_relative","bid":canvas["ref"],"value":"top-right"},cs,[])["value"],"top-right")
     with self.assertRaisesRegex(MecordObservationError,"RELATIVE_POINT_NOT_ENUMERATED"):
      verified_action({"op":"click_relative","bid":canvas["ref"],"value":"0.98,0.22"},cs,[])
+
+ def test_provider_dialog_accept_dismiss_with_exact_ref(self):
+    dialog_ref="bd-0123456789abcdef-1-0123456789ab"
+    seen=observed_mecord_candidates({"ok":True,"provider":"browser.cdp",
+      "dialog":{"ref":dialog_ref,"type":"prompt"}})
+    self.assertEqual(seen[0]["bid"],dialog_ref)
+    self.assertEqual(verified_action({"op":"dialog_accept","bid":dialog_ref,
+      "value":"answer","key":""},seen,[])["value"],"answer")
+    self.assertEqual(verified_action({"op":"dialog_dismiss","bid":dialog_ref,
+      "value":"","key":""},seen,[])["op"],"dialog_dismiss")
+ def test_dialog_forged_ref_and_prompt_policy_rejected(self):
+    dialog_ref="bd-0123456789abcdef-1-0123456789ab"
+    seen=observed_mecord_candidates({"ok":True,"provider":"browser.cdp",
+      "dialog":{"ref":dialog_ref,"type":"confirm"}})
+    with self.assertRaisesRegex(MecordObservationError,"EXACT_DIALOG_REF_REQUIRED"):
+     verified_action({"op":"dialog_accept","bid":"bd-0123456789abcdef-2-0123456789ab"},seen,[])
+    with self.assertRaisesRegex(MecordObservationError,"DIALOG_PROMPT_ONLY"):
+     verified_action({"op":"dialog_accept","bid":dialog_ref,"value":"not allowed"},seen,[])
+    with self.assertRaisesRegex(MecordObservationError,"DIALOG_PROMPT_ONLY"):
+     verified_action({"op":"dialog_dismiss","bid":dialog_ref,"value":"not allowed"},seen,[])
 if __name__=="__main__":unittest.main(verbosity=2)
