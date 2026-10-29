@@ -764,27 +764,6 @@ export async function performSemanticInteraction(
       if (![startX, startY, endX, endY].every(Number.isFinite)) {
         throw new OperatorError('BROWSER_RESIZE_NOT_ACTIONABLE', 'Resize handle geometry is invalid.', { retryable: true });
       }
-      let nativePath: Array<{x:number;y:number}> | undefined;
-      if (input.operation === 'drag_path') {
-        if (!input.target.ref || !Array.isArray(input.path) || input.path.length < 2 || input.path.length > 24) {
-          throw new OperatorError('INVALID_BROWSER_GESTURE_PATH', 'Observed drag_path requires an exact target and bounded points.');
-        }
-        nativePath=[];
-        for (const relative of input.path) {
-          const expression = `(${observedRelativePointFunction.toString()})(${JSON.stringify(input.target.ref)}, ${JSON.stringify(relative)})`;
-          const result=unwrapRuntimeValue(await evaluate(session, chosen, expression, false, signal)) as JsonMap | undefined;
-          const local=result?.local as JsonMap | undefined;
-          const px=Number(local?.x),py=Number(local?.y);
-          if (!result || result.ok !== true || !Number.isFinite(px) || !Number.isFinite(py)) {
-            throw new OperatorError(result?.stale === true ? 'BROWSER_TARGET_STALE' : 'BROWSER_POINT_NOT_ACTIONABLE',
-              'Gesture path point is stale, obscured, or outside the observed target.', {
-                retryable:result?.stale === true,
-                details:{target:input.target,sideEffectState:'none',executionPhase:'pre_dispatch'}
-              });
-          }
-          nativePath.push({x:px,y:py});
-        }
-      }
       const dispatch = (params: JsonMap) => chosen.frame
         ? (providerDispatchStarted = true, session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, signal))
         : (providerDispatchStarted = true, session.send('Input.dispatchMouseEvent', params, 8_000, signal));
@@ -1016,6 +995,27 @@ export async function performSemanticInteraction(
           throw new OperatorError('BROWSER_STALE_TARGET', 'Drag source or destination geometry is invalid.', { retryable: true });
         }
         dragDestination = { x: destinationX, y: destinationY, sample: destinationSecond };
+      }
+      let nativePath: Array<{x:number;y:number}> | undefined;
+      if (input.operation === 'drag_path') {
+        if (!input.target.ref || !Array.isArray(input.path) || input.path.length < 2 || input.path.length > 24) {
+          throw new OperatorError('INVALID_BROWSER_GESTURE_PATH', 'Observed drag_path requires an exact target and bounded points.');
+        }
+        nativePath=[];
+        for (const relative of input.path) {
+          const expression = `(${observedRelativePointFunction.toString()})(${JSON.stringify(input.target.ref)}, ${JSON.stringify(relative)})`;
+          const result=unwrapRuntimeValue(await evaluate(session, chosen, expression, false, signal)) as JsonMap | undefined;
+          const local=result?.local as JsonMap | undefined;
+          const px=Number(local?.x),py=Number(local?.y);
+          if (!result || result.ok !== true || !Number.isFinite(px) || !Number.isFinite(py)) {
+            throw new OperatorError(result?.stale === true ? 'BROWSER_TARGET_STALE' : 'BROWSER_POINT_NOT_ACTIONABLE',
+              'Gesture path point is stale, obscured, or outside the observed target.', {
+                retryable:result?.stale === true,
+                details:{target:input.target,sideEffectState:'none',executionPhase:'pre_dispatch'}
+              });
+          }
+          nativePath.push({x:px,y:py});
+        }
       }
       const dispatch = (params: JsonMap) => chosen.frame
         ? (providerDispatchStarted = true, session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, signal))
