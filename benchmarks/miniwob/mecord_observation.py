@@ -146,7 +146,7 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
         if len(matching)!=1:
             raise MecordObservationError("EXACT_DIALOG_REF_REQUIRED")
         value=raw.get("value","")
-        if type(value) is not str or len(value)>400 or "\\0" in value or raw.get("key","")!="":
+        if type(value) is not str or len(value)>400 or "\0" in value or raw.get("key","")!="":
             raise MecordObservationError("DIALOG_INPUT_INVALID")
         if value and (raw["op"]!="dialog_accept" or matching[0].get("name")!="prompt"):
             raise MecordObservationError("DIALOG_PROMPT_ONLY")
