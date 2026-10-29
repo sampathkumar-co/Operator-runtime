@@ -42,6 +42,7 @@ os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(Path.home() / "AppData" / "Local" /
 import gymnasium as gym
 import browsergym.miniwob
 from mecord_observation import observed_mecord_candidates,verified_action,MecordObservationError
+from integration.budget_ledger import BudgetLedger
 from playwright.sync_api._generated import BrowserType
 
 # Isolated process-only shim: BrowserGym supplies launch args itself, and also
@@ -96,64 +97,17 @@ case_label = (args.task_id.split(".")[-1] if args.task_id else f"{args.limit}")
 output_path = output_dir / f"meta_rc6_grounded_{args.campaign_tag}_{case_label}_seed{args.seed}_worker{args.worker}of{args.workers}_offset{args.start_at}_count{len(task_plan)}.jsonl"
 if output_path.exists():
     raise RuntimeError("RESULTS_ALREADY_EXIST_REFUSE_OVERWRITE")
-# A shared, short-lived O_EXCL lock serializes budget reservations across all
-# workers. Never hold this lock while a browser or Meta call is running.
-# The append-only ledger is the authority; a timed-out owner must not be stolen.
-budget_lock = output_dir / ".mecord-budget.lock"
-ledger_path = output_dir / "mecord-api-reservations.jsonl"
+# All workers reserve against one durable ledger. A process keeps no
+# exclusive workspace lock while waiting for Meta/CDP/browser actions.
 lifetime_cap_usd = 0.07
+ledger = BudgetLedger(output_dir,lifetime_cap=lifetime_cap_usd,
+    run_cap=args.cap_usd,worker=args.worker,workers=args.workers,
+    manifest=global_plan_sha256)
 historical_reservations = 0.0
 run_reserved = 0.0
-
-def _read_reserved():
-    total = 0.0
-    if ledger_path.exists():
-        for line in ledger_path.read_text(encoding="utf8").splitlines():
-            try: entry = json.loads(line)
-            except (ValueError,TypeError): raise RuntimeError("MODEL_LEDGER_CORRUPT") from None
-            amount = entry.get("usd") if type(entry) is dict else None
-            if type(amount) not in (int,float) or not math.isfinite(amount) or amount <= 0:
-                raise RuntimeError("MODEL_LEDGER_CORRUPT")
-            total += amount
-    return total
-
 def reserve_budget(usd):
     global historical_reservations,run_reserved
-    if not math.isfinite(usd) or usd<=0:
-        raise RuntimeError("INVALID_API_RESERVATION")
-    marker = f"{os.getpid()}-{secrets.token_hex(16)}"
-    deadline = time.monotonic()+12
-    while True:
-        try:
-            fd = os.open(budget_lock,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
-            try:
-                os.write(fd,marker.encode("ascii"))
-                os.fsync(fd)
-            finally:os.close(fd)
-            break
-        except FileExistsError:
-            if time.monotonic() > deadline:
-                raise RuntimeError("BENCHMARK_BUDGET_LOCK_BUSY")
-            time.sleep(0.04)
-    try:
-        current = _read_reserved()
-        if run_reserved+usd > args.cap_usd or current+usd > lifetime_cap_usd:
-            raise RuntimeError("BUDGET_CAP_REACHED")
-        with ledger_path.open("a",encoding="utf8") as ledger:
-            ledger.write(json.dumps({"usd":round(usd,9),"type":"api_reservation",
-                "worker":args.worker,"workers":args.workers,
-                "global_manifest":global_plan_sha256})+"\\n")
-            ledger.flush()
-            os.fsync(ledger.fileno())
-        historical_reservations=current+usd
-        run_reserved+=usd
-    finally:
-        # The owner that created this exact lock must be the one to remove it.
-        try:
-            if budget_lock.read_text(encoding="ascii") == marker:
-                budget_lock.unlink()
-        except OSError:
-            pass
+    historical_reservations,run_reserved=ledger.reserve(usd)
 
 bridge_token = secrets.token_hex(32)
 # Explicit minimal environment: never pass unrelated host credentials to CDP.
@@ -486,4 +440,4 @@ finally:
     except:bridge.kill()
     key = None
     BrowserType.launch = _ORIGINAL_LAUNCH
-    pass  # Short-lived reservations release their own shared lock
+    pass  # No persistent workspace lock; budget ledger handles its own release
