@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import urllib.request
+import secrets
 from pathlib import Path
 from playwright.sync_api._generated import BrowserType
 
@@ -39,18 +40,23 @@ def isolated_chrome(self, *pos, **kwargs):
 def request(port, body):
     req = urllib.request.Request("http://127.0.0.1:" + str(port) + "/execute",
                                  data=json.dumps(body).encode(),method="POST",
-                                 headers={"Content-Type":"application/json"})
+                                 headers={"Content-Type":"application/json",
+                                 "Authorization":"Bearer "+bridge_token})
     with urllib.request.urlopen(req, timeout=25) as response:
         return json.load(response)
 
 env = None
 bridge = None
+bridge_token = secrets.token_hex(32)
 BrowserType.launch = isolated_chrome
 try:
     env = gym.make("browsergym/miniwob.click-test",headless=True)
     observation, _ = env.reset(seed=42)
-    bridge = subprocess.Popen(["node",str(Path(__file__).with_name("mecord_bridge.mjs"))],
-                              stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+    bridge_env=dict(os.environ)
+    bridge_env["MECORD_MINIWOB_BRIDGE_TOKEN"]=bridge_token
+    bridge=subprocess.Popen(["node",str(Path(__file__).with_name("mecord_bridge.mjs"))],
+                            stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                            env=bridge_env,text=True)
     header = bridge.stdout.readline().strip()
     if not header.startswith("MECORD_BRIDGE_PORT="):
         raise RuntimeError("BRIDGE_FAILED_TO_START")
