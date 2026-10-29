@@ -51,26 +51,31 @@ const svr=http.createServer(async(req,res)=>{
    if(!Array.isArray(semantic.controls)||!Array.isArray(semantic.visuals))throw Error('MISSING_OBSERVATION_ARRAYS');
    const generation=semantic.observationGeneration;
    const controls=semantic.controls.slice(0,160).map(project),visuals=semantic.visuals.slice(0,160).map(project);
-   const refs=new Set();
+   const refs=new Set(),relativeRefs=new Set();
+   const svgGeometry=new Set(['text','circle','ellipse','rect','path','polygon','polyline','line']);
    for(const item of [...controls,...visuals]){
-    if(item.actionable!==true||item.disabled===true||typeof item.ref!=='string')continue;
+    if(item.disabled===true||typeof item.ref!=='string')continue;
     if(!refRE.test(item.ref)||!item.ref.startsWith('b-'+generation+'-'))continue;
     if(item.context.frameDepth!==0)continue;
-    refs.add(item.ref);
+    if(item.actionable===true)refs.add(item.ref);
+    else if(visuals.includes(item)&&svgGeometry.has(item.tag))relativeRefs.add(item.ref);
    }
-   inspectState={targetId,generation,refs};
+   inspectState={targetId,generation,refs,relativeRefs};
    res.end(JSON.stringify({ok:true,provider:out.provider,durationMs:out.durationMs,
     page:{semantic:{observationGeneration:generation,controls,visuals}},
-    observedRefCount:refs.size,truncated:out.output?.truncated===true}));
+    observedRefCount:refs.size,visualRelativeRefs:relativeRefs.size,truncated:out.output?.truncated===true}));
    return;
   }
-  const allowed=new Set(['click','hover','set_value','type','select','key_press']);
+  const allowed=new Set(['click','hover','set_value','type','select','key_press','click_relative']);
   if(!allowed.has(input.op))throw Error('UNSUPPORTED_INTERACTION');
   if(!inspectState||inspectState.targetId!==targetId)throw Error('FRESH_INSPECTION_REQUIRED');
   const ref=input.ref;
-  if(typeof ref!=='string'||!refRE.test(ref)||!inspectState.refs.has(ref))throw Error('REF_NOT_FROM_FRESH_INSPECTION');
+  if(typeof ref!=='string'||!refRE.test(ref))throw Error('BAD_REF_FORMAT');
+  const allowedRefs=input.op==='click_relative'?inspectState.relativeRefs:inspectState.refs;
+  if(!allowedRefs.has(ref))throw Error('REF_NOT_FROM_FRESH_INSPECTION');
   if(Object.keys(input).some(k=>!['op','ref','value','key'].includes(k)))throw Error('EXTRA_MODEL_PARAMETERS');
   const actionInput={targetId,operation:input.op,target:{ref}};
+  if(input.op==='click_relative'){actionInput.xRatio=0.5;actionInput.yRatio=0.5;}
   if(['type','set_value','select'].includes(input.op)){
    if(typeof input.value!=='string'||!input.value||input.value.length>400)throw Error('INVALID_TEXT_VALUE');
    actionInput.value=input.value;
