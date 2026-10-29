@@ -5,6 +5,7 @@ grants authority; the isolated host bridge must independently validate refs.
 """
 from __future__ import annotations
 import re
+from datetime import date
 from typing import Any
 from controller import ControllerError, Decision, normalize_decision, safe_attempt
 
@@ -69,6 +70,7 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
                 "bid":ref,"role":role[:40],"name":name[:130],
                 "description":"visual-geometry" if visual_relative else category,
                 "editable": item.get("editable") is True,
+                "inputType": item.get("type") if type(item.get("type")) is str else "",
                 "geometry":{"x":round(x,1),"y":round(y,1),"width":round(w,1),"height":round(h,1)},
             })
     return candidates
@@ -88,9 +90,10 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
             type(c) is dict and c.get("bid") == ref for c in candidates) != 1:
         raise MecordObservationError("EXACT_OBSERVED_REF_REQUIRED")
     relative = raw.get("op") == "click_relative"
-    if relative:
+    date_action = raw.get("op") == "select_date"
+    if relative or date_action:
         proposal = dict(raw)
-        proposal["op"] = "click"
+        proposal["op"] = "click" if relative else "set_value"
     else:
         proposal = raw
     try:
@@ -110,11 +113,20 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
     role = str(chosen.get("role") or "").casefold()
     editable_roles = {"textbox","searchbox","combobox","spinbutton","input","textarea"}
     select_roles = {"select","combobox","listbox","option"}
-    if action.op in {"set_value","type"} and not (
+    if action.op in {"set_value","type"} and not date_action and not (
             chosen.get("editable") is True or role in editable_roles):
         raise MecordObservationError("TARGET_NOT_EDITABLE")
     if action.op == "select" and role not in select_roles:
         raise MecordObservationError("TARGET_NOT_SELECTABLE")
+    if date_action:
+        if chosen.get("inputType") != "date":
+            raise MecordObservationError("DATE_TARGET_NOT_DATE_INPUT")
+        try:
+            if len(action.value) != 10 or date.fromisoformat(action.value).isoformat() != action.value:
+                raise ValueError("invalid date")
+        except ValueError:
+            raise MecordObservationError("DATE_VALUE_INVALID") from None
+        action = Decision("select_date", action.bid, action.value, action.key)
     if relative:
         if match[0].get("description") != "visual-geometry":
             raise MecordObservationError("RELATIVE_TARGET_NOT_VISUAL")
