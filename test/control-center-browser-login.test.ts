@@ -45,6 +45,8 @@ test('browser authority only accepts exact local host, same-origin mutations and
   assert.equal(browserUiRouteAllowed('GET', '/v1/control-center/original-recovery/browser'), true);
   assert.equal(browserUiRouteAllowed('GET', '/v1/control-center/original-recovery'), false);
   assert.equal(browserUiRouteAllowed('POST', '/v1/control-center/original-recovery/browser'), false);
+  assert.equal(browserUiRouteAllowed('POST', '/v1/control-center/original-recovery/browser/resolve'), true);
+  assert.equal(browserUiRouteAllowed('POST', '/v1/control-center/original-recovery/browser/delete'), false);
   assert.equal(browserUiRouteAllowed('POST', '/v1/approvals/abc'), false);
   assert.equal(browserUiRouteAllowed('POST', '/v1/session-approval'), false);
   assert.equal(browserUiRouteAllowed('POST', '/v1/tasks/abc/run'), true);
@@ -127,4 +129,46 @@ test('local browser login is secure, functional and cannot grant recovery author
   assert.equal(logout.status, 200);
   const afterLogout = await fetch(base + '/v1/control-center/approvals', { headers: { cookie: sessionCookie } });
   assert.equal(afterLogout.status, 401);
+});
+
+
+test('native Windows owner-confirmed browser sign-in removes the terminal-code dependency without granting recovery keys', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-cc-native-login-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const runtime = createRuntime({ allowedRoots: [root], allowedExecutables: ['node'] });
+  const token = 'n'.repeat(64);
+  let nativePrompts = 0;
+  const agent = createLocalAgentServer({
+    runtime, token,
+    recoveryToken: 'k'.repeat(64),
+    permissions: { allowedCapabilities: ['computer.inspect'], allowedRoots: [root] },
+    confirmLocalBrowserLogin: async () => { nativePrompts++; return true; }
+  });
+  t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
+  const bound = await agent.listen('127.0.0.1', 0);
+  const base = 'http://127.0.0.1:' + bound.port;
+  const pathName = '/v1/control-center/browser-login/windows';
+  const origin = { origin: base, 'x-mecord-control-center': '1', 'content-type': 'application/json' };
+  assert.equal((await fetch(base+pathName,{method:'POST',headers:origin,body:'{}'})).status,200);
+  assert.equal(nativePrompts,1);
+  // Only one native prompt may be started per short window; never prompt-flood.
+  assert.equal((await fetch(base+pathName,{method:'POST',headers:origin,body:'{}'})).status,429);
+  const shell = await (await fetch(base+'/control-center')).text();
+  assert.match(shell,/Sign in on this PC/);
+  const result = await fetch(base+pathName, { method: 'POST',
+    headers: {...origin, authorization:'Bearer '+token}, body:'{}' });
+  assert.equal(result.status,403);
+  assert.equal((await fetch(base+pathName,{method:'POST',
+    headers:{...origin,origin:'https://attacker.invalid'},body:'{}'})).status,403);
+  assert.equal((await fetch(base+pathName,{method:'POST',
+    headers:{...origin,'x-operator-relay-request':'1'},body:'{}'})).status,403);
+  assert.equal(nativePrompts,1);
+  // Reissue on a fresh fixture to recover the cookie (the first response was consumed).
+  const auth = new ControlCenterSessions();
+  const secret = auth.issueNativeOwnerSession();
+  assert.match(secret,/^[A-Za-z0-9_-]{43}$/);
+  assert.ok(auth.validCookie(auth.cookie(secret).split(';')[0]));
+  assert.equal(auth.cookie(secret).includes(token),false);
+  assert.equal(browserUiRouteAllowed('POST', pathName),false,
+    'Native sign-in is a pre-authentication route, not a recovery-authorized browser route');
 });

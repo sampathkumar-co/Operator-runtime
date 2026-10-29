@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { canonicalJson } from '../../../src/core/action-identity.ts';
 import { readDurableStateText, writeDurableStateText } from '../../../src/core/durable-state.ts';
@@ -8,6 +9,7 @@ import { OperatorError } from '../../../src/core/errors.ts';
 import { ActionTransitionJournal } from '../../../src/core/action-transition-journal.ts';
 import { observeProcessInstance } from '../../../src/core/process-instance.ts';
 import { LocalActionExecutionStore } from './action-execution-store.ts';
+import { buildOriginalRecoveryReviewModel, locateOriginalRecoveryActionId } from '../../../src/core/original-recovery-ux.ts';
 
 const MAX_BYTES = 256 * 1024;
 const MAX_EVENTS = 256;
@@ -217,5 +219,112 @@ export class OperatorPreDispatchAdjudicator {
       ids.add(r.actionId);
     }
     return ledger;
+  }
+}
+
+
+/**
+ * Independent native owner gesture for a historical no-replay fence.
+ * Never accepts action data, tokens or user-supplied PowerShell code.
+ * Absence of an interactive Windows desktop is a denial, not consent.
+ */
+export async function confirmOriginalRecoveryOnWindows(input: {
+  capability: string; risk: string; caseDigest: string;
+}): Promise<boolean> {
+  if (process.platform !== 'win32' || process.env.MECORD_DISABLE_APPROVAL_UI === '1') return false;
+  const systemRoot = String(process.env.SystemRoot ?? '').trim();
+  if (!/^[A-Za-z]:\\Windows$/i.test(systemRoot)) return false;
+  const executable = path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  if (!/^[a-z][a-z0-9._-]{0,127}$/.test(input.capability) ||
+      !['write', 'external'].includes(input.risk) || !validHash(input.caseDigest)) return false;
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    'Add-Type -AssemblyName System.Windows.Forms',
+    '$request = ([Console]::In.ReadToEnd() | ConvertFrom-Json)',
+    '$nl = [Environment]::NewLine',
+    '$message = "Action: " + $request.capability + $nl + "Risk: " + $request.risk + $nl + "Case digest: " + $request.caseDigest + $nl + $nl +',
+    '  "I CONFIRM this is the original owner device, the original process has STOPPED and this protected state was NOT COPIED to another device." + $nl + $nl +',
+    '  "Authorize a permanent device-signed NO-REPLAY FENCE? This does NOT perform the old action."',
+    "$answer = [System.Windows.Forms.MessageBox]::Show($message, 'Mecord original-device recovery',",
+    '  [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning,',
+    '  [System.Windows.Forms.MessageBoxDefaultButton]::Button2)',
+    "if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) { [Console]::Out.Write('CONFIRMED'); exit 0 }",
+    "[Console]::Out.Write('DENIED')",
+    'exit 1'
+  ].join('\r\n');
+
+  return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    let stdout = '';
+    const child = spawn(executable, [
+      '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA',
+      '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')
+    ], { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+    const done = (approved: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(approved);
+    };
+    const timer = setTimeout(() => { child.kill(); done(false); }, 120_000);
+    timer.unref?.();
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+      if (stdout.length > 32) { child.kill(); done(false); }
+    });
+    child.once('error', () => done(false));
+    child.once('close', (code) => done(code === 0 && stdout === 'CONFIRMED'));
+    child.stdin.on('error', () => done(false));
+    child.stdin.end(JSON.stringify(input));
+  });
+}
+
+/** Only writes a signed NO-REPLAY fence; never replays the action or ACKs the relay. */
+export class OriginalRecoveryOwnerResolution {
+  #receipts: LocalActionExecutionStore;
+  #journal: ActionTransitionJournal;
+  #adjudicator: Pick<OperatorPreDispatchAdjudicator, 'inspect' | 'adjudicate'>;
+  #confirmOwner: (input: { capability: string; risk: string; caseDigest: string }) => Promise<boolean>;
+  #busy = false;
+
+  constructor(stateDir: string, options: {
+    adjudicator?: Pick<OperatorPreDispatchAdjudicator, 'inspect' | 'adjudicate'>;
+    confirmOwner?: (input: { capability: string; risk: string; caseDigest: string }) => Promise<boolean>;
+  } = {}) {
+    this.#receipts = new LocalActionExecutionStore(stateDir);
+    this.#journal = new ActionTransitionJournal(stateDir);
+    this.#adjudicator = options.adjudicator ?? new OperatorPreDispatchAdjudicator(stateDir);
+    this.#confirmOwner = options.confirmOwner ?? confirmOriginalRecoveryOnWindows;
+  }
+
+  async resolve(reference: unknown): Promise<{ status: 'FENCED_NO_REPLAY'; epoch: number }> {
+    if (this.#busy) throw denied('Another original-device recovery confirmation is active.');
+    this.#busy = true;
+    try {
+      const pending = await this.#receipts.listOperatorPendingReceipts(200);
+      const journals = await this.#journal.list(1000);
+      const model = buildOriginalRecoveryReviewModel(pending, journals);
+      const review = model.items.find(item => item.actionId === reference);
+      const actionId = locateOriginalRecoveryActionId(reference, pending);
+      if (!review || !actionId || review.status !== 'REVIEW_REQUIRED' ||
+          !['write', 'external'].includes(review.risk) || review.capability === 'Unverified action') {
+        throw denied('Uncertain or mismatched history cannot be cleared through the Control Center.');
+      }
+      const candidate = await this.#adjudicator.inspect(actionId);
+      const confirmed = await this.#confirmOwner({
+        capability: review.capability, risk: review.risk, caseDigest: candidate.caseDigest
+      });
+      if (!confirmed) throw denied('Native owner confirmation was denied or unavailable.');
+      // Device-signed ledger CAS and journal fencing still happen in adjudicate.
+      const result = await this.#adjudicator.adjudicate({
+        actionId, caseDigest: candidate.caseDigest,
+        confirmation: 'AUTHORIZE-NO-REPLAY:' + candidate.caseDigest,
+        ownerAttestation: 'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED'
+      });
+      return { status: 'FENCED_NO_REPLAY', epoch: result.epoch };
+    } finally {
+      this.#busy = false;
+    }
   }
 }
