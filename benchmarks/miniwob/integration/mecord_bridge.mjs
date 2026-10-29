@@ -26,6 +26,7 @@ let provider=new BrowserCdpProvider(endpoint),inspectState=null,sequence=0,busy=
 const project=item=>({
  ref:item.ref,role:item.role||'',tag:item.tag||'',primitive:item.primitive||'',
  name:item.name||'',actionable:item.actionable===true,disabled:item.disabled===true,
+ editable:item.editable===true,
  context:{frameDepth:item.context?.frameDepth,shadowDepth:item.context?.shadowDepth},
  geometry:item.geometry||item.rect,
  perceptibleState:{text:item.perceptibleState?.text||''}
