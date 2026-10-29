@@ -4,9 +4,11 @@ import {createHash} from 'node:crypto';
 const MAX_SCREENSHOT_BYTES=180_000;
 export function allowedSyntheticFrameUrl(url,prefix,authorizedOrigins=[]) {
  if(typeof url!=='string'||typeof prefix!=='string')return false;
- if(url.startsWith(prefix))return true;
  try {
   const parsed=new URL(url);
+  const fixture=new URL(prefix);
+  if(parsed.protocol==='file:' && fixture.protocol==='file:' &&
+     parsed.href.startsWith(fixture.href) && !url.includes('..'))return true;
   return (parsed.protocol==='https:'||parsed.protocol==='http:') &&
    authorizedOrigins.includes(parsed.origin);
  } catch{return false;}
