@@ -97,4 +97,20 @@ class Grounding(unittest.TestCase):
     cs=observed_mecord_candidates(obs([], [svg]))
     with self.assertRaisesRegex(MecordObservationError,"EXACT_OBSERVED_REF"):
      verified_action({"op":"click_relative","bid":"b-abc123-7-99"},cs,[])
+
+ def test_button_is_not_an_editor(self):
+    cs=observed_mecord_candidates(obs([item()]))
+    with self.assertRaisesRegex(MecordObservationError,"TARGET_NOT_EDITABLE"):
+     verified_action({"op":"set_value","bid":"b-abc123-7-1","value":"hello"},cs,[])
+ def test_textbox_can_be_filled(self):
+    cs=observed_mecord_candidates(obs([item(role="textbox")]))
+    self.assertEqual(verified_action({"op":"set_value","bid":"b-abc123-7-1","value":"hello"},cs,[])["op"],"set_value")
+ def test_select_requires_selectable_role(self):
+    cs=observed_mecord_candidates(obs([item()]))
+    with self.assertRaisesRegex(MecordObservationError,"TARGET_NOT_SELECTABLE"):
+     verified_action({"op":"select","bid":"b-abc123-7-1","value":"option"},cs,[])
+ def test_observed_editable_generic_allowed(self):
+    a=item(role="generic");a["editable"]=True
+    cs=observed_mecord_candidates(obs([a]))
+    self.assertEqual(verified_action({"op":"type","bid":"b-abc123-7-1","value":"a"},cs,[])["op"],"type")
 if __name__=="__main__":unittest.main(verbosity=2)
