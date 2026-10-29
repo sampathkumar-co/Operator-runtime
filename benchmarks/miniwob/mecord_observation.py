@@ -74,7 +74,19 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
 
 def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[dict]) -> dict[str,str]:
     """Normalize a model suggestion; permit only exact, currently observed refs."""
-    relative = type(raw) is dict and raw.get("op") == "click_relative"
+    # Do not use accessible-name fallback to turn an invented/stale model ID
+    # into authority. A proposed action must name one exact CURRENT Mecord ref.
+    if type(raw) is not dict:
+        raise MecordObservationError("ACTION_NOT_OBJECT")
+    if set(raw) - {"op","bid","value","key"}:
+        raise MecordObservationError("UNSUPPORTED_MODEL_FIELDS")
+    ref = raw.get("bid")
+    if type(ref) is not str or REF.fullmatch(ref) is None:
+        raise MecordObservationError("EXACT_OBSERVED_REF_REQUIRED")
+    if type(candidates) is not list or sum(
+            type(c) is dict and c.get("bid") == ref for c in candidates) != 1:
+        raise MecordObservationError("EXACT_OBSERVED_REF_REQUIRED")
+    relative = raw.get("op") == "click_relative"
     if relative:
         proposal = dict(raw)
         proposal["op"] = "click"
@@ -99,6 +111,15 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
         action = Decision("click_relative", action.bid, action.value, action.key)
     elif match[0].get("description") == "visual-geometry":
         raise MecordObservationError("VISUAL_NEEDS_RELATIVE_CLICK")
+    # Detect uncertainty throughout this bounded task, not only the last 3
+    # entries checked by the generic source controller.
+    if type(history) is not list or len(history) > 1000:
+        raise MecordObservationError("HISTORY_INVALID")
+    if any(type(h) is not dict or h.get("sideEffectState") == "uncertain"
+           or (type(h.get("error")) is str and
+               ("UNCERTAIN" in h["error"].upper() or "RECONCIL" in h["error"].upper()))
+           for h in history):
+        raise MecordObservationError("UNCERTAIN_HISTORY")
     if not safe_attempt(action,history):
         raise MecordObservationError("UNSAFE_REPLAY")
     return {"op":action.op,"ref":action.bid,"value":action.value,"key":action.key}
