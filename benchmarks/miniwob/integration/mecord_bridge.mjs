@@ -1,7 +1,7 @@
 // Isolated, source-pinned Mecord MiniWoB bridge. No production relay or credentials.
 import http from 'node:http';import path from 'node:path';
 import {timingSafeEqual} from 'node:crypto';
-import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,relativePointForLabel} from './bridge_actions.mjs';
+import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,boundedRelativePoint} from './bridge_actions.mjs';
 import {captureSyntheticView,allowedSyntheticFrameUrl} from './browser_visual.mjs';
 import {pathToFileURL} from 'node:url';import {readFile} from 'node:fs/promises';
 const dir=process.env.MECORD_MINIWOB_WORKDIR ? path.resolve(process.env.MECORD_MINIWOB_WORKDIR) : null;
@@ -148,7 +148,7 @@ const svr=http.createServer(async(req,res)=>{
     observedRefCount:refs.size,visualRelativeRefs:relativeRefs.size,sortableRefs:sortableRefs.size,scrollRefs:scrollRefs.size,truncated:out.output?.truncated===true}));
    return;
   }
-  const allowed=new Set(['click','hover','set_value','type','select','select_date','key_press','click_relative','scroll','drag_between','drag_by','resize','hotkey','keyboard_text','format_text','select_text_range','dialog_accept','dialog_dismiss']);
+  const allowed=new Set(['click','hover','set_value','type','select','select_date','key_press','click_relative','scroll','drag_between','drag_to','drag_by','resize','hotkey','keyboard_text','format_text','select_text_range','dialog_accept','dialog_dismiss']);
   if(!allowed.has(input.op))throw Error('UNSUPPORTED_INTERACTION');
   if(input.op==='dialog_accept'||input.op==='dialog_dismiss'){
    const ref=input.ref;
@@ -178,10 +178,11 @@ const svr=http.createServer(async(req,res)=>{
   if(!inspectState||inspectState.targetId!==targetId)throw Error('FRESH_INSPECTION_REQUIRED');
   const ref=input.ref;
   if(typeof ref!=='string'||!refRE.test(ref))throw Error('BAD_REF_FORMAT');
+  const graphicalRefs=new Set([...inspectState.refs,...inspectState.relativeRefs]);
   const allowedRefs=(input.op==='click_relative'?inspectState.relativeRefs:
     input.op==='drag_between'?inspectState.sortableRefs:
-    input.op==='scroll'?inspectState.scrollRefs:
-   input.op==='drag_by'||input.op==='resize'?new Set([...inspectState.refs,...inspectState.relativeRefs]):inspectState.refs);
+    input.op==='drag_to'||input.op==='hover'||input.op==='drag_by'||input.op==='resize'?graphicalRefs:
+    input.op==='scroll'?inspectState.scrollRefs:inspectState.refs);
   if(!allowedRefs.has(ref))throw Error('REF_NOT_FROM_FRESH_INSPECTION');
   const observed=inspectState.controlInfo.get(ref);
   if(input.op==='type'||input.op==='set_value'||input.op==='keyboard_text'||input.op==='format_text'||input.op==='select_text_range'){
@@ -197,17 +198,16 @@ const svr=http.createServer(async(req,res)=>{
   if(Object.keys(input).some(k=>!['op','ref','value','key'].includes(k)))throw Error('EXTRA_MODEL_PARAMETERS');
   // Provider set_value is reserved for sliders; native text inputs use type
   // (which safely replaces the current value, including clear-to-empty).
-  const dispatchOp=providerOperationForInput(input.op,observed?.role);
+  const dispatchOp=providerOperationForInput(input.op==='drag_to'?'drag_between':input.op,observed?.role);
   const actionInput={targetId,operation:dispatchOp,target:{ref}};
-  if(input.op==='click_relative'){Object.assign(actionInput,relativePointForLabel(input.value));}
+  if(input.op==='click_relative'){Object.assign(actionInput,boundedRelativePoint(input.value));}
   if(['type','set_value','select','select_date','keyboard_text','format_text','select_text_range'].includes(input.op)){
    if(typeof input.value!=='string'||(input.value.length===0&&input.op!=='set_value')||input.value.length>400)throw Error('INVALID_TEXT_VALUE');
    if(input.op==='select_date'&&!/^\d{4}-\d{2}-\d{2}$/.test(input.value))throw Error('DATE_VALUE_INVALID');
    actionInput.value=input.value;
   }
   if(input.op==='scroll'){
-   actionInput.deltaX=0;
-   actionInput.deltaY=boundedScrollDelta(input.value);
+   Object.assign(actionInput,boundedScrollDelta(input.value));
   }
   if(input.op==='drag_by'||input.op==='resize'){
    const {deltaX,deltaY}=boundedDisplacement(input.value);
@@ -225,12 +225,14 @@ const svr=http.createServer(async(req,res)=>{
    if(!new Set(['CTRL+A','CTRL+C','CTRL+V','CTRL+Z','CTRL+SHIFT+Z','CTRL+B','CTRL+I','CTRL+U']).has(input.key))throw Error('INVALID_HOTKEY');
    actionInput.keys=input.key.split('+');
   }
-  if(input.op==='drag_between'){
+  if(input.op==='drag_between'||input.op==='drag_to'){
    const sourceFrame=inspectState.controlInfo.get(ref)?.sourceFrameTargetId||'';
    const toRef=input.value;
    if((inspectState.controlInfo.get(toRef)?.sourceFrameTargetId||'')!==sourceFrame)throw Error('CROSS_FRAME_DRAG_DENIED');
-   if(typeof toRef!=='string'||!refRE.test(toRef)||toRef===ref||!inspectState.sortableRefs.has(toRef)||
-      toRef.slice(0,toRef.lastIndexOf('-'))!==ref.slice(0,ref.lastIndexOf('-')))throw Error('DRAG_TARGETS_NOT_CURRENT_SORTABLE');
+   if(typeof toRef!=='string'||!refRE.test(toRef)||toRef===ref||
+      !(input.op==='drag_to'?graphicalRefs.has(toRef):inspectState.sortableRefs.has(toRef))||
+      toRef.slice(0,toRef.lastIndexOf('-'))!==ref.slice(0,ref.lastIndexOf('-')))
+       throw Error('DRAG_TARGETS_NOT_CURRENT');
    actionInput.toTarget={ref:toRef};
   }
   if(input.op==='key_press'){
