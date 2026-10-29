@@ -128,4 +128,40 @@ class Grounding(unittest.TestCase):
     cs=observed_mecord_candidates(obs([item(role="textbox")]))
     with self.assertRaisesRegex(MecordObservationError,"DATE_TARGET_NOT_DATE_INPUT"):
      verified_action({"op":"select_date","bid":"b-abc123-7-1","value":"2026-10-29"},cs,[])
+
+ def test_scrollable_observed_control_accepts_bounded_direction(self):
+    a=item(role="combobox");a["scrollable"]=True
+    cs=observed_mecord_candidates(obs([a]))
+    self.assertEqual(verified_action({"op":"scroll","bid":"b-abc123-7-1","value":"down"},cs,[])["value"],"down")
+ def test_scroll_requires_observed_scrollable_and_exact_direction(self):
+    cs=observed_mecord_candidates(obs([item()]))
+    with self.assertRaisesRegex(MecordObservationError,"SCROLL_TARGET_OR_DIRECTION_INVALID"):
+     verified_action({"op":"scroll","bid":"b-abc123-7-1","value":"down"},cs,[])
+    a=item();a["scrollable"]=True
+    cs=observed_mecord_candidates(obs([a]))
+    with self.assertRaisesRegex(MecordObservationError,"SCROLL_TARGET_OR_DIRECTION_INVALID"):
+     verified_action({"op":"scroll","bid":"b-abc123-7-1","value":"8000"},cs,[])
+ def test_scrollable_nonclickable_visual_accepts_scroll_only(self):
+    a=item(role="",active=False);a["tag"]="div";a["scrollable"]=True
+    cs=observed_mecord_candidates(obs([], [a]))
+    self.assertEqual(cs[0]["description"],"scroll-geometry")
+    self.assertEqual(verified_action({"op":"scroll","bid":"b-abc123-7-1","value":"up"},cs,[])["op"],"scroll")
+    with self.assertRaisesRegex(MecordObservationError,"SPECIALIST_ACTION_REQUIRED"):
+     verified_action({"op":"click","bid":"b-abc123-7-1"},cs,[])
+ def test_sortable_pair_same_observed_generation(self):
+    first=item(role="",active=False);first["tag"]="div";first["groupRole"]="li";first["semanticPath"]="body>ul:sortable>li"
+    second=dict(first,ref="b-abc123-7-2",name="Another")
+    cs=observed_mecord_candidates(obs([], [first,second]))
+    self.assertEqual(len(cs),2)
+    self.assertEqual(verified_action({"op":"drag_between","bid":"b-abc123-7-1","value":"b-abc123-7-2"},cs,[])["op"],"drag_between")
+    with self.assertRaisesRegex(MecordObservationError,"SPECIALIST_ACTION_REQUIRED"):
+     verified_action({"op":"click","bid":"b-abc123-7-1"},cs,[])
+ def test_sortable_disallows_unobserved_destination(self):
+    first=item(role="",active=False);first["tag"]="div";first["groupRole"]="li";first["semanticPath"]="body>ul:sortable>li"
+    cs=observed_mecord_candidates(obs([], [first]))
+    with self.assertRaisesRegex(MecordObservationError,"DRAG_TARGETS_NOT_CURRENT_SORTABLE"):
+     verified_action({"op":"drag_between","bid":"b-abc123-7-1","value":"b-abc123-7-9"},cs,[])
+ def test_sortable_nonlist_elements_not_exposed(self):
+    a=item(role="",active=False);a["tag"]="div";a["semanticPath"]="body>div"
+    self.assertEqual(observed_mecord_candidates(obs([], [a])),[])
 if __name__=="__main__":unittest.main(verbosity=2)
