@@ -292,7 +292,8 @@ try:
                        "reward": 0.0, "steps": 0, "agent": "meta-muse-spark-1.3-contributor",
                        "executor": "mecord-browser.cdp-isolated", "error": None,
                         "trace":[], "step_limit":args.max_steps, "frozen_plan_sha256":frozen_plan_sha256,
-                        "global_campaign_sha256":global_plan_sha256,"vision_enabled":args.vision}
+                        "global_campaign_sha256":global_plan_sha256,"vision_enabled":args.vision,
+                         "worker":args.worker,"workers":args.workers}
             env = None
             try:
                 env = gym.make(task_id, headless=True)
