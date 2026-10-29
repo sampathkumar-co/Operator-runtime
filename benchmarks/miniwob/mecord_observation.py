@@ -45,7 +45,15 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
                 category == "visual" and item.get("actionable") is not True
                 and item.get("tag") in {"text","circle","ellipse","rect","path","polygon","polyline","line"}
             )
-            if item.get("actionable") is not True and not visual_relative:
+            # Sortable DOM children and scrollable regions can be observed
+            # without having ordinary button actionability. They receive only
+            # their matching specialist actions, never arbitrary clicks.
+            sortable = (category=="visual" and item.get("actionable") is not True
+                        and item.get("groupRole")=="li"
+                        and "sortable" in str(item.get("semanticPath") or "").casefold()
+                        and item.get("tag") in {"div","li","span"})
+            scrollable = item.get("scrollable") is True
+            if item.get("actionable") is not True and not (visual_relative or sortable or scrollable):
                 continue
             ref = item.get("ref")
             if type(ref) is not str or REF.fullmatch(ref) is None or not ref.startswith("b-" + generation + "-") or ref in seen:
@@ -68,7 +76,10 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
             seen.add(ref)
             candidates.append({
                 "bid":ref,"role":role[:40],"name":name[:130],
-                "description":"visual-geometry" if visual_relative else category,
+                "description":("visual-geometry" if visual_relative else
+                               "sortable-geometry" if sortable else
+                               "scroll-geometry" if scrollable and item.get("actionable") is not True else category),
+                "scrollable": scrollable,
                 "editable": item.get("editable") is True,
                 "inputType": item.get("type") if type(item.get("type")) is str else "",
                 "geometry":{"x":round(x,1),"y":round(y,1),"width":round(w,1),"height":round(h,1)},
@@ -91,9 +102,11 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
         raise MecordObservationError("EXACT_OBSERVED_REF_REQUIRED")
     relative = raw.get("op") == "click_relative"
     date_action = raw.get("op") == "select_date"
-    if relative or date_action:
+    scroll_action = raw.get("op") == "scroll"
+    drag_action = raw.get("op") == "drag_between"
+    if relative or date_action or scroll_action or drag_action:
         proposal = dict(raw)
-        proposal["op"] = "click" if relative else "set_value"
+        proposal["op"] = "set_value" if date_action else "click"
     else:
         proposal = raw
     try:
@@ -118,6 +131,19 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
         raise MecordObservationError("TARGET_NOT_EDITABLE")
     if action.op == "select" and role not in select_roles:
         raise MecordObservationError("TARGET_NOT_SELECTABLE")
+    if scroll_action:
+        if chosen.get("scrollable") is not True or raw.get("value") not in {"up","down"}:
+            raise MecordObservationError("SCROLL_TARGET_OR_DIRECTION_INVALID")
+        action=Decision("scroll", action.bid, raw["value"], "")
+    if drag_action:
+        to_ref=raw.get("value")
+        other=[c for c in candidates if c.get("bid")==to_ref]
+        if (chosen.get("description")!="sortable-geometry"
+                or len(other)!=1 or other[0].get("description")!="sortable-geometry"
+                or action.bid==to_ref
+                or action.bid.rsplit("-",1)[0]!=to_ref.rsplit("-",1)[0]):
+            raise MecordObservationError("DRAG_TARGETS_NOT_CURRENT_SORTABLE")
+        action=Decision("drag_between",action.bid,to_ref,"")
     if date_action:
         if chosen.get("inputType") != "date":
             raise MecordObservationError("DATE_TARGET_NOT_DATE_INPUT")
@@ -133,6 +159,8 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
         action = Decision("click_relative", action.bid, action.value, action.key)
     elif match[0].get("description") == "visual-geometry":
         raise MecordObservationError("VISUAL_NEEDS_RELATIVE_CLICK")
+    if not relative and not date_action and not scroll_action and not drag_action and chosen.get("description") in {"sortable-geometry","scroll-geometry"}:
+        raise MecordObservationError("SPECIALIST_ACTION_REQUIRED")
     # Detect uncertainty throughout this bounded task, not only the last 3
     # entries checked by the generic source controller.
     if type(history) is not list or len(history) > 1000:
