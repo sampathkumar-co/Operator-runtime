@@ -28,7 +28,15 @@ Run a low-cost single-task pilot first:
 python benchmarks/miniwob/integration/run_live.py --task-id browsergym/miniwob.click-test --limit 1 --seed 42 --max-steps 2 --cap-usd 0.005
 ```
 
-The runner supports `--limit 125`, seeds, per-task step limits, and a per-run maximum cost of USD 0.075. **This is not a lifetime account spending cap.** The authorized operator must account for all previous runs and model/API usage separately. Do not start a second run just because the per-run budget is available. The underlying API reports token usage, which is converted to estimated cost at documented model rates. USD/INR conversion and billing may differ.
+The runner supports `--limit 125`, seeds, per-task step limits, and a per-run maximum cost of USD 0.070. **This is not a lifetime account spending cap.** The authorized operator must account for all previous runs and model/API usage separately. Do not start a second run just because the per-run budget is available. The underlying API reports token usage, which is converted to estimated cost at documented model rates. USD/INR conversion and billing may differ.
+
+## Hardening and budget accounting
+
+* Every local bridge request requires a randomly generated per-run bearer capability. Calls without it return HTTP 403. The bridge serializes requests, rejects extra model parameters, and invalidates the current ref before dispatch.
+* The browser child process does not inherit the Meta API key. An observed Mecord ref must be supplied exactly; CSS/coordinate/name fallback cannot authorize a guessed target. Value-editing and selecting require compatible observed control roles, checked both by the pure controller and the bridge.
+* By default the runner allows **USD 0.005** per run. It rejects a per-run cap above **USD 0.070** and persists a conservative **pre-call reservation ledger** with a workspace-wide lifetime ceiling of USD 0.070. It takes an exclusive lock to prevent concurrent model spending. If interrupted, a stale lock is fail-closed and requires inspection before removal. Model HTTP failures consume the reservation, rather than assuming a free retry.
+* This ledger covers only calls from this **new** harness in the same workspace. It cannot prove actual provider billing or account-wide expenditure; prior model calls, any other tools and foreign-exchange variation must still be accounted for by the operator. It is deliberately conservative relative to the owner's overall ₹10 limit.
+* If quota, spending or model usage accounting fails, the run stops and records a **partial campaign** and unscored episode, not invented zero-reward completions. Offline unit tests and no-model browser smoke run without Meta credentials.
 
 ## Scoring, safeguards, limitations
 
