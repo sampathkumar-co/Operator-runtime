@@ -142,6 +142,69 @@ export class LocalActionExecutionStore {
     });
   }
 
+  /**
+   * Reconcile an existing device-signed never-dispatched journal fence.
+   * The caller MUST verify the signing identity and original journal before
+   * entering, and again in reverify() while this receipt's CAS lock is held.
+   * This method never submits a provider action, deletes a receipt or ACKs a relay.
+   */
+  async completeVerifiedSignedFence(input: {
+    actionId: string; actionDigest: string; authorityHash: string; ownerId: string;
+    ownerProcessDigest?: string; capability: string;
+    risk: 'write' | 'external' | 'destructive' | 'system';
+    epoch: number;
+  }, reverify: () => Promise<void>): Promise<LocalActionExecutionRecord> {
+    if (!/^[a-zA-Z0-9._:/-]{1,160}$/.test(input.actionId) ||
+        !/^[a-f0-9]{64}$/.test(input.actionDigest) ||
+        !/^[a-f0-9]{64}$/.test(input.authorityHash) ||
+        !Number.isSafeInteger(input.epoch) || input.epoch < 1 ||
+        !['write','external','destructive','system'].includes(input.risk) ||
+        !/^[a-z][a-z0-9._-]{0,127}$/.test(input.capability)) {
+      throw reconciliationRequired('Signed fence identity is invalid.');
+    }
+    const at = this.#clock().toISOString();
+    return await this.#mutate(async state => {
+      await reverify();
+      const record = state.records.find(r => r.actionId === input.actionId);
+      if (!record || record.actionHash !== input.actionDigest ||
+          record.authorityHash !== input.authorityHash ||
+          record.ownerId !== input.ownerId || record.risk !== input.risk ||
+          (record.ownerProcess
+            ? !input.ownerProcessDigest || crypto.createHash('sha256')
+              .update(canonicalJson(record.ownerProcess)).digest('hex') !== input.ownerProcessDigest
+            : input.ownerProcessDigest !== undefined)) {
+        throw reconciliationRequired('Original receipt conflicts with the exact signed fence.');
+      }
+      if (record.status === 'completed') {
+        if (record.result?.error?.code !== 'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH' ||
+            !record.result.evidence.some(e => e.kind === 'signed_operator_fence')) {
+          throw reconciliationRequired('Completed receipt conflicts with the signed no-replay fence.');
+        }
+        return clone(record);
+      }
+      const result: ActionResult = validateResult({
+        ok: false, capability: input.capability, provider: 'agent-kernel',
+        evidence: [{
+          kind: 'signed_operator_fence', status: 'pass',
+          message: 'Existing device-signed original never-dispatched action was reconciled; nothing was replayed.',
+          data: { signedDecisionEpoch: input.epoch }, timestamp: at
+        }],
+        error: {
+          code: 'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH',
+          message: 'Device-signed no-replay fence proves this action stopped before provider dispatch.',
+          retryable: false, sideEffectState: 'none', executionPhase: 'pre_dispatch'
+        },
+        durationMs: 0
+      });
+      record.status = 'completed';
+      record.completedAt = at;
+      record.resultSha256 = crypto.createHash('sha256')
+        .update(JSON.stringify(result), 'utf8').digest('hex');
+      record.result = result;
+      return clone(record);
+    });
+  }
+
   /** Read-only, metadata-only local operator review. Not wired to MCP/relay. */
   async inspectOperatorReceipt(actionId: string): Promise<LocalActionExecutionRecord | null> {
     if (typeof actionId !== 'string' || actionId.length < 1 || actionId.length > 256) {
@@ -460,6 +523,10 @@ function prune(state: State, now: number): void {
     // Bounded capacity intentionally fails closed instead of silently
     // deleting unknown mutation history.
     if (record.status === 'processing' && record.risk !== 'read') return true;
+    // A signed terminal no-replay fence remains a permanent duplicate-action barrier.
+    if (record.status === 'completed' &&
+        record.result?.error?.code === 'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH' &&
+        record.result.evidence.some(e => e.kind === 'signed_operator_fence')) return true;
     const anchor = record.completedAt ?? record.startedAt;
     const retention = record.status === 'completed' ? COMPLETED_RETENTION_MS : UNCERTAIN_RETENTION_MS;
     return Date.parse(anchor) > now - retention;
