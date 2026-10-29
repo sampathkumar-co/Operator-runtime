@@ -45,6 +45,8 @@ test('browser authority only accepts exact local host, same-origin mutations and
   assert.equal(browserUiRouteAllowed('GET', '/v1/control-center/original-recovery/browser'), true);
   assert.equal(browserUiRouteAllowed('GET', '/v1/control-center/original-recovery'), false);
   assert.equal(browserUiRouteAllowed('POST', '/v1/control-center/original-recovery/browser'), false);
+  assert.equal(browserUiRouteAllowed('POST', '/v1/control-center/original-recovery/browser/resolve'), true);
+  assert.equal(browserUiRouteAllowed('POST', '/v1/control-center/original-recovery/browser/delete'), false);
   assert.equal(browserUiRouteAllowed('POST', '/v1/approvals/abc'), false);
   assert.equal(browserUiRouteAllowed('POST', '/v1/session-approval'), false);
   assert.equal(browserUiRouteAllowed('POST', '/v1/tasks/abc/run'), true);
