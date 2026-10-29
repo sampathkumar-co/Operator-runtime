@@ -115,7 +115,8 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
                 item.get("groupRole") if type(item.get("groupRole")) is str else "",
                 item.get("semanticPath") if type(item.get("semanticPath")) is str else "",
                 item.get("repeatedOrdinal") if type(item.get("repeatedOrdinal")) is int else None,
-                source_frame,
+                source_frame, item.get("checked"),item.get("selected"),item.get("expanded"),
+                item.get("value") if type(item.get("value")) is str else "",
                 round(x / 32), round(y / 32)
             ], ensure_ascii=True).encode()).hexdigest()[:20],
             "inputType": item.get("type") if type(item.get("type")) is str else "",
@@ -131,6 +132,9 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
         raise MecordObservationError("ACTION_NOT_OBJECT")
     if set(raw) - {"op","bid","value","key"}:
         raise MecordObservationError("UNSUPPORTED_MODEL_FIELDS")
+    if (type(raw.get("op")) is not str or type(raw.get("value","")) is not str
+            or len(raw.get("value","")) > 400 or type(raw.get("key","")) is not str):
+        raise MecordObservationError("ACTION_FIELDS_INVALID")
     if raw.get("op") == "wait":
         if raw.get("bid", "") != "" or raw.get("value", "") != "" or raw.get("key", "") != "":
             raise MecordObservationError("WAIT_MUST_HAVE_NO_TARGET")
@@ -166,7 +170,7 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
     relative = raw.get("op") == "click_relative"
     date_action = raw.get("op") == "select_date"
     scroll_action = raw.get("op") == "scroll"
-    drag_action = raw.get("op") == "drag_between"
+    drag_action = raw.get("op") in {"drag_between","drag_to"}
     extended = {"drag_by", "resize", "hotkey", "keyboard_text", "format_text", "select_text_range"}
     if relative or date_action or scroll_action or drag_action or raw.get("op") in extended:
         proposal = dict(raw)
@@ -198,21 +202,22 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
     if action.op == "select" and role not in select_roles:
         raise MecordObservationError("TARGET_NOT_SELECTABLE")
     if scroll_action:
-        if chosen.get("scrollable") is not True or re.fullmatch(r"(up|down)(:(80|160|320))?", str(raw.get("value"))) is None:
+        if chosen.get("scrollable") is not True or re.fullmatch(r"(up|down|left|right)(:(40|80|160|320|640))?", str(raw.get("value"))) is None:
             raise MecordObservationError("SCROLL_TARGET_OR_DIRECTION_INVALID")
         action=Decision("scroll", action.bid, raw["value"], "")
     if drag_action:
         to_ref=raw.get("value")
         other=[c for c in candidates if c.get("bid")==to_ref]
-        if (chosen.get("description")!="sortable-geometry"
-                or len(other)!=1 or other[0].get("description")!="sortable-geometry"
+        if ((raw.get("op")=="drag_between" and chosen.get("description")!="sortable-geometry")
+                or len(other)!=1 or (raw.get("op")=="drag_between" and other[0].get("description")!="sortable-geometry")
+                or (raw.get("op")=="drag_to" and (chosen.get("description")=="scroll-geometry" or other[0].get("description")=="scroll-geometry"))
                 or action.bid==to_ref
                 or action.bid.rsplit("-",1)[0]!=to_ref.rsplit("-",1)[0]
                 or chosen.get("frameTargetId")!=other[0].get("frameTargetId")):
-            raise MecordObservationError("DRAG_TARGETS_NOT_CURRENT_SORTABLE")
-        action=Decision("drag_between",action.bid,to_ref,"")
+            raise MecordObservationError("DRAG_TARGETS_NOT_CURRENT")
+        action=Decision(raw["op"],action.bid,to_ref,"")
     if raw.get("op") in {"drag_by", "resize"}:
-        if re.fullmatch(r"(left|right|up|down):(40|80|160)", str(raw.get("value"))) is None:
+        if re.fullmatch(r"(left|right|up|down|up-left|up-right|down-left|down-right):(10|20|40|80|160|320)", str(raw.get("value"))) is None:
             raise MecordObservationError("DISPLACEMENT_INVALID")
         action = Decision(raw["op"], action.bid, raw["value"], "")
     if raw.get("op") in {"keyboard_text", "format_text", "select_text_range"}:
@@ -239,15 +244,18 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
             raise MecordObservationError("DATE_VALUE_INVALID") from None
         action = Decision("select_date", action.bid, action.value, action.key)
     if relative:
-        if raw.get("value", "") not in {"","center","left","right","top","bottom",
-                 "top-left","top-right","bottom-left","bottom-right"}:
+        value=raw.get("value","")
+        valid_grid=value in {"","center","left","right","top","bottom",
+                 "top-left","top-right","bottom-left","bottom-right"}
+        valid_ratio=re.fullmatch(r"(?:0(?:\\.[0-9]{1,2})?|1(?:\\.0{1,2})?):(?:0(?:\\.[0-9]{1,2})?|1(?:\\.0{1,2})?)",value) is not None
+        if not (valid_grid or valid_ratio):
             raise MecordObservationError("RELATIVE_POINT_NOT_ENUMERATED")
         if match[0].get("description") != "visual-geometry":
             raise MecordObservationError("RELATIVE_TARGET_NOT_VISUAL")
         action = Decision("click_relative", action.bid, action.value, action.key)
-    elif match[0].get("description") == "visual-geometry" and raw.get("op") not in {"drag_by","resize"}:
+    elif match[0].get("description") == "visual-geometry" and raw.get("op") not in {"drag_by","resize","drag_to","hover"}:
         raise MecordObservationError("VISUAL_NEEDS_RELATIVE_CLICK")
-    if not relative and not date_action and not scroll_action and not drag_action and raw.get("op") not in {"drag_by","resize"} and chosen.get("description") in {"sortable-geometry","scroll-geometry"}:
+    if not relative and not date_action and not scroll_action and not drag_action and raw.get("op") not in {"drag_by","resize","hover"} and chosen.get("description") in {"sortable-geometry","scroll-geometry"}:
         raise MecordObservationError("SPECIALIST_ACTION_REQUIRED")
     # Detect uncertainty throughout this bounded task, not only the last 3
     # entries checked by the generic source controller.
@@ -263,7 +271,7 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
     stable_identity = chosen.get("identity")
     if stable_identity and sum(
         h.get("identity") == stable_identity and h.get("op") == action.op
-        and h.get("value", "") == action.value
+        and h.get("progress") is not True and h.get("value", "") == action.value
         for h in history[-4:] if type(h) is dict
     ) >= 2:
         raise MecordObservationError("UNSAFE_REPLAY_STABLE_TARGET")
