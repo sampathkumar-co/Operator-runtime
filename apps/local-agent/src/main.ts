@@ -13,6 +13,7 @@ import { createLocalAgentServer } from './server.ts';
 import { EmergencyStopStore } from './emergency-stop.ts';
 import { ApprovalStore } from './approval-store.ts';
 import { LocalActionExecutionStore } from './action-execution-store.ts';
+import { OriginalRecoveryOwnerResolution } from './operator-pre-dispatch-adjudication.ts';
 import { SessionApprovalStore } from './session-approval.ts';
 import { LocalPrivacyDataStore } from './privacy-data.ts';
 import { LocalAgentRelayRunner } from './relay-agent.ts';
@@ -552,6 +553,8 @@ const agent = createLocalAgentServer({
   emergencyStop,
   approvals,
   actionExecutions,
+  originalRecoveryResolution: process.platform === 'win32'
+    ? new OriginalRecoveryOwnerResolution(stateDir) : undefined,
   sessionApprovals,
   audit,
   tasks,
