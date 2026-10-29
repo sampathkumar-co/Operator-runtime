@@ -25,3 +25,5 @@ jobs:
         run: |
           set -euo pipefail
           node --check benchmarks/miniwob/integration/mecord_bridge.mjs
+          node --check benchmarks/miniwob/integration/bridge_actions.mjs
+          node --test benchmarks/miniwob/integration/test-bridge-actions.mjs
