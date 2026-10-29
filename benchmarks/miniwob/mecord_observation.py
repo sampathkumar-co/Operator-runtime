@@ -22,6 +22,15 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
         raise MecordObservationError("INSPECTION_NOT_VERIFIED")
     if type(limit) is not int or not 1 <= limit <= MAX_CONTROLS:
         raise MecordObservationError("INVALID_LIMIT")
+    dialog = payload.get("dialog")
+    if type(dialog) is dict:
+        ref=dialog.get("ref")
+        kind=dialog.get("type")
+        if (type(ref) is not str or re.fullmatch(r"bd-[0-9a-f]{16}-[1-9a-z][0-9a-z]*-[0-9a-f]{12}",ref) is None
+                or kind not in {"alert","confirm","prompt","beforeunload"}):
+            raise MecordObservationError("DIALOG_OBSERVATION_INVALID")
+        return [{"bid":ref,"role":"dialog","name":kind,"description":"javascript-dialog",
+                 "identity":ref,"editable":kind=="prompt","geometry":{"x":0,"y":0,"width":1,"height":1}}]
     page = payload.get("page")
     if type(page) is not dict or type(page.get("semantic")) is not dict:
         raise MecordObservationError("SEMANTIC_OBSERVATION_UNAVAILABLE")
@@ -131,6 +140,23 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
                 for h in history)):
             raise MecordObservationError("UNCERTAIN_HISTORY")
         return {"op": "wait"}
+    if raw.get("op") in {"dialog_accept","dialog_dismiss"}:
+        ref=raw.get("bid")
+        matching=[c for c in candidates if type(c) is dict and c.get("bid")==ref and c.get("description")=="javascript-dialog"]
+        if len(matching)!=1:
+            raise MecordObservationError("EXACT_DIALOG_REF_REQUIRED")
+        value=raw.get("value","")
+        if type(value) is not str or len(value)>400 or "\\0" in value or raw.get("key","")!="":
+            raise MecordObservationError("DIALOG_INPUT_INVALID")
+        if value and (raw["op"]!="dialog_accept" or matching[0].get("name")!="prompt"):
+            raise MecordObservationError("DIALOG_PROMPT_ONLY")
+        if any(type(h) is not dict or h.get("sideEffectState")=="uncertain"
+               or (type(h.get("error")) is str and any(w in h["error"].upper() for w in ("UNCERTAIN","RECONCIL")))
+               for h in history):
+            raise MecordObservationError("UNCERTAIN_HISTORY")
+        if not safe_attempt(Decision(raw["op"],ref,value,""),history):
+            raise MecordObservationError("UNSAFE_REPLAY")
+        return {"op":raw["op"],"ref":ref,"value":value,"key":""}
     ref = raw.get("bid")
     if type(ref) is not str or REF.fullmatch(ref) is None:
         raise MecordObservationError("EXACT_OBSERVED_REF_REQUIRED")
