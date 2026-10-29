@@ -92,14 +92,17 @@ JSON_ACTION_SCHEMA = {
         "required":["op","bid","value","key"],"additionalProperties":False
     }}
 }
-def request_model(prompt):
+def request_model(prompt, *, output_limit=None):
     global cost,in_tokens,out_tokens,api_calls
-    reserve = ((len(prompt)/1.0)*0.10+max_out_tokens*0.20)/1e6
+    tokens = output_limit if output_limit is not None else max_out_tokens
+    if type(tokens) is not int or not 256 <= tokens <= 3072:
+        raise RuntimeError("MODEL_OUTPUT_CAP_INVALID")
+    reserve = ((len(prompt)/1.0)*0.10+tokens*0.20)/1e6
     if cost+reserve>args.cap_usd:raise RuntimeError("BUDGET_CAP_REACHED")
     payload={"model":"muse-spark-1.3-contributor",
              "messages":[{"role":"user","content":prompt}],
              "response_format":JSON_ACTION_SCHEMA,
-             "max_tokens":max_out_tokens}
+             "max_tokens":tokens}
     req=urllib.request.Request("https://api.meta.ai/v1/chat/completions",
                                data=json.dumps(payload).encode(),method="POST",
                                headers={"Authorization":"Bearer "+key,"Content-Type":"application/json"})
@@ -198,7 +201,8 @@ try:
                         model_action, status = request_model(
                             prompt + "\nPrevious response was incomplete or an invalid operation. "
                             "Return one complete JSON object with exactly op,bid,value,key. "
-                            "All fields must be strings and bid must be copied from current candidates.")
+                            "All fields must be strings and bid must be copied from current candidates.",
+                            output_limit=3072 if status=="truncated" else max_out_tokens)
                     if status != "completed":
                         raise RuntimeError("MODEL_RESPONSE_INCOMPLETE")
                     if grounded is None:
