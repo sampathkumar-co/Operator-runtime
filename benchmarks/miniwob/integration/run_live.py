@@ -249,6 +249,9 @@ try:
     port = int(header.split("=")[1])
     attempted_count = 0
     campaign_stop = None
+    scored_successes = 0
+    scored_failures = 0
+    unscored_episodes = 0
     with output_path.open("x", encoding="utf8") as log:
         for original_index, task_id in task_plan:
             attempted_count += 1
@@ -308,6 +311,9 @@ try:
                         + "\nSelect exactly one next action, with a bid from CURRENT controls."
                     )
                     event["candidate_digest"] = sha256(candidate_json.encode("utf8")).hexdigest()[:20]
+                    event["api_calls_before"] = api_calls
+                    event["input_tokens_before"] = in_tokens
+                    event["output_tokens_before"] = out_tokens
                     model_action, status = request_model(prompt)
                     event["model_status"] = status
                     try:
@@ -323,6 +329,9 @@ try:
                             "All fields must be strings and bid must be copied from current candidates.",
                             output_limit=3072 if status=="truncated" else max_out_tokens)
                         event["corrective_model_status"] = status
+                    event["api_calls_after"] = api_calls
+                    event["input_tokens_used"] = in_tokens - event["input_tokens_before"]
+                    event["output_tokens_used"] = out_tokens - event["output_tokens_before"]
                     if status != "completed":
                         raise RuntimeError("MODEL_RESPONSE_" + status.upper())
                     if grounded is None:
@@ -394,6 +403,12 @@ try:
             outcome["elapsed_sec"] = round(time.perf_counter() - start, 2)
             outcome["cumulative_cost_usd"] = round(cost, 7)
             outcome["api_calls_cumulative"] = api_calls
+            if outcome.get("unscored") is True or outcome["reward"] is None:
+                unscored_episodes += 1
+            elif outcome["reward"] == 1.0:
+                scored_successes += 1
+            else:
+                scored_failures += 1
             log.write(json.dumps(outcome, ensure_ascii=True) + "\n")
             log.flush()
             print("META_MECORD_EPISODE=" + json.dumps(outcome), flush=True)
@@ -403,8 +418,15 @@ try:
         "attempted":attempted_count,"scheduled":len(task_plan),
         "frozen_plan_sha256":frozen_plan_sha256,
         "start_at":args.start_at,"count":len(task_plan),"campaign_tag":args.campaign_tag,
-        "scored":attempted_count - (1 if campaign_stop else 0),
+        "scored":scored_successes+scored_failures,
+        "successes":scored_successes,"failures":scored_failures,
+        "unscored":unscored_episodes,
+        "success_rate_scored":(scored_successes/(scored_successes+scored_failures)
+            if scored_successes+scored_failures else None),
         "status":"COMPLETE" if not campaign_stop and attempted_count==len(task_plan) else "PARTIAL",
+        "full_50_task_70_percent_gate":("PASS" if scored_successes>=35 else "FAIL")
+            if args.limit==50 and args.count is None and args.start_at==0
+            and attempted_count==50 and not campaign_stop else "NOT_RUN",
         "campaign_stop":campaign_stop,
         "api_calls":api_calls,
         "input_tokens": in_tokens, "output_tokens": out_tokens,
