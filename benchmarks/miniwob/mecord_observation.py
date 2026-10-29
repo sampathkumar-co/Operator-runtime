@@ -5,6 +5,8 @@ grants authority; the isolated host bridge must independently validate refs.
 """
 from __future__ import annotations
 import re
+import json
+from hashlib import sha256
 from datetime import date
 from typing import Any
 from controller import ControllerError, Decision, normalize_decision, safe_attempt
@@ -33,57 +35,74 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
         raise MecordObservationError("OBSERVATION_LISTS_OVERSIZE")
     seen = set()
     candidates = []
-    for category, objects in (("semantic", semantic["controls"]), ("visual", semantic["visuals"])):
-        for item in objects:
-            if len(candidates) >= limit:
-                return candidates
-            if type(item) is not dict or item.get("disabled") is True:
-                continue
-            # SVG primitives are geometry-grounded, but may not have DOM
-            # "actionable" semantics. They are NOT ordinary click targets.
-            visual_relative = (
-                category == "visual" and item.get("actionable") is not True
-                and item.get("tag") in {"text","circle","ellipse","rect","path","polygon","polyline","line"}
-            )
-            # Sortable DOM children and scrollable regions can be observed
-            # without having ordinary button actionability. They receive only
-            # their matching specialist actions, never arbitrary clicks.
-            sortable = (category=="visual" and item.get("actionable") is not True
-                        and item.get("groupRole")=="li"
-                        and "sortable" in str(item.get("semanticPath") or "").casefold()
-                        and item.get("tag") in {"div","li","span"})
-            scrollable = item.get("scrollable") is True
-            if item.get("actionable") is not True and not (visual_relative or sortable or scrollable):
-                continue
-            ref = item.get("ref")
-            if type(ref) is not str or REF.fullmatch(ref) is None or not ref.startswith("b-" + generation + "-") or ref in seen:
-                continue
-            context = item.get("context")
-            if type(context) is not dict or context.get("frameDepth") != 0:
-                continue
-            rect = item.get("geometry") or item.get("rect")
-            if type(rect) is not dict:
-                continue
-            x,y,w,h = (rect.get(k) for k in ("x","y","width","height"))
-            if any(type(v) not in (float,int) or not (-100000 < v < 100000) for v in (x,y,w,h)) or w <= 0 or h <= 0:
-                continue
-            role = item.get("role") or item.get("primitive") or item.get("tag") or "visual"
-            perceptible = item.get("perceptibleState")
-            if type(perceptible) is not dict: perceptible = {}
-            name = item.get("name") or perceptible.get("text") or ""
-            if type(role) is not str or type(name) is not str:
-                continue
-            seen.add(ref)
-            candidates.append({
-                "bid":ref,"role":role[:40],"name":name[:130],
-                "description":("visual-geometry" if visual_relative else
-                               "sortable-geometry" if sortable else
-                               "scroll-geometry" if scrollable and item.get("actionable") is not True else category),
-                "scrollable": scrollable,
-                "editable": item.get("editable") is True,
-                "inputType": item.get("type") if type(item.get("type")) is str else "",
-                "geometry":{"x":round(x,1),"y":round(y,1),"width":round(w,1),"height":round(h,1)},
-            })
+    # Keep a visual reservation instead of allowing the first 90 controls to
+    # crowd every graphical target out of the model's view.
+    first_controls = max(1, limit * 2 // 3)
+    ordered = ([("semantic", item) for item in semantic["controls"][:first_controls]]
+               + [("visual", item) for item in semantic["visuals"]]
+               + [("semantic", item) for item in semantic["controls"][first_controls:]])
+    for category, item in ordered:
+        if len(candidates) >= limit:
+            return candidates
+        if type(item) is not dict or item.get("disabled") is True:
+            continue
+        # SVG primitives are geometry-grounded, but may not have DOM
+        # "actionable" semantics. They are NOT ordinary click targets.
+        visual_relative = (
+            category == "visual" and item.get("actionable") is not True
+            and item.get("tag") in {"text","circle","ellipse","rect","path","polygon","polyline","line"}
+        )
+        # Sortable DOM children and scrollable regions can be observed
+        # without having ordinary button actionability. They receive only
+        # their matching specialist actions, never arbitrary clicks.
+        sortable = (category=="visual" and item.get("actionable") is not True
+                    and item.get("groupRole")=="li"
+                    and "sortable" in str(item.get("semanticPath") or "").casefold()
+                    and item.get("tag") in {"div","li","span"})
+        scrollable = item.get("scrollable") is True
+        if item.get("actionable") is not True and not (visual_relative or sortable or scrollable):
+            continue
+        ref = item.get("ref")
+        if type(ref) is not str or REF.fullmatch(ref) is None or not ref.startswith("b-" + generation + "-") or ref in seen:
+            continue
+        context = item.get("context")
+        if type(context) is not dict or context.get("frameDepth") != 0:
+            continue
+        rect = item.get("geometry") or item.get("rect")
+        if type(rect) is not dict:
+            continue
+        x,y,w,h = (rect.get(k) for k in ("x","y","width","height"))
+        if any(type(v) not in (float,int) or not (-100000 < v < 100000) for v in (x,y,w,h)) or w <= 0 or h <= 0:
+            continue
+        role = item.get("role") or item.get("primitive") or item.get("tag") or "visual"
+        perceptible = item.get("perceptibleState")
+        if type(perceptible) is not dict: perceptible = {}
+        name = item.get("name") or perceptible.get("text") or ""
+        if type(role) is not str or type(name) is not str:
+            continue
+        seen.add(ref)
+        candidates.append({
+            "bid":ref,"role":role[:40],"name":name[:130],
+            "description":("visual-geometry" if visual_relative else
+                           "sortable-geometry" if sortable else
+                           "scroll-geometry" if scrollable and item.get("actionable") is not True else category),
+            "scrollable": scrollable,
+            "editable": item.get("editable") is True,
+            "checked": item.get("checked") if type(item.get("checked")) is bool else None,
+            "selected": item.get("selected") if type(item.get("selected")) is bool else None,
+            "expanded": item.get("expanded") if type(item.get("expanded")) is bool else None,
+            "currentValue": item.get("value")[:160] if type(item.get("value")) is str else "",
+            "placeholder": item.get("placeholder")[:100] if type(item.get("placeholder")) is str else "",
+            "identity": sha256(json.dumps([
+                str(role).casefold(), name[:130].casefold(),
+                item.get("groupRole") if type(item.get("groupRole")) is str else "",
+                item.get("semanticPath") if type(item.get("semanticPath")) is str else "",
+                item.get("repeatedOrdinal") if type(item.get("repeatedOrdinal")) is int else None,
+                round(x / 32), round(y / 32)
+            ], ensure_ascii=True).encode()).hexdigest()[:20],
+            "inputType": item.get("type") if type(item.get("type")) is str else "",
+            "geometry":{"x":round(x,1),"y":round(y,1),"width":round(w,1),"height":round(h,1)},
+        })
     return candidates
 
 def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[dict]) -> dict[str,str]:
@@ -170,6 +189,15 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
                ("UNCERTAIN" in h["error"].upper() or "RECONCIL" in h["error"].upper()))
            for h in history):
         raise MecordObservationError("UNCERTAIN_HISTORY")
+    # Generation-bound refs are new after every inspect, so comparing only bid
+    # cannot catch repeated actions against the same unchanged physical target.
+    stable_identity = chosen.get("identity")
+    if stable_identity and sum(
+        h.get("identity") == stable_identity and h.get("op") == action.op
+        and h.get("value", "") == action.value
+        for h in history[-4:] if type(h) is dict
+    ) >= 2:
+        raise MecordObservationError("UNSAFE_REPLAY_STABLE_TARGET")
     if not safe_attempt(action,history):
         raise MecordObservationError("UNSAFE_REPLAY")
     return {"op":action.op,"ref":action.bid,"value":action.value,"key":action.key}
