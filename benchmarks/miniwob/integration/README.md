@@ -16,6 +16,12 @@ Unlike the older evaluation script, the model never supplies CSS selectors, pixe
 
 Required environment variables: `MECORD_MINIWOB_WORKDIR` (absolute temporary workspace), `MECORD_MINIWOB_RUNTIME_PATH` (absolute RC6 **package root**), `MECORD_MINIWOB_CHROME` (Chrome executable), `MUSE_API_KEY` (host-injected secret). The runner writes results only under `<workdir>/results`, and refuses to overwrite an existing result.
 
+Run the **credential-free** integration smoke first; it verifies that the exact Mecord provider can click one currently observed button and the independent BrowserGym scorer returns reward 1.0. Set the three required non-secret path variables first. This scripted test **does not** measure autonomous model accuracy.
+
+```shell
+python benchmarks/miniwob/integration/smoke.py
+```
+
 Run a low-cost single-task pilot first:
 
 ```shell
