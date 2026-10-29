@@ -214,4 +214,30 @@ class Grounding(unittest.TestCase):
     self.assertEqual(verified_action({"op":"hotkey","bid":bid,"key":"CTRL+A"},cs,[])["key"],"CTRL+A")
     with self.assertRaisesRegex(MecordObservationError,"HOTKEY_INVALID"):
      verified_action({"op":"hotkey","bid":bid,"key":"CTRL+ALT+DELETE"},cs,[])
+
+ def test_explicit_cross_origin_frame_generation(self):
+    frame=item(ref="b-child01-4-1",role="button",name="Frame save")
+    frame["observationGeneration"]="child01-4"
+    frame["sourceFrameTargetId"]="synthetic-oopif"
+    cs=observed_mecord_candidates(obs([frame]))
+    self.assertEqual(len(cs),1)
+    self.assertEqual(cs[0]["frameTargetId"],"synthetic-oopif")
+    self.assertEqual(verified_action({"op":"click","bid":cs[0]["bid"]},cs,[])["op"],"click")
+ def test_frame_generation_mismatch_fails_closed(self):
+    frame=item(ref="b-invalid-3-1",role="button")
+    frame["observationGeneration"]="child01-4"
+    self.assertEqual(observed_mecord_candidates(obs([frame])),[])
+ def test_cross_frame_drag_rejected_in_validator(self):
+    first=item(role="",active=False);first.update({"tag":"div","groupRole":"li","semanticPath":"body>ul:sortable>li","observationGeneration":"abc123-7","sourceFrameTargetId":"a"})
+    second=dict(first,ref="b-abc123-7-2",name="Another",sourceFrameTargetId="b")
+    cs=observed_mecord_candidates(obs([], [first,second]))
+    with self.assertRaisesRegex(MecordObservationError,"DRAG_TARGETS_NOT_CURRENT_SORTABLE"):
+     verified_action({"op":"drag_between","bid":first["ref"],"value":second["ref"]},cs,[])
+ def test_graphical_canvas_click_grid_validation(self):
+    canvas=item(ref="b-abc123-7-3",role="",active=False)
+    canvas["tag"]="canvas"
+    cs=observed_mecord_candidates(obs([], [canvas]))
+    self.assertEqual(verified_action({"op":"click_relative","bid":canvas["ref"],"value":"top-right"},cs,[])["value"],"top-right")
+    with self.assertRaisesRegex(MecordObservationError,"RELATIVE_POINT_NOT_ENUMERATED"):
+     verified_action({"op":"click_relative","bid":canvas["ref"],"value":"0.98,0.22"},cs,[])
 if __name__=="__main__":unittest.main(verbosity=2)
