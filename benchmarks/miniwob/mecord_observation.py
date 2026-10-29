@@ -121,6 +121,21 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
         if type(role) is not str or type(name) is not str:
             continue
         seen.add(ref)
+        raw_colors=item.get("colors") if type(item.get("colors")) is dict else {}
+        safe_colors={k:raw_colors[k][:64] for k in ("fill","stroke","background","color")
+                     if type(raw_colors.get(k)) is str and raw_colors[k]}
+        raw_shape=item.get("shape") if type(item.get("shape")) is dict else {}
+        shape={}
+        for shape_key in ("center","circle","line","ellipse"):
+            if type(raw_shape.get(shape_key)) is dict:
+                measures={k:round(v,2) for k,v in raw_shape[shape_key].items()
+                          if type(v) in (int,float) and -100000<v<100000}
+                if measures:shape[shape_key]=measures
+        if type(raw_shape.get("points")) is list:
+            points=[{k:round(v,2) for k,v in pt.items()
+                     if k in {"x","y"} and type(v) in (int,float) and -100000<v<100000}
+                    for pt in raw_shape["points"][:12] if type(pt) is dict]
+            if points:shape["points"]=points
         candidates.append({
             "bid":ref,"role":role[:40],"name":name[:130],
             "frameTargetId":source_frame[:100], "frameDepth":context["frameDepth"],
@@ -133,6 +148,10 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
             "selected": item.get("selected") if type(item.get("selected")) is bool else None,
             "expanded": item.get("expanded") if type(item.get("expanded")) is bool else None,
             "currentValue": item.get("value")[:160] if type(item.get("value")) is str else "",
+            "colors":safe_colors,
+            "shape":shape,
+            "numericValue":item.get("numericValue") if type(item.get("numericValue")) in (int,float) else None,
+            "viewportZone":item.get("viewportZone")[:40] if type(item.get("viewportZone")) is str else "",
             "placeholder": item.get("placeholder")[:100] if type(item.get("placeholder")) is str else "",
             "identity": sha256(json.dumps([
                 str(role).casefold(), name[:130].casefold(),
