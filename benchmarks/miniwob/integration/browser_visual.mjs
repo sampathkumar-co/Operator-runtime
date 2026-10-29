@@ -27,14 +27,14 @@ export async function captureSyntheticView(CdpConnection,target,prefix) {
  const session=new CdpConnection(target.id,target.webSocketDebuggerUrl);
  try {
   const identity=await session.send('Runtime.evaluate',{expression:'location.href',returnByValue:true},5000);
-  const observed=identity?.result?.result?.value;
+  const observed=identity?.result?.value;
   if(typeof observed!=='string'||!allowedSyntheticFrameUrl(observed,prefix))
    throw Error('SCREENSHOT_NAVIGATION_OUTSIDE_FIXTURE');
   const output=await session.send('Page.captureScreenshot',{
    format:'jpeg',quality:40,fromSurface:true,captureBeyondViewport:false},8000);
   const view=validateVisualBytes(output?.data);
   const after=await session.send('Runtime.evaluate',{expression:'location.href',returnByValue:true},5000);
-  if(after?.result?.result?.value!==observed)throw Error('SCREENSHOT_NAVIGATION_CHANGED');
+  if(after?.result?.value!==observed)throw Error('SCREENSHOT_NAVIGATION_CHANGED');
   return view;
  } finally {session.close();}
 }
