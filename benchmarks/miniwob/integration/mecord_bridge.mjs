@@ -1,5 +1,6 @@
 // Isolated, source-pinned Mecord MiniWoB bridge. No production relay or credentials.
-import http from 'node:http';import os from 'node:os';import path from 'node:path';
+import http from 'node:http';import path from 'node:path';
+import {timingSafeEqual} from 'node:crypto';
 import {pathToFileURL} from 'node:url';import {readFile} from 'node:fs/promises';
 const dir=process.env.MECORD_MINIWOB_WORKDIR ? path.resolve(process.env.MECORD_MINIWOB_WORKDIR) : null;
 if(!dir)throw Error('MECORD_MINIWOB_WORKDIR_REQUIRED');
@@ -13,7 +14,15 @@ if(!Number.isInteger(port)||port<9300||port>9399)throw Error('INVALID_LOCAL_CDP_
 const endpoint='http://127.0.0.1:'+port;
 const prefix=pathToFileURL(path.join(dir,'miniwob-plusplus','miniwob','html','miniwob')+path.sep).href;
 const refRE=/^b-([a-z0-9]+)-([a-z0-9]+)-([a-z0-9]+)$/;
-let provider=new BrowserCdpProvider(endpoint),inspectState=null,sequence=0;
+const bridgeToken=process.env.MECORD_MINIWOB_BRIDGE_TOKEN||'';
+if(!/^[0-9a-f]{64}$/.test(bridgeToken))throw Error('BENCHMARK_BRIDGE_TOKEN_REQUIRED');
+const expectedAuth=Buffer.from('Bearer '+bridgeToken,'utf8');
+const authorized=header=>{
+ if(typeof header!=='string')return false;
+ const got=Buffer.from(header,'utf8');
+ return got.length===expectedAuth.length&&timingSafeEqual(got,expectedAuth);
+};
+let provider=new BrowserCdpProvider(endpoint),inspectState=null,sequence=0,busy=false;
 const project=item=>({
  ref:item.ref,role:item.role||'',tag:item.tag||'',primitive:item.primitive||'',
  name:item.name||'',actionable:item.actionable===true,disabled:item.disabled===true,
@@ -34,6 +43,9 @@ async function exactTarget(){
 const svr=http.createServer(async(req,res)=>{
  res.setHeader('content-type','application/json');res.setHeader('cache-control','no-store');
  if(req.method!=='POST'||req.url!=='/execute'){res.writeHead(404).end('{}');return;}
+ if(!authorized(req.headers.authorization)){res.writeHead(403).end('{"ok":false,"error":"BRIDGE_AUTH_REQUIRED"}');return;}
+ if(busy){res.writeHead(409).end('{"ok":false,"error":"BRIDGE_CONCURRENT_REQUEST"}');return;}
+ busy=true;
  let body='';
  try{
   for await(const chunk of req){body+=chunk.toString();if(body.length>10000)throw Error('ACTION_TOO_LARGE');}
@@ -41,11 +53,13 @@ const svr=http.createServer(async(req,res)=>{
   if(!input||typeof input!=='object'||Array.isArray(input))throw Error('INVALID_ACTION');
   const targetId=await exactTarget();
   if(input.op==='inspect'){
+   if(Object.keys(input).some(k=>k!=='op'))throw Error('EXTRA_INSPECT_PARAMETERS');
    inspectState=null;
    const action={id:'miniwob-inspect-'+(++sequence),capability:'browser.inspect',risk:'read',
     input:{targetId,observation:{maxControls:160,maxVisuals:160,maxBytes:131072}}};
    const out=await provider.execute(action);
    if(!out.ok||out.provider!=='browser.cdp')throw Error('PROVIDER_INSPECT_FAILED_'+(out.error?.code||'UNKNOWN'));
+   if(out.output?.truncated===true)throw Error('PROVIDER_OBSERVATION_TRUNCATED');
    const semantic=out.output?.page?.semantic;
    if(!semantic||typeof semantic.observationGeneration!=='string')throw Error('NO_SEMANTIC_OBSERVATION');
    if(!Array.isArray(semantic.controls)||!Array.isArray(semantic.visuals))throw Error('MISSING_OBSERVATION_ARRAYS');
@@ -93,6 +107,7 @@ const svr=http.createServer(async(req,res)=>{
   res.end(JSON.stringify({ok:result.ok===true,provider:result.provider,durationMs:result.durationMs,
     error:result.error?.code||null,needsReobserve:true}));
  }catch(e){inspectState=null;error(res,e?.message||e);}
+ finally{busy=false;}
 });
 svr.listen(0,'127.0.0.1',()=>console.log('MECORD_BRIDGE_PORT='+svr.address().port));
 process.on('SIGTERM',()=>{inspectState=null;try{provider.close()}catch{}svr.close()});
