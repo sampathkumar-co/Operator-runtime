@@ -68,6 +68,7 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
             candidates.append({
                 "bid":ref,"role":role[:40],"name":name[:130],
                 "description":"visual-geometry" if visual_relative else category,
+                "editable": item.get("editable") is True,
                 "geometry":{"x":round(x,1),"y":round(y,1),"width":round(w,1),"height":round(h,1)},
             })
     return candidates
@@ -105,6 +106,15 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
     match = [c for c in candidates if c.get("bid") == action.bid]
     if len(match) != 1:
         raise MecordObservationError("UNOBSERVED_TARGET")
+    chosen = match[0]
+    role = str(chosen.get("role") or "").casefold()
+    editable_roles = {"textbox","searchbox","combobox","spinbutton","input","textarea"}
+    select_roles = {"select","combobox","listbox","option"}
+    if action.op in {"set_value","type"} and not (
+            chosen.get("editable") is True or role in editable_roles):
+        raise MecordObservationError("TARGET_NOT_EDITABLE")
+    if action.op == "select" and role not in select_roles:
+        raise MecordObservationError("TARGET_NOT_SELECTABLE")
     if relative:
         if match[0].get("description") != "visual-geometry":
             raise MecordObservationError("RELATIVE_TARGET_NOT_VISUAL")
