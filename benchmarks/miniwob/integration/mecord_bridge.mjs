@@ -20,6 +20,7 @@ const frameOrigins=(process.env.MECORD_MINIWOB_FRAME_ORIGINS||'').split(',').fil
 for(const origin of frameOrigins){const u=new URL(origin);
  if(u.origin!==origin||!['http:','https:'].includes(u.protocol)||u.username||u.password)throw Error('FRAME_ORIGIN_INVALID');}
 const refRE=/^b-([a-z0-9]+)-([a-z0-9]+)-([a-z0-9]+)$/;
+const dialogRE=/^bd-[0-9a-f]{16}-[1-9a-z][0-9a-z]*-[0-9a-f]{12}$/;
 const bridgeToken=process.env.MECORD_MINIWOB_BRIDGE_TOKEN||'';
 if(!/^[0-9a-f]{64}$/.test(bridgeToken))throw Error('BENCHMARK_BRIDGE_TOKEN_REQUIRED');
 const expectedAuth=Buffer.from('Bearer '+bridgeToken,'utf8');
@@ -76,6 +77,18 @@ const svr=http.createServer(async(req,res)=>{
     input:{targetId,observation:{maxControls:160,maxVisuals:160,maxBytes:131072}}};
    const out=await provider.execute(action);
    if(!out.ok||out.provider!=='browser.cdp')throw Error('PROVIDER_INSPECT_FAILED_'+(out.error?.code||'UNKNOWN'));
+   if(out.output?.dialog){
+    const dialog=out.output.dialog;
+    if(typeof dialog.ref!=='string'||!dialogRE.test(dialog.ref)||
+      !new Set(['alert','confirm','prompt','beforeunload']).has(dialog.type)||
+      (dialog.sourceOrigin&&!frameOrigins.includes(dialog.sourceOrigin)))
+      throw Error('DIALOG_OBSERVATION_UNAUTHORIZED');
+    inspectState={targetId,dialogRef:dialog.ref,dialogType:dialog.type};
+    res.end(JSON.stringify({ok:true,provider:out.provider,durationMs:out.durationMs,
+      dialog:{ref:dialog.ref,type:dialog.type},
+      page:{semantic:{observationGeneration:'dialog-1',controls:[],visuals:[]}}}));
+    return;
+   }
    if(out.output?.truncated===true)throw Error('PROVIDER_OBSERVATION_TRUNCATED');
    const semantic=out.output?.page?.semantic;
    if(!semantic||typeof semantic.observationGeneration!=='string')throw Error('NO_SEMANTIC_OBSERVATION');
@@ -135,8 +148,33 @@ const svr=http.createServer(async(req,res)=>{
     observedRefCount:refs.size,visualRelativeRefs:relativeRefs.size,sortableRefs:sortableRefs.size,scrollRefs:scrollRefs.size,truncated:out.output?.truncated===true}));
    return;
   }
-  const allowed=new Set(['click','hover','set_value','type','select','select_date','key_press','click_relative','scroll','drag_between','drag_by','resize','hotkey','keyboard_text','format_text','select_text_range']);
+  const allowed=new Set(['click','hover','set_value','type','select','select_date','key_press','click_relative','scroll','drag_between','drag_by','resize','hotkey','keyboard_text','format_text','select_text_range','dialog_accept','dialog_dismiss']);
   if(!allowed.has(input.op))throw Error('UNSUPPORTED_INTERACTION');
+  if(input.op==='dialog_accept'||input.op==='dialog_dismiss'){
+   const ref=input.ref;
+   if(!inspectState||inspectState.targetId!==targetId||
+      inspectState.dialogRef!==ref||typeof ref!=='string'||!dialogRE.test(ref))
+     throw Error('FRESH_DIALOG_REQUIRED');
+   if(Object.keys(input).some(k=>!['op','ref','value'].includes(k)))throw Error('DIALOG_EXTRA_PARAMETERS');
+   if(input.value!==undefined && (typeof input.value!=='string'||
+      input.value.length>400||input.value.includes('\\0')))throw Error('DIALOG_PROMPT_INVALID');
+   if(input.op==='dialog_dismiss'&&input.value)throw Error('DIALOG_DISMISS_VALUE_DENIED');
+   if(input.value && (input.op!=='dialog_accept'||inspectState.dialogType!=='prompt'))
+     throw Error('DIALOG_PROMPT_ONLY');
+   inspectState=null;
+   const actionInput={targetId,operation:input.op,dialogRef:ref};
+   if(input.op==='dialog_accept'&&typeof input.value==='string'&&input.value.length)
+     actionInput.promptText=input.value;
+   const output=await provider.execute({id:'miniwob-dialog-'+(++sequence),
+     capability:'browser.interact',risk:'external',input:actionInput,
+     provenance:{kind:'runtime',source:'isolated-benchmark'}});
+   res.end(JSON.stringify({ok:output.ok===true,provider:output.provider,
+     durationMs:output.durationMs,error:output.error?.code||null,
+     sideEffectState:output.error?.details?.sideEffectState||null,
+     executionPhase:output.error?.details?.executionPhase||null,
+     stateProgress:output.ok===true,needsReobserve:true}));
+   return;
+  }
   if(!inspectState||inspectState.targetId!==targetId)throw Error('FRESH_INSPECTION_REQUIRED');
   const ref=input.ref;
   if(typeof ref!=='string'||!refRE.test(ref))throw Error('BAD_REF_FORMAT');
