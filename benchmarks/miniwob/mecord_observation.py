@@ -50,7 +50,7 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
         # "actionable" semantics. They are NOT ordinary click targets.
         visual_relative = (
             category == "visual" and item.get("actionable") is not True
-            and item.get("tag") in {"text","circle","ellipse","rect","path","polygon","polyline","line"}
+            and item.get("tag") in {"text","circle","ellipse","rect","path","polygon","polyline","line","canvas","img"}
         )
         # Sortable DOM children and scrollable regions can be observed
         # without having ordinary button actionability. They receive only
@@ -212,6 +212,9 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
             raise MecordObservationError("DATE_VALUE_INVALID") from None
         action = Decision("select_date", action.bid, action.value, action.key)
     if relative:
+        if raw.get("value", "") not in {"","center","left","right","top","bottom",
+                 "top-left","top-right","bottom-left","bottom-right"}:
+            raise MecordObservationError("RELATIVE_POINT_NOT_ENUMERATED")
         if match[0].get("description") != "visual-geometry":
             raise MecordObservationError("RELATIVE_TARGET_NOT_VISUAL")
         action = Decision("click_relative", action.bid, action.value, action.key)
