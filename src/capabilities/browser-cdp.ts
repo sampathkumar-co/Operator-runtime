@@ -859,8 +859,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
       throw new OperatorError('INVALID_BROWSER_GESTURE_PATH', 'path is only valid for drag_path.');
     }
     const targetSpec = normalizeTargetSpec(action.input.target);
-    if (operation === 'drag_path' && !targetSpec.ref) {
-      throw new OperatorError('INVALID_BROWSER_TARGET', 'drag_path requires one exact observed target ref.');
+    if (['drag_path','double_click','shift_click'].includes(operation) && !targetSpec.ref) {
+      throw new OperatorError('INVALID_BROWSER_TARGET', 'Native graphical gestures require one exact observed target ref.');
     }
     if (!targetSpec.ref && !targetSpec.css && !targetSpec.text && !targetSpec.renderedColor && !(targetSpec.role && targetSpec.name)) {
       throw new OperatorError('INVALID_BROWSER_TARGET', 'Provide an observed ref, css, text, renderedColor, or role+name for semantic targeting.');
