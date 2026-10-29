@@ -72,7 +72,8 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
             continue
         context = item.get("context")
         if (type(context) is not dict or type(context.get("frameDepth")) is not int
-                or not 0 <= context["frameDepth"] <= 4):
+                or not 0 <= context["frameDepth"] <= 4
+                or (context["frameDepth"] > 0 and not source_frame)):
             continue
         rect = item.get("geometry") or item.get("rect")
         if type(rect) is not dict:
