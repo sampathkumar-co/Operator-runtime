@@ -21,7 +21,7 @@ class Grounding(unittest.TestCase):
     x=item()
     self.assertEqual(len(observed_mecord_candidates(obs([x],[x]))),1)
  def test_forged_ref(self):
-    with self.assertRaises(MecordObservationError):
+    with self.assertRaisesRegex(MecordObservationError,"EXACT_OBSERVED_REF"):
      verified_action({"op":"click","bid":"b-abc123-7-999"},observed_mecord_candidates(obs([item()])),[])
  def test_stale_generation(self):
     self.assertEqual(observed_mecord_candidates(obs([item(ref="b-abc123-6-1")])),[])
@@ -38,7 +38,7 @@ class Grounding(unittest.TestCase):
         [{"error":"RELAY_ACTION_OUTCOME_UNCERTAIN"}])
  def test_ambiguous_name_rejected(self):
     cs=observed_mecord_candidates(obs([item(),item(ref="b-abc123-7-2")]))
-    with self.assertRaises(MecordObservationError):
+    with self.assertRaisesRegex(MecordObservationError,"UNSUPPORTED_MODEL_FIELDS"):
      verified_action({"op":"click","target_name":"Save"},cs,[])
  def test_malformed_not_authorized(self):
     for p in ({},{"ok":False,"provider":"browser.cdp"},{"ok":True,"provider":"fake","page":{}}):
@@ -77,4 +77,24 @@ class Grounding(unittest.TestCase):
  def test_svg_generation_still_checked(self):
     svg=item(ref="b-abc123-6-1",active=False);svg["tag"]="text"
     self.assertEqual(observed_mecord_candidates(obs([], [svg])),[])
+
+ def test_no_accessible_name_fallback_after_stale_id(self):
+    cs=observed_mecord_candidates(obs([item()]))
+    with self.assertRaisesRegex(MecordObservationError,"UNSUPPORTED_MODEL_FIELDS"):
+     verified_action({"op":"click","bid":"b-abc123-6-1","target_name":"Save"},cs,[])
+ def test_unobserved_raw_css_and_coordinates_denied(self):
+    cs=observed_mecord_candidates(obs([item()]))
+    for extra in ({"css":"#save"},{"xRatio":0.5},{"target":{"ref":"b-abc123-7-1"}}):
+     with self.assertRaisesRegex(MecordObservationError,"UNSUPPORTED_MODEL_FIELDS"):
+      verified_action({"op":"click","bid":"b-abc123-7-1",**extra},cs,[])
+ def test_uncertain_history_older_than_last_three_blocks(self):
+    cs=observed_mecord_candidates(obs([item()]))
+    history=[{"error":"RELAY_OUTCOME_UNCERTAIN"}]+[{"op":"hover","bid":"z"}]*5
+    with self.assertRaisesRegex(MecordObservationError,"UNCERTAIN_HISTORY"):
+     verified_action({"op":"click","bid":"b-abc123-7-1"},cs,history)
+ def test_relative_click_must_use_exact_observed_svg(self):
+    svg=item(ref="b-abc123-7-3",active=False);svg["tag"]="text"
+    cs=observed_mecord_candidates(obs([], [svg]))
+    with self.assertRaisesRegex(MecordObservationError,"EXACT_OBSERVED_REF"):
+     verified_action({"op":"click_relative","bid":"b-abc123-7-99"},cs,[])
 if __name__=="__main__":unittest.main(verbosity=2)
