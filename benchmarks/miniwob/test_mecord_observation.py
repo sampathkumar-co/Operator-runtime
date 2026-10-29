@@ -113,4 +113,19 @@ class Grounding(unittest.TestCase):
     a=item(role="generic");a["editable"]=True
     cs=observed_mecord_candidates(obs([a]))
     self.assertEqual(verified_action({"op":"type","bid":"b-abc123-7-1","value":"a"},cs,[])["op"],"type")
+
+ def test_native_date_input_accepts_real_iso_date(self):
+    control=item(role="textbox");control["type"]="date"
+    cs=observed_mecord_candidates(obs([control]))
+    self.assertEqual(verified_action({"op":"select_date","bid":"b-abc123-7-1","value":"2026-10-29"},cs,[])["op"],"select_date")
+ def test_date_does_not_allow_invalid_calendar_dates(self):
+    control=item(role="textbox");control["type"]="date"
+    cs=observed_mecord_candidates(obs([control]))
+    for value in ("2026-02-30","29/10/2026","2026-2-9",""):
+     with self.subTest(value=value),self.assertRaises(MecordObservationError):
+      verified_action({"op":"select_date","bid":"b-abc123-7-1","value":value},cs,[])
+ def test_date_action_rejects_non_date_input(self):
+    cs=observed_mecord_candidates(obs([item(role="textbox")]))
+    with self.assertRaisesRegex(MecordObservationError,"DATE_TARGET_NOT_DATE_INPUT"):
+     verified_action({"op":"select_date","bid":"b-abc123-7-1","value":"2026-10-29"},cs,[])
 if __name__=="__main__":unittest.main(verbosity=2)
