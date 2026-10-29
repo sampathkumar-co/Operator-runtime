@@ -348,7 +348,7 @@ try:
                     op=grounded["op"]
                     bid=grounded["ref"]
                     request = {"op":op,"ref":bid}
-                    if op in {"set_value","type","select","select_date","scroll","drag_between","drag_to","drag_by","resize","keyboard_text","format_text","select_text_range","dialog_accept"}:
+                    if op in {"set_value","type","select","select_date","scroll","drag_between","drag_to","drag_by","resize","keyboard_text","format_text","select_text_range","dialog_accept","click_relative"}:
                         request["value"]=grounded["value"]
                     if op in {"key_press","hotkey"}:request["key"]=grounded["key"]
                     result = bridge_call(port, request)
