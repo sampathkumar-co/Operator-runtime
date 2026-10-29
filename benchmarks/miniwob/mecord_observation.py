@@ -113,6 +113,12 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
         raise MecordObservationError("ACTION_NOT_OBJECT")
     if set(raw) - {"op","bid","value","key"}:
         raise MecordObservationError("UNSUPPORTED_MODEL_FIELDS")
+    if raw.get("op") == "wait":
+        if raw.get("bid", "") != "" or raw.get("value", "") != "" or raw.get("key", "") != "":
+            raise MecordObservationError("WAIT_MUST_HAVE_NO_TARGET")
+        if not safe_attempt(Decision("wait"), history):
+            raise MecordObservationError("UNCERTAIN_HISTORY")
+        return {"op": "wait"}
     ref = raw.get("bid")
     if type(ref) is not str or REF.fullmatch(ref) is None:
         raise MecordObservationError("EXACT_OBSERVED_REF_REQUIRED")
@@ -123,19 +129,21 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
     date_action = raw.get("op") == "select_date"
     scroll_action = raw.get("op") == "scroll"
     drag_action = raw.get("op") == "drag_between"
-    if relative or date_action or scroll_action or drag_action:
+    extended = {"drag_by", "resize", "hotkey", "keyboard_text", "format_text", "select_text_range"}
+    if relative or date_action or scroll_action or drag_action or raw.get("op") in extended:
         proposal = dict(raw)
-        proposal["op"] = "set_value" if date_action else "click"
+        proposal["op"] = "set_value" if date_action or raw.get("op") in {"keyboard_text","format_text","select_text_range"} else "click"
+    elif raw.get("op") == "set_value" and raw.get("value") == "":
+        proposal = dict(raw)
+        proposal["value"] = " "  # Generic normalizer forbids clear-to-empty; benchmark permits it.
     else:
         proposal = raw
     try:
         action = normalize_decision(proposal, candidates)
     except ControllerError as exc:
         raise MecordObservationError(str(exc)) from None
-    if action.op == "wait":
-        if not safe_attempt(action,history):
-            raise MecordObservationError("UNCERTAIN_HISTORY")
-        return {"op":"wait"}
+    if raw.get("op") == "set_value" and raw.get("value") == "":
+        action = Decision("set_value", action.bid, "", action.key)
     if action.op not in {"click","hover","set_value","type","select","key_press"}:
         raise MecordObservationError("OPERATION_NOT_SUPPORTED")
     match = [c for c in candidates if c.get("bid") == action.bid]
@@ -151,7 +159,7 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
     if action.op == "select" and role not in select_roles:
         raise MecordObservationError("TARGET_NOT_SELECTABLE")
     if scroll_action:
-        if chosen.get("scrollable") is not True or raw.get("value") not in {"up","down"}:
+        if chosen.get("scrollable") is not True or re.fullmatch(r"(up|down)(:(80|160|320))?", str(raw.get("value"))) is None:
             raise MecordObservationError("SCROLL_TARGET_OR_DIRECTION_INVALID")
         action=Decision("scroll", action.bid, raw["value"], "")
     if drag_action:
@@ -163,6 +171,24 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
                 or action.bid.rsplit("-",1)[0]!=to_ref.rsplit("-",1)[0]):
             raise MecordObservationError("DRAG_TARGETS_NOT_CURRENT_SORTABLE")
         action=Decision("drag_between",action.bid,to_ref,"")
+    if raw.get("op") in {"drag_by", "resize"}:
+        if re.fullmatch(r"(left|right|up|down):(40|80|160)", str(raw.get("value"))) is None:
+            raise MecordObservationError("DISPLACEMENT_INVALID")
+        action = Decision(raw["op"], action.bid, raw["value"], "")
+    if raw.get("op") in {"keyboard_text", "format_text", "select_text_range"}:
+        if not (chosen.get("editable") is True or role in editable_roles):
+            raise MecordObservationError("TARGET_NOT_EDITABLE")
+        if raw["op"] == "format_text" and raw.get("value") not in {"bold","italic","underline"}:
+            raise MecordObservationError("FORMAT_INVALID")
+        if raw["op"] == "select_text_range":
+            match_range = re.fullmatch(r"(0|[1-9][0-9]{0,3}):(0|[1-9][0-9]{0,3})", str(raw.get("value")))
+            if not match_range or int(match_range[1]) > int(match_range[2]):
+                raise MecordObservationError("TEXT_RANGE_INVALID")
+        action = Decision(raw["op"], action.bid, action.value, "")
+    if raw.get("op") == "hotkey":
+        if raw.get("key") not in {"CTRL+A","CTRL+C","CTRL+V","CTRL+Z","CTRL+SHIFT+Z","CTRL+B","CTRL+I","CTRL+U"}:
+            raise MecordObservationError("HOTKEY_INVALID")
+        action = Decision("hotkey", action.bid, "", raw["key"])
     if date_action:
         if chosen.get("inputType") != "date":
             raise MecordObservationError("DATE_TARGET_NOT_DATE_INPUT")
@@ -178,7 +204,7 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
         action = Decision("click_relative", action.bid, action.value, action.key)
     elif match[0].get("description") == "visual-geometry":
         raise MecordObservationError("VISUAL_NEEDS_RELATIVE_CLICK")
-    if not relative and not date_action and not scroll_action and not drag_action and chosen.get("description") in {"sortable-geometry","scroll-geometry"}:
+    if not relative and not date_action and not scroll_action and not drag_action and raw.get("op") not in {"drag_by","resize"} and chosen.get("description") in {"sortable-geometry","scroll-geometry"}:
         raise MecordObservationError("SPECIALIST_ACTION_REQUIRED")
     # Detect uncertainty throughout this bounded task, not only the last 3
     # entries checked by the generic source controller.
