@@ -202,8 +202,11 @@ try:
     if not header.startswith("MECORD_BRIDGE_PORT="):
         raise RuntimeError("BRIDGE_FAILED_TO_START")
     port = int(header.split("=")[1])
+    attempted_count = 0
+    campaign_stop = None
     with output_path.open("x", encoding="utf8") as log:
         for original_index, task_id in task_plan:
+            attempted_count += 1
             start = time.perf_counter()
             outcome = {"task_id": task_id, "plan_index": original_index, "seed": args.seed,
                        "reward": 0.0, "steps": 0, "agent": "meta-muse-spark-1.3-contributor",
@@ -279,6 +282,8 @@ try:
                     if done or truncated: break
             except Exception as exc:
                 outcome["error"] = type(exc).__name__ + ":" + str(exc)[:100]
+                if str(exc) in {"BUDGET_CAP_REACHED","MODEL_USAGE_MISSING"} or str(exc).startswith("META_HTTP_429"):
+                    campaign_stop = "API_BUDGET_OR_PROVIDER_STOP"
             finally:
                 if env:
                     try:env.close()
@@ -289,8 +294,13 @@ try:
             log.write(json.dumps(outcome, ensure_ascii=True) + "\n")
             log.flush()
             print("META_MECORD_EPISODE=" + json.dumps(outcome), flush=True)
+            if campaign_stop:
+                break
     print("META_MECORD_SUMMARY=" + json.dumps({
-        "attempted": len(task_plan), "api_calls": api_calls,
+        "attempted":attempted_count,"scheduled":len(task_plan),
+        "status":"COMPLETE" if attempted_count==len(task_plan) else "PARTIAL",
+        "campaign_stop":campaign_stop,
+        "api_calls":api_calls,
         "input_tokens": in_tokens, "output_tokens": out_tokens,
         "estimated_cost_usd":round(cost,7), "reserved_usd":round(run_reserved,7),
         "workspace_reserved_usd":round(historical_reservations,7),
