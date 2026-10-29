@@ -75,7 +75,7 @@ const svr=http.createServer(async(req,res)=>{
    // A genuine observed page-scroller ref is not in normal controls/visuals.
    const ps=semantic.pageScroll;
    if(ps&&typeof ps.ref==='string'&&refRE.test(ps.ref)&&ps.ref.startsWith('b-'+generation+'-')&&ps.geometry){
-    visuals.push(project({ref:ps.ref,role:'scrollbar',tag:'div',name:'Page scroller',
+    visuals.unshift(project({ref:ps.ref,role:'scrollbar',tag:'div',name:'Page scroller',
      actionable:false,scrollable:true,context:{frameDepth:0,shadowDepth:0},geometry:ps.geometry}));
    }
    const refs=new Set(),relativeRefs=new Set(),sortableRefs=new Set(),scrollRefs=new Set(),controlInfo=new Map();
@@ -108,12 +108,14 @@ const svr=http.createServer(async(req,res)=>{
   if(typeof ref!=='string'||!refRE.test(ref))throw Error('BAD_REF_FORMAT');
   const allowedRefs=(input.op==='click_relative'?inspectState.relativeRefs:
     input.op==='drag_between'?inspectState.sortableRefs:
-    input.op==='scroll'?inspectState.scrollRefs:inspectState.refs);
+    input.op==='scroll'?inspectState.scrollRefs:
+   input.op==='drag_by'||input.op==='resize'?new Set([...inspectState.refs,...inspectState.relativeRefs]):inspectState.refs);
   if(!allowedRefs.has(ref))throw Error('REF_NOT_FROM_FRESH_INSPECTION');
   const observed=inspectState.controlInfo.get(ref);
   if(input.op==='type'||input.op==='set_value'||input.op==='keyboard_text'||input.op==='format_text'||input.op==='select_text_range'){
    const role=String(observed?.role||observed?.tag||'').toLowerCase();
-   if(!observed||(observed.editable!==true&&!new Set(['textbox','searchbox','combobox','spinbutton','input','textarea']).has(role)))throw Error('TARGET_NOT_EDITABLE');
+   if(!observed||(observed.editable!==true&&!new Set(['textbox','searchbox','combobox','spinbutton','input','textarea']).has(role)
+    && !(input.op==='set_value'&&role==='slider')))throw Error('TARGET_NOT_EDITABLE');
   }
   if(input.op==='select_date' && observed?.type!=='date')throw Error('DATE_TARGET_NOT_DATE_INPUT');
   if(input.op==='select'){
