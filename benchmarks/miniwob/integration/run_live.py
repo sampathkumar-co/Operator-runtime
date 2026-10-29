@@ -206,8 +206,18 @@ def bridge_call(port, payload):
     req = urllib.request.Request(f"http://127.0.0.1:{port}/execute", data=json.dumps(payload).encode(),
                                  method="POST", headers={"Content-Type": "application/json",
                                    "Authorization":"Bearer "+bridge_token})
-    with urllib.request.urlopen(req, timeout=21) as response:
-        return json.load(response)
+    try:
+        with urllib.request.urlopen(req, timeout=21) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        try:
+            detail=json.loads(exc.read(1024).decode("utf8","replace"))
+        except (ValueError,UnicodeDecodeError):
+            detail={}
+        reason=detail.get("error") if isinstance(detail,dict) else None
+        # Never turn an execution rejection into an accepted browser action.
+        return {"ok":False,"provider":None,
+                "error":("BRIDGE_HTTP_"+str(exc.code)+"_"+str(reason or "UNKNOWN"))[:110]}
 
 try:
     headers = queue.Queue(maxsize=1)
