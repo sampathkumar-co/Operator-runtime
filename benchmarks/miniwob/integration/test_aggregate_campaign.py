@@ -62,4 +62,13 @@ class Aggregation(unittest.TestCase):
      with self.assertRaisesRegex(CampaignError,"MIXED_TEST_CONDITIONS"):
       aggregate([file(p,"mixed",rows)],50,42,1,roster=ROSTER,harness_sha256=HARNESS,runtime_manifest_sha256=RUNTIME)
 
+
+ def test_mixed_compiled_runtime_manifest_rejected(self):
+    with tempfile.TemporaryDirectory() as temp:
+     p=Path(temp)
+     record=episode(0,runtime_manifest_sha256="c"*64)
+     with self.assertRaisesRegex(CampaignError,"RUNTIME_MANIFEST_MISMATCH"):
+      aggregate([file(p,"bad-runtime",[record])],50,42,1,
+       roster=ROSTER,harness_sha256=HARNESS,runtime_manifest_sha256=RUNTIME)
+
 if __name__=="__main__":unittest.main(verbosity=2)
