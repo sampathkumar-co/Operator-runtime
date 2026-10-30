@@ -300,7 +300,7 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
                 raise MecordObservationError("NATIVE_PATH_VISUAL_REQUIRED")
             points=[]
             for pair in coords:
-                if re.fullmatch(r"(?:0\\.[0-9]{1,2}|1(?:\\.00?)?):(?:0\\.[0-9]{1,2}|1(?:\\.00?)?)",pair) is None:
+                if re.fullmatch(r"(?:0\.[0-9]{1,2}|1(?:\.00?)?):(?:0\.[0-9]{1,2}|1(?:\.00?)?)",pair) is None:
                     raise MecordObservationError("NATIVE_PATH_INVALID")
                 x,y=map(float,pair.split(":"))
                 if not (0.01<=x<=0.99 and 0.01<=y<=0.99):
