@@ -60,3 +60,11 @@ export function boundedVisiblePageText(semantic, maxLength=1600) {
   }
   return pieces.join(' ');
 }
+
+
+/** Prompt text is never allowed to carry a NUL or oversized payload. */
+export function validatedDialogPrompt(value) {
+  if (typeof value!=='string' || value.length>400 || value.includes('\0'))
+    throw new Error('DIALOG_PROMPT_INVALID');
+  return value;
+}

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,relativePointForLabel,boundedRelativePoint,boundedVisiblePageText} from './bridge_actions.mjs';
+import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,relativePointForLabel,boundedRelativePoint,boundedVisiblePageText,validatedDialogPrompt} from './bridge_actions.mjs';
 
 test('text fill uses provider type; slider retains set_value',()=>{
  assert.equal(providerOperationForInput('set_value','textbox'),'type');
@@ -48,4 +48,10 @@ test('visible text observation reaches model without hidden DOM reads',()=>{
  assert.equal(value,'Click the red circle Then submit');
  assert.equal(boundedVisiblePageText({visibleText:[{text:'x'.repeat(500)}]},80).length,80);
  assert.equal(boundedVisiblePageText({visibleText:[{text:'  '},{hidden:'secret'}]}),'');
+});
+
+test('dialog prompt rejects NUL and oversized values before dispatch',()=>{
+ assert.equal(validatedDialogPrompt('hello'),'hello');
+ for(const value of ['x'.repeat(401),'bad\0value',null,10])
+  assert.throws(()=>validatedDialogPrompt(value),/DIALOG_PROMPT_INVALID/);
 });

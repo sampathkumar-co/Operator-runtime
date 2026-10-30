@@ -1,7 +1,7 @@
 // Isolated, source-pinned Mecord MiniWoB bridge. No production relay or credentials.
 import http from 'node:http';import path from 'node:path';
 import {timingSafeEqual} from 'node:crypto';
-import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,boundedRelativePoint,boundedVisiblePageText} from './bridge_actions.mjs';
+import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,boundedRelativePoint,boundedVisiblePageText,validatedDialogPrompt} from './bridge_actions.mjs';
 import {captureSyntheticView,allowedSyntheticFrameUrl} from './browser_visual.mjs';
 import {pathToFileURL} from 'node:url';import {readFile} from 'node:fs/promises';
 const dir=process.env.MECORD_MINIWOB_WORKDIR ? path.resolve(process.env.MECORD_MINIWOB_WORKDIR) : null;
@@ -181,8 +181,7 @@ const svr=http.createServer(async(req,res)=>{
       inspectState.dialogRef!==ref||typeof ref!=='string'||!dialogRE.test(ref))
      throw Error('FRESH_DIALOG_REQUIRED');
    if(Object.keys(input).some(k=>!['op','ref','value'].includes(k)))throw Error('DIALOG_EXTRA_PARAMETERS');
-   if(input.value!==undefined && (typeof input.value!=='string'||
-      input.value.length>400||input.value.includes('\0')))throw Error('DIALOG_PROMPT_INVALID');
+   if(input.value!==undefined)validatedDialogPrompt(input.value);
    if(input.op==='dialog_dismiss'&&input.value)throw Error('DIALOG_DISMISS_VALUE_DENIED');
    if(input.value && (input.op!=='dialog_accept'||inspectState.dialogType!=='prompt'))
      throw Error('DIALOG_PROMPT_ONLY');
