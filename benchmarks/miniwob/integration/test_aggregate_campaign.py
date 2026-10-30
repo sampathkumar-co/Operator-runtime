@@ -99,4 +99,13 @@ class Aggregation(unittest.TestCase):
       aggregate([file(folder,"false-positive",[episode(0,error="MECORD_EXECUTION_UNCERTAIN")])],50,42,1,
        roster=ROSTER,harness_sha256=HARNESS,runtime_manifest_sha256=RUNTIME)
 
+ def test_unscored_without_first_observation_has_unknown_native_mode(self):
+    with tempfile.TemporaryDirectory() as temp:
+     row=episode(0,reward=None,unscored=True,native_gestures_enabled=None,steps=0)
+     outcome=aggregate([file(Path(temp),"pre-inspection",[row])],50,42,1,
+       roster=ROSTER,harness_sha256=HARNESS,runtime_manifest_sha256=RUNTIME)
+     self.assertEqual(outcome["status"],"PARTIAL")
+     self.assertEqual(outcome["unscored"],1)
+     self.assertIsNone(outcome["native_gestures_enabled"])
+
 if __name__=="__main__":unittest.main(verbosity=2)
