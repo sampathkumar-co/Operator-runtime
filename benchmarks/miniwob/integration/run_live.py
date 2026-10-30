@@ -291,6 +291,7 @@ try:
                          "runtime_manifest_sha256":runtime_manifest_sha256,
                          "runtime_version":runtime_manifest_info.get("version"),
                          "runtime_source_commit":runtime_manifest_info.get("sourceCommit"),
+                         "native_gestures_enabled":None,
                          "worker":args.worker,"workers":args.workers}
             env = None
             try:
@@ -311,6 +312,9 @@ try:
                         raise RuntimeError("MECORD_OBSERVATION_FAILED")
                     candidates = observed_mecord_candidates(mecord_inspection,limit=90)
                     native_ready = mecord_inspection.get("nativeGesturesEnabled") is True
+                    if outcome["native_gestures_enabled"] is not None and outcome["native_gestures_enabled"] != native_ready:
+                        raise RuntimeError("NATIVE_RUNTIME_CAPABILITY_CHANGED")
+                    outcome["native_gestures_enabled"]=native_ready
                     next_offsets=next_page_offsets(
                         mecord_inspection.get("pagination"),
                         current_control=inspect_offsets["controlOffset"],
