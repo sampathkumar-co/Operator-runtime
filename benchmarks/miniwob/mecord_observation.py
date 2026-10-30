@@ -290,7 +290,7 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
         if raw.get("key","")!="":
             raise MecordObservationError("NATIVE_GESTURE_KEY_DENIED")
         if op in {"double_click","shift_click"}:
-            if raw.get("value","")!="" or chosen.get("description") not in {"semantic","visual"}:
+            if raw.get("value","")!="" or chosen.get("description") not in {"semantic","visual","visual-geometry"}:
                 raise MecordObservationError("NATIVE_GESTURE_EXACT_ACTIONABLE_TARGET_REQUIRED")
             action=Decision(op,action.bid,"","")
         else:
@@ -332,7 +332,7 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
         if match[0].get("description") != "visual-geometry":
             raise MecordObservationError("RELATIVE_TARGET_NOT_VISUAL")
         action = Decision("click_relative", action.bid, action.value, action.key)
-    elif match[0].get("description") == "visual-geometry" and raw.get("op") not in {"drag_by","resize","drag_to","hover","drag_path"}:
+    elif match[0].get("description") == "visual-geometry" and raw.get("op") not in {"drag_by","resize","drag_to","hover","drag_path","double_click","shift_click"}:
         raise MecordObservationError("VISUAL_NEEDS_RELATIVE_CLICK")
     if not relative and not date_action and not scroll_action and not drag_action and raw.get("op") not in {"drag_by","resize","hover"} and chosen.get("description") in {"sortable-geometry","scroll-geometry"}:
         raise MecordObservationError("SPECIALIST_ACTION_REQUIRED")
