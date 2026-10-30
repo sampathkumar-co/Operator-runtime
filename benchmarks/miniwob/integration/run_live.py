@@ -44,6 +44,7 @@ import gymnasium as gym
 import browsergym.miniwob
 from mecord_observation import observed_mecord_candidates,verified_action,MecordObservationError
 from integration.budget_ledger import BudgetLedger, require_budget_feasibility
+from integration.inspection_paging import next_page_offsets
 from integration.bridge_protocol import parse_bridge_http_rejection
 from integration.model_failures import safe_meta_http_error,is_campaign_blocking_meta_failure,is_campaign_blocking_execution_failure
 from playwright.sync_api._generated import BrowserType
@@ -108,6 +109,7 @@ harness_files = [
     Path(__file__).with_name("browser_visual.mjs"),
     Path(__file__).with_name("model_failures.py"),
     Path(__file__).with_name("runtime_pin.mjs"),
+    Path(__file__).with_name("inspection_paging.py"),
 ]
 if not all(p.is_file() for p in harness_files):
     raise RuntimeError("BENCHMARK_HARNESS_FILE_MISSING")
@@ -155,7 +157,7 @@ JSON_ACTION_SCHEMA = {
     "type":"json_schema",
     "json_schema":{"name":"mecord_browser_action","strict":True,"schema":{
         "type":"object","properties":{
-            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative","select_date","scroll","drag_between","drag_to","wait","drag_by","resize","hotkey","keyboard_text","format_text","select_text_range","dialog_accept","dialog_dismiss","double_click","shift_click","drag_path"]},
+            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative","select_date","scroll","drag_between","drag_to","wait","drag_by","resize","hotkey","keyboard_text","format_text","select_text_range","dialog_accept","dialog_dismiss","double_click","shift_click","drag_path","inspect_next_page"]},
             "bid":{"type":"string"},"value":{"type":"string"},"key":{"type":"string"}
         },
         "required":["op","bid","value","key"],"additionalProperties":False
@@ -284,6 +286,7 @@ try:
                 obs, info = env.reset(seed=args.seed)
                 time.sleep(0.08)
                 history = []
+                inspect_offsets={"controlOffset":0,"visualOffset":0}
                 for step in range(args.max_steps):
                     event = {"step":step+1}
                     outcome["trace"].append(event)
@@ -291,12 +294,20 @@ try:
                         raise RuntimeError("TASK_WALL_TIMEOUT")
                     # Mecord RC6, not BrowserGym AX, is the dispatch authority.
                     # Each turn receives fresh generation-bound refs and visual geometry.
-                    mecord_inspection = bridge_call(port, {"op":"inspect","visual":args.vision})
+                    mecord_inspection = bridge_call(port, {"op":"inspect","visual":args.vision,**inspect_offsets})
                     if not mecord_inspection.get("ok") or mecord_inspection.get("provider") != "browser.cdp":
                         raise RuntimeError("MECORD_OBSERVATION_FAILED")
                     candidates = observed_mecord_candidates(mecord_inspection,limit=90)
                     native_ready = mecord_inspection.get("nativeGesturesEnabled") is True
+                    next_offsets=next_page_offsets(
+                        mecord_inspection.get("pagination"),
+                        current_control=inspect_offsets["controlOffset"],
+                        current_visual=inspect_offsets["visualOffset"])
                     if not candidates:
+                        if next_offsets:
+                            inspect_offsets=next_offsets
+                            event["recovery"]="NEXT_OBSERVED_PAGE_WITH_NO_TARGETS"
+                            continue
                         raise RuntimeError("NO_MECORD_GROUNDED_TARGETS")
                     candidate_json,hidden_count = compact_candidate_json(candidates)
                     event.update({"observed_candidates":len(candidates),
@@ -307,6 +318,8 @@ try:
                          "rejected_frames":mecord_inspection.get("rejectedFrames"),
                          "frame_coverage":mecord_inspection.get("frameCoverage"),
                          "native_gestures_enabled":native_ready,
+                         "inspected_offsets":inspect_offsets.copy(),
+                         "next_page_available":next_offsets is not None,
                          "screenshot_status":mecord_inspection.get("screenshotStatus"),
                          "screenshot_sha256":mecord_inspection.get("screenshotSha256")})
                     prompt = (
@@ -317,6 +330,7 @@ try:
                         '{"op":"click","bid":"b-current-observed-ref","value":"","key":""}. '
                         "Supported actions: click,set_value,type,select,key_press,hover,click_relative,select_date,scroll,drag_between,drag_to,wait,drag_by,resize,hotkey,keyboard_text,format_text,select_text_range,dialog_accept,dialog_dismiss. "
                         + ("Additional PINNED native operations: double_click,shift_click on exact actionable refs; drag_path on observed graphic ref using value=0.10:0.10;0.90:0.90 (2-24 relative points). " if native_ready else "Native gestures are unavailable in this runtime; do NOT request double_click,shift_click,drag_path. ") +
+                        ("Use inspect_next_page with empty bid,value,key to inspect the next provider-validated control/visual page WITHOUT a browser action. " if next_offsets else "No further observed inspection page is available. ") +
                         "For a javascript-dialog candidate use dialog_accept or dialog_dismiss with its exact bid; value only for prompt accept. For wait use empty bid/value/key. For hotkey put CTRL+A/CTRL+B/CTRL+I/CTRL+U/CTRL+Z in key. "
                         "For drag_by or resize, value is one of eight compass directions (e.g. down-right:80), with distance 10/20/40/80/160/320. For format_text use bold/italic/underline. "
                         "For select_text_range use start:end as value. For keyboard_text use an editable target. "
@@ -369,6 +383,12 @@ try:
                     event["decision"] = {"op":grounded["op"],
                         "target":grounded.get("ref",""),
                         "value_hash":sha256(grounded.get("value","").encode()).hexdigest()[:16]}
+                    if grounded.get("op")=="inspect_next_page":
+                        if not next_offsets:
+                            raise RuntimeError("PAGINATION_NOT_AVAILABLE")
+                        inspect_offsets=next_offsets
+                        event["next_page_offsets"]=next_offsets
+                        continue
                     if grounded.get("op")=="wait":
                         event["wait"] = True
                         obs,reward,done,truncated,info=env.step("noop()")
@@ -385,6 +405,7 @@ try:
                         request["value"]=grounded["value"]
                     if op in {"key_press","hotkey"}:request["key"]=grounded["key"]
                     result = bridge_call(port, request)
+                    inspect_offsets={"controlOffset":0,"visualOffset":0}
                     event.update({"provider_ok":result.get("ok") is True,
                         "provider_error":result.get("error"),
                         "provider_ms":result.get("durationMs"),
