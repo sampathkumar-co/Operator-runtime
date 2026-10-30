@@ -174,23 +174,31 @@ frame content is excluded, not silently treated as authorized.
 Worker example, using the **same workspace**, task selection and seed:
 
 ```shell
-python benchmarks/miniwob/integration/run_live.py --limit 50 --workers 4 --worker 0 --seed 42 --max-steps 6 --vision --cap-usd 0.007
+python benchmarks/miniwob/integration/run_live.py --limit 50 --workers 4 --worker 0 --count 1 --seed 42 --max-steps 6 --vision --cap-usd 0.01
 ```
 
-Worker indices 1, 2 and 3 use the corresponding `--worker` argument in
-separate owner-authorized processes. The hard workspace lifetime reservation
-ceiling remains USD 0.07, so a full vision campaign may stop early rather than
-overspend. Neither a partial run nor source tests prove 70% accuracy.
+This example requests just **one** vision checkpoint task, not a complete 50-task
+campaign. The runner checks conservative budget feasibility before launching
+the paid bridge; one screenshot per task reserves at least $0.0036864 at the
+configured rates before prompt text and retries. Under the immutable
+USD 0.07 workspace ceiling, a 20/50-task vision campaign is infeasible and
+is explicitly rejected before API use. Worker indices 1, 2 and 3 use
+corresponding `--worker` arguments and disjoint `--start-at` / `--count`
+slices under the same ledger. A smaller checkpoint is not a benchmark score
+and neither source tests nor partial results prove 70% accuracy.
 
 Only **after all four worker files exist**, report the frozen manifest result
 with the report-only command:
 
 ```shell
-python benchmarks/miniwob/integration/aggregate_campaign.py --expected 50 --seed 42 --workers 4 <worker0.jsonl> <worker1.jsonl> <worker2.jsonl> <worker3.jsonl>
+python benchmarks/miniwob/integration/aggregate_campaign.py --expected 50 --seed 42 --workers 4 --harness-sha256 <EXACT_64_CHAR_HARNESS_DIGEST_FROM_RUN> <checkpoint0.jsonl> <checkpoint1.jsonl> ...
 ```
 
-The aggregator checks the global manifest SHA-256, exact task index coverage,
-worker membership, duplicate tasks, and unscored episodes. It cannot infer
+The aggregator accepts multiple disjoint checkpoint files, verifies exact frozen
+task IDs and SHA-256 harness identity from each run, and denies mismatched
+model/vision/step-limit conditions, duplicate tasks and unscored pass claims.
+The required `--harness-sha256` must come from actual runner evidence; do
+not invent it to satisfy the CLI. It cannot infer
 independent task rewards when no real BrowserGym run has been executed.
 
 Production integration must use the production kernel's authority/policy
