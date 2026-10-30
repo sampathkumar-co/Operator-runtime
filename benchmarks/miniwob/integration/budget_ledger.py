@@ -77,6 +77,49 @@ class BudgetLedger:
         except OSError:pass
 
 
+ def record_reported_usage(self, *, reservation_usd, prompt_tokens, completion_tokens, estimated_usd):
+    """Durably record *provider-reported* usage, not an invoice or a refund.
+
+    The original reservation remains charged against the lifetime ceiling.
+    Reported usage is an independent audit trail; it does not weaken caps.
+    """
+    if (type(prompt_tokens) is not int or prompt_tokens<1 or
+        type(completion_tokens) is not int or completion_tokens<0 or
+        any(type(x) not in (int,float) or not math.isfinite(x) or x<0
+            for x in (reservation_usd,estimated_usd)) or
+        reservation_usd<=0 or estimated_usd>reservation_usd+1e-12):
+        raise BudgetError("REPORTED_USAGE_INVALID")
+    marker=f"{os.getpid()}-{secrets.token_hex(16)}"
+    deadline=time.monotonic()+12
+    while True:
+        try:
+            fd=os.open(self.lock,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+            try:
+                os.write(fd,marker.encode("ascii"))
+                os.fsync(fd)
+            finally:os.close(fd)
+            break
+        except FileExistsError:
+            if time.monotonic()>deadline:
+                raise BudgetError("BENCHMARK_BUDGET_LOCK_BUSY")
+            time.sleep(0.025)
+    try:
+        record={"type":"provider_reported_usage","worker":self.worker,
+                "workers":self.workers,"global_manifest":self.manifest,
+                "prompt_tokens":prompt_tokens,"completion_tokens":completion_tokens,
+                "estimated_usd":round(estimated_usd,9),
+                "reserved_usd":round(reservation_usd,9)}
+        with (self.root/"mecord-provider-usage.jsonl").open("a",encoding="utf8") as f:
+            f.write(json.dumps(record,separators=(",",":"))+"\\n")
+            f.flush()
+            os.fsync(f.fileno())
+    finally:
+        try:
+            if self.lock.read_text(encoding="ascii")==marker:
+                self.lock.unlink()
+        except OSError:pass
+
+
 def require_budget_feasibility(*, task_count, vision, run_cap, lifetime_cap,
                                already_reserved, output_tokens=2048):
     """Fail BEFORE Meta/browser startup if a planned vision batch cannot fit.
