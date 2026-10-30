@@ -94,7 +94,7 @@ const svr=http.createServer(async(req,res)=>{
    if(Object.keys(input).some(k=>!['op','visual','controlOffset','visualOffset'].includes(k))||
       (input.visual!==undefined&&typeof input.visual!=='boolean'))throw Error('EXTRA_INSPECT_PARAMETERS');
    for(const k of ['controlOffset','visualOffset']){
-    if(input[k]!==undefined&&(!Number.isInteger(input[k])||input[k]<0||input[k]>640||input[k]%80!==0))
+    if(input[k]!==undefined&&(!Number.isInteger(input[k])||input[k]<0||input[k]>640))
       throw Error('INSPECT_PAGINATION_INVALID');
    }
    inspectState=null;
