@@ -34,7 +34,7 @@ The runner supports `--limit 125`, seeds, per-task step limits, and a per-run ma
 
 * Every local bridge request requires a randomly generated per-run bearer capability. Calls without it return HTTP 403. The bridge serializes requests, rejects extra model parameters, and invalidates the current ref before dispatch.
 * The browser child process does not inherit the Meta API key. An observed Mecord ref must be supplied exactly; CSS/coordinate/name fallback cannot authorize a guessed target. Value-editing and selecting require compatible observed control roles, checked both by the pure controller and the bridge.
-* By default the runner allows **USD 0.005** per run. It rejects a per-run cap above **USD 0.070** and persists a conservative **pre-call reservation ledger** with a workspace-wide lifetime ceiling of USD 0.070. It takes an exclusive lock to prevent concurrent model spending. If interrupted, a stale lock is fail-closed and requires inspection before removal. Model HTTP failures consume the reservation, rather than assuming a free retry.
+* By default the runner allows **USD 0.005** per run. It rejects a per-run cap above **USD 0.070** and persists a conservative **pre-call reservation ledger** with a workspace-wide lifetime ceiling of USD 0.070. It takes a short-lived exclusive lock around each ledger reservation, allowing authorized concurrent workers to share one ceiling without simultaneous overspending. A stale lock is fail-closed and must be inspected before removal. Model HTTP failures consume the reservation, rather than assuming a free retry.
 * This ledger covers only calls from this **new** harness in the same workspace. It cannot prove actual provider billing or account-wide expenditure; prior model calls, any other tools and foreign-exchange variation must still be accounted for by the operator. It is deliberately conservative relative to the owner's overall ₹10 limit.
 * If quota, spending or model usage accounting fails, the run stops and records a **partial campaign** and unscored episode, not invented zero-reward completions. Offline unit tests and no-model browser smoke run without Meta credentials.
 
@@ -97,3 +97,18 @@ checkpoint, pause and diagnose rather than quietly switching task selections.
 The full 50-task threshold is 35 successful episodes; stopping early does
 not entitle the project to claim the benchmark passed.
 
+
+
+## 30 October 2026 adapter audit and checkpoint-integrity repair
+
+The updated adapter on the authorized laptop was reviewed against the pinned RC6 provider, then committed to this draft PR. Its observed controls now cover bounded scroll, sortable drag, date entry, candidate visual geometry, optional synthetic-only CDP screenshot capture, local bridge authorization, fresh-reference execution, and independently verified BrowserGym rewards. Native double-click/Shift-click/drawing extensions are in separate **unmerged** PR #696, **not in RC6**; this adapter must not presume otherwise.
+
+The source now contains `budget_ledger.py` for locked, fsynced pre-call token-cost reservations shared between workers; `model_failures.py` and `bridge_protocol.py` for fail-closed diagnostics; `bridge_actions.mjs` and `browser_visual.mjs` for bounded native actions and screenshot validation; and `aggregate_campaign.py` for read-only scoring. Model keys are injected only into the runner, not the CDP bridge.
+
+**Additional audit repair:** every new episode records `harness_sha256`, a fingerprint of the runner, Mecord projection, source controller and bridge helper files, along with the MiniWoB source SHA. The checkpoint aggregator accepts multiple disjoint files for the same worker, but independently reconstructs the canonical 50-of-125 roster and rejects wrong task IDs, duplicate indexes, mixed seed/step/vision settings, changed harness implementations, invalid rewards or missing task coverage. **Only a complete, independently scored frozen 50-task campaign can be declared PASS at 35/50 successes.**
+
+No-cost laptop checks after the repair: **56/56 controller Python tests**, **6/6 checkpoint-aggregator Python tests**, **10/10 bridge-action JS tests**, **3/3 visual JS tests**, Python/JS syntax checks, and the regular and screenshot-enabled browser smoke tests (each exact RC6 `browser.cdp` and independent reward 1.0). These tests do not measure Meta success rate.
+
+The planned development checkpoint uses `--limit 50 --workers 1 --worker 0 --start-at 0 --count 5 --campaign-tag oct30r1 --seed 42 --max-steps 6 --cap-usd 0.012`, with the same Meta Muse Contributor model, `reasoning_effort=low`, 2,048 initial output tokens, a single truncation-only 3,072-token retry, and **vision disabled** for comparability with the earlier run. The attempt to start this paid checkpoint was blocked by the execution host's safety controls; its result file does not exist and **no model call was made**. Do not bypass this block. The original, older-adapter 2/7 development result remains separate and unchanged.
+
+For later independent reporting, run `aggregate_campaign.py` over the exact checkpoint files using `--expected 50 --seed 42 --workers 1 --harness-sha256` from the newly recorded episode metadata. It returns `PARTIAL` and `NOT_EVALUATED` until all 50 canonical tasks are present and scored; do not mix checkpoints from different adapter fingerprints. Preserve the existing append-only budget ledger and account for historical model charges separately.
