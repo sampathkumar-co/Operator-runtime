@@ -216,7 +216,7 @@ const svr=http.createServer(async(req,res)=>{
   const graphicalRefs=new Set([...inspectState.refs,...inspectState.relativeRefs]);
   const allowedRefs=(input.op==='click_relative'?inspectState.relativeRefs:
     input.op==='drag_between'?inspectState.sortableRefs:
-    input.op==='drag_to'||input.op==='hover'||input.op==='drag_by'||input.op==='resize'||input.op==='drag_path'?graphicalRefs:
+    input.op==='drag_to'||input.op==='hover'||input.op==='drag_by'||input.op==='resize'||input.op==='drag_path'||input.op==='double_click'||input.op==='shift_click'?graphicalRefs:
     input.op==='scroll'?inspectState.scrollRefs:inspectState.refs);
   if(!allowedRefs.has(ref))throw Error('REF_NOT_FROM_FRESH_INSPECTION');
   const observed=inspectState.controlInfo.get(ref);
