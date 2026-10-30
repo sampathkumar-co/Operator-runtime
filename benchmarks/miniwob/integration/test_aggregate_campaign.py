@@ -12,6 +12,7 @@ def episode(i,reward=1,**overrides):
          "reward":reward,"steps":1,"step_limit":6,"vision_enabled":False,
          "global_campaign_sha256":MANIFEST,"harness_sha256":HARNESS,
          "runtime_manifest_sha256":RUNTIME,"source_commit":SOURCE_SHA,
+         "native_gestures_enabled":False,
          "agent":MODEL,"executor":EXECUTOR}
     row.update(overrides);return row
 def file(folder,name,rows):
