@@ -76,3 +76,24 @@ export function preDispatchRejection(message) {
   return {ok:false,error:String(message).slice(0,120),
     sideEffectState:'none',executionPhase:'pre_dispatch'};
 }
+
+/** Closed, ref-relative gesture alphabet; never viewport or CSS coordinates.
+ * Values are 2-24 semicolon-separated pairs quantized to hundredths.
+ * Every point is subsequently verified by the native Mecord provider.
+ */
+export function boundedGesturePath(value) {
+  if(typeof value!=='string'||value.length>300)throw Error('INVALID_GESTURE_PATH');
+  const pieces=value.split(';');
+  if(pieces.length<2||pieces.length>24)throw Error('INVALID_GESTURE_PATH');
+  const path=pieces.map(piece=>{
+    if(!/^(?:0\\.[0-9]{1,2}|1(?:\\.00?)?):(?:0\\.[0-9]{1,2}|1(?:\\.00?)?)$/.test(piece))
+      throw Error('INVALID_GESTURE_PATH');
+    const [xRatio,yRatio]=piece.split(':').map(Number);
+    if(xRatio<0.01||xRatio>0.99||yRatio<0.01||yRatio>0.99)
+      throw Error('INVALID_GESTURE_PATH');
+    return {xRatio,yRatio};
+  });
+  if(path.every(p=>p.xRatio===path[0].xRatio&&p.yRatio===path[0].yRatio))
+    throw Error('INVALID_GESTURE_PATH');
+  return path;
+}
