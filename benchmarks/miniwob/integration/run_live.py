@@ -213,6 +213,12 @@ def request_model(prompt, *, output_limit=None, screenshot=None):
     # its estimated charge fits within the preceding reservation.
     api_calls+=1
     checked=checked_reported_usage(data.get("usage"),reservation_usd=reserve)
+    # Recording can fail after the provider has charged a request. Stop rather
+    # than allow unaccounted additional calls. No reservation is refunded.
+    ledger.record_reported_usage(reservation_usd=reserve,
+        prompt_tokens=checked["prompt_tokens"],
+        completion_tokens=checked["completion_tokens"],
+        estimated_usd=checked["estimated_usage_usd"])
     ti=checked["prompt_tokens"];to=checked["completion_tokens"]
     in_tokens+=ti;out_tokens+=to
     cost+=checked["estimated_usage_usd"]
