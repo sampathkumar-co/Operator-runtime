@@ -1,4 +1,5 @@
 import { OperatorError } from '../core/errors.ts';
+import { dispatchHeldPointerStroke } from './browser-cdp-held-pointer.ts';
 import type { CdpConnection, JsonMap } from './browser-cdp-connection.ts';
 import { browserDomContractFunction, dateSelectFunction, interactionFunction, semanticSnapshotFunction, unwrapRuntimeValue, type BrowserObservationOptions } from './browser-cdp-page.ts';
 
@@ -764,9 +765,9 @@ export async function performSemanticInteraction(
       if (![startX, startY, endX, endY].every(Number.isFinite)) {
         throw new OperatorError('BROWSER_RESIZE_NOT_ACTIONABLE', 'Resize handle geometry is invalid.', { retryable: true });
       }
-      const dispatch = (params: JsonMap) => chosen.frame
-        ? (providerDispatchStarted = true, session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, signal))
-        : (providerDispatchStarted = true, session.send('Input.dispatchMouseEvent', params, 8_000, signal));
+      const dispatch = (params: JsonMap, cleanup = false) => chosen.frame
+        ? (providerDispatchStarted = true, session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, cleanup ? undefined : signal))
+        : (providerDispatchStarted = true, session.send('Input.dispatchMouseEvent', params, 8_000, cleanup ? undefined : signal));
       await dispatch({ type: 'mouseMoved', x: startX, y: startY, button: 'none', buttons: 0 });
       await dispatch({ type: 'mousePressed', x: startX, y: startY, button: 'left', buttons: 1, clickCount: 1 });
       const steps = Math.max(4, Math.min(20, Math.ceil(Math.hypot(dx, dy) / 20)));
@@ -1021,15 +1022,7 @@ export async function performSemanticInteraction(
         ? (providerDispatchStarted = true, session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, signal))
         : (providerDispatchStarted = true, session.send('Input.dispatchMouseEvent', params, 8_000, signal));
       if (input.operation === 'drag_path') {
-        const stroke=nativePath!;
-        const first=stroke[0]!;
-        await dispatch({type:'mouseMoved',x:first.x,y:first.y,button:'none',buttons:0});
-        await dispatch({type:'mousePressed',x:first.x,y:first.y,button:'left',buttons:1,clickCount:1});
-        for (const point of stroke.slice(1)) {
-          await dispatch({type:'mouseMoved',x:point.x,y:point.y,button:'left',buttons:1});
-        }
-        const last=stroke[stroke.length-1]!;
-        await dispatch({type:'mouseReleased',x:last.x,y:last.y,button:'left',buttons:0,clickCount:1});
+        await dispatchHeldPointerStroke(nativePath!, dispatch);
       } else if (input.operation === 'hover') {
         await dispatch({ type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
       } else if (input.operation === 'scroll') {
