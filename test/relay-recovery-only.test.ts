@@ -20,6 +20,7 @@ test('recovery-only route allowlist never permits ordinary execution or state re
     ['GET','/control-center'],
     ['POST','/v1/control-center/browser-login/windows'],
     ['GET','/v1/control-center/original-recovery/browser'],
+    ['GET','/v1/control-center/recovery'],
     ['POST','/v1/control-center/original-recovery/browser/resolve']
   ]) assert.equal(originalRecoveryOnlyRouteAllowed(method,path),true);
   for (const [method,path] of [
@@ -61,6 +62,8 @@ test('dynamic recovery quarantine rejects even valid bearer ordinary operations,
     assert.equal(((await response.json()) as any).error.code,'ORIGINAL_RELAY_AUTHORITY_REVIEW_REQUIRED');
   }
   assert.equal((await fetch(base+'/v1/tasks',{headers:bearer})).status,423);
+  const summary=await fetch(base+'/v1/control-center/recovery',{headers:bearer});
+  assert.equal(summary.status,200);
   const review=await fetch(base+'/v1/control-center/original-recovery',{headers:bearer});
   assert.equal(review.status,503); // no journal configured; only the read-only recovery route remains reachable
   const missingAuth=await fetch(base+'/v1/control-center/original-recovery');
