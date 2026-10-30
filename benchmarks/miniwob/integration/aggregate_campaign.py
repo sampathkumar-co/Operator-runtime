@@ -8,6 +8,7 @@ import json
 import subprocess
 from hashlib import sha256
 from pathlib import Path
+from checkpoint_integrity import verify_file_rows, CheckpointIntegrityError
 
 SOURCE_SHA="7fd85d71a4b60325c6585396ec4f48377d049838"
 MODEL="meta-muse-spark-1.3-contributor"
@@ -54,6 +55,9 @@ def aggregate(paths, expected, seed, workers, *, roster, harness_sha256, runtime
         seen_files.add(source)
         rows=[json.loads(x) for x in source.read_text(encoding="utf8").splitlines() if x.strip()]
         if not rows:raise CampaignError("EMPTY_CHECKPOINT")
+        try:verify_file_rows(rows)
+        except CheckpointIntegrityError:
+            raise CampaignError("CHECKPOINT_CHAIN_INVALID") from None
         worker=rows[0].get("worker")
         if type(worker) is not int or not 0<=worker<workers:
             raise CampaignError("WORKER_PROVENANCE_INVALID")
@@ -66,6 +70,8 @@ def aggregate(paths, expected, seed, workers, *, roster, harness_sha256, runtime
             if type(index) is not int or not 0<=index<expected or index%workers!=worker:
                 raise CampaignError("MISROUTED_TASK")
             if index in seen:raise CampaignError("OVERLAPPING_CHECKPOINTS")
+            if row.get("task_debug") is True:
+                raise CampaignError("DEBUG_TASK_NOT_QUALIFICATION")
             if row.get("task_id")!=plan[index][1]:
                 raise CampaignError("TASK_NOT_IN_CANONICAL_FROZEN_PLAN")
             if row.get("seed")!=seed or row.get("global_campaign_sha256")!=manifest:
