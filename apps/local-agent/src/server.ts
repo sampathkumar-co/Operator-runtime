@@ -32,6 +32,7 @@ import type { SessionApprovalStore } from './session-approval.ts';
 import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
 import { renderControlCenter } from './control-center.ts';
+import { originalRecoveryOnlyRouteAllowed } from './relay-recovery-only.ts';
 import { buildRedactedControlCenterDiagnostics } from '../../../src/core/control-center-diagnostic-export.ts';
 import { buildOriginalRecoveryReviewModel } from '../../../src/core/original-recovery-ux.ts';
 import type { OriginalRecoveryOwnerResolution } from './operator-pre-dispatch-adjudication.ts';
@@ -122,6 +123,8 @@ export function createLocalAgentServer(options: {
   beforeActionReceiptCompletion?: (input: { action: ActionRequest; result: ActionResult }) => Promise<void> | void;
   sessionApprovals?: SessionApprovalStore;
   recoveryToken?: string;
+  /** Dynamic, fail-closed local recovery mode after exact relay authority conflict. */
+  isOriginalRecoveryOnly?: () => boolean;
   /** Test-only native gesture adapter; production uses the Windows owner dialog. */
   confirmLocalBrowserLogin?: () => Promise<boolean>;
   onEmergencyStop?: () => Promise<void> | void;
@@ -450,9 +453,21 @@ export function createLocalAgentServer(options: {
       ? requestedPathname.replace(/^\/v1\/goals/, '/v1/tasks')
       : requestedPathname;
 
+    // This is the FIRST request boundary. Bearer-token and browser-session
+    // authority cannot regain normal execution while the relay is quarantined.
+    if (options.isOriginalRecoveryOnly?.() &&
+        !originalRecoveryOnlyRouteAllowed(req.method ?? '', pathname)) {
+      send(res, 423, { ok: false, error: {
+        code: 'ORIGINAL_RELAY_AUTHORITY_REVIEW_REQUIRED',
+        message: 'Remote and ordinary local execution are disabled. Only original-device recovery is available.'
+      } });
+      return;
+    }
+
     if (pathname === '/health' && req.method === 'GET') {
       const emergencyStopped = options.emergencyStop ? (await options.emergencyStop.status()).engaged : false;
-      send(res, 200, { ok: true, service: 'operator-local-agent', version: PRODUCT_VERSION, emergencyStopped });
+      send(res, 200, { ok: true, service: 'operator-local-agent', version: PRODUCT_VERSION, emergencyStopped,
+        originalRecoveryOnly: options.isOriginalRecoveryOnly?.() === true });
       return;
     }
 

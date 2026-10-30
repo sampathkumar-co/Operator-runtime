@@ -62,6 +62,7 @@ import { AdaptiveModalityShadowAdvisor } from '../../../src/core/adaptive-modali
 import { AdaptiveStrategyShadowAdvisor } from '../../../src/core/adaptive-strategy-shadow.ts';
 import { createLocalStateComponents } from './state-components.ts';
 import { LocalRuntimeLifecycle } from './runtime-lifecycle.ts';
+import { isProtectedRelayRecoveryRequired } from './relay-recovery-only.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -96,6 +97,7 @@ if (recoveryToken !== undefined && recoveryToken.length < 32) {
 
 const stateDir = path.resolve(process.env.OPERATOR_STATE_DIR ?? path.join(os.homedir(), '.operator'));
 const stateInstanceLock = await acquireLocalAgentStateInstanceLock(stateDir);
+let originalRecoveryOnly = false;
 await recoverPendingSnapshotRestores(stateDir);
 const remoteLauncherIpc = process.env.OPERATOR_REMOTE_PACKAGE === 'mecord-connect' && typeof process.send === 'function';
 let launcherShutdownRequested = false;
@@ -235,6 +237,10 @@ const agentKernel = new AgentKernel({
         digest: actionPermissions.enterprisePolicyDigest ?? '',
         generation: actionPermissions.enterprisePolicyGeneration ?? 0
       });
+    }
+    if (originalRecoveryOnly) {
+      throw new OperatorError('ORIGINAL_RELAY_AUTHORITY_REVIEW_REQUIRED',
+        'Original-device recovery-only mode prevents provider dispatch.');
     }
     if ((await emergencyStop.status()).engaged) {
       throw new OperatorError(
@@ -380,12 +386,37 @@ async function failRequiredRelay(error: unknown): Promise<void> {
   if (!relayRequired || lifecycle.shuttingDown) return;
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[operator] required relay failed: ${message}`);
+  if (isProtectedRelayRecoveryRequired(relayConnectionStatus, error) && !startupEmergencyStatus.engaged) {
+    // Transition BEFORE yielding: all new HTTP traffic and provider dispatch
+    // become non-executable, even for valid local bearer sessions.
+    originalRecoveryOnly = true;
+    stopRelay();
+    emergencyExecutionGeneration.abort('ORIGINAL_RELAY_AUTHORITY_REVIEW_REQUIRED');
+    const quiesced = await Promise.allSettled([
+      runtime.emergencyStop(),
+      desiredStateReconciler.stop(),
+      eventTicker.stop(),
+      stopCapabilityGovernanceRefresh()
+    ]);
+    if (quiesced.every((result) => result.status === 'fulfilled')) {
+      const recoveryCode = (error instanceof OperatorError && error.code === 'RELAY_RECOVERY_REQUIRED') ||
+        relayConnectionStatus.code === 'RELAY_RECOVERY_REQUIRED'
+        ? 'RELAY_RECOVERY_REQUIRED' : 'RELAY_AUTHORITY_CONFLICT_REVIEW_REQUIRED';
+      relayConnectionStatus = { ...relayConnectionStatus,
+        state: 'DEGRADED', code: recoveryCode,
+        recoverable: false, originalRecoveryOnly: true, updatedAt: new Date().toISOString() };
+      console.error('[operator] local original-device Control Center recovery-only; relay and all ordinary execution are disabled.');
+      console.error('[operator] resolve only through original-device native owner confirmation. No relay ACK or mutation replay is performed.');
+      return;
+    }
+    console.error('[operator] recovery-only quiescence failed; shutting down safely.');
+  }
   await shutdownRuntime(1, 'required-relay-failure', { awaitRelay: false });
   setImmediate(() => process.exit(1));
 }
 
 function startRelay(): void {
-  if (!relayUrl || lifecycle.shuttingDown || relayRun) return;
+  if (!relayUrl || lifecycle.shuttingDown || relayRun || originalRecoveryOnly) return;
   const enrollment = new RelayEnrollmentClient({
     relayUrl, resultUrl: relayResultUrl, identity: deviceIdentity,
     allowLoopbackInsecure: relayAllowInsecureLoopback,
@@ -508,13 +539,13 @@ const taskOrchestrator = new TaskOrchestrator({
   modalityShadow: adaptiveModalityShadow,
   strategyShadow: adaptiveStrategyShadow,
   executeAction: async (action, actionPermissions, context) => {
-    if ((await emergencyStop.status()).engaged) {
+    if (originalRecoveryOnly || (await emergencyStop.status()).engaged) {
       return {
         ok: false,
         capability: action.capability,
         provider: 'policy',
         evidence: [evidence('emergency_stop', 'fail', 'Operator execution is disabled by the local emergency stop.')],
-        error: { code: 'EMERGENCY_STOPPED', message: 'Operator execution is disabled by the local emergency stop.', retryable: false },
+        error: { code: originalRecoveryOnly ? 'ORIGINAL_RELAY_AUTHORITY_REVIEW_REQUIRED' : 'EMERGENCY_STOPPED', message: 'Operator execution is disabled by local protective recovery or emergency stop.', retryable: false },
         durationMs: 0
       };
     }
@@ -551,6 +582,7 @@ const agent = createLocalAgentServer({
   relayInternalToken,
   recoveryToken,
   emergencyStop,
+  isOriginalRecoveryOnly: () => originalRecoveryOnly,
   approvals,
   actionExecutions,
   originalRecoveryResolution: process.platform === 'win32'
@@ -590,6 +622,10 @@ const agent = createLocalAgentServer({
     if (failed) throw failed.reason;
   },
   onEmergencyClear: async () => {
+    if (originalRecoveryOnly) {
+      throw new OperatorError('ORIGINAL_RELAY_AUTHORITY_REVIEW_REQUIRED',
+        'Original authority reconciliation is required before normal operation can resume.');
+    }
     emergencyExecutionGeneration = new AbortController();
     organizationRecovery = await organizations.recoverPendingCompensations();
     if (organizationRecovery.pending > 0) {
@@ -602,6 +638,7 @@ const agent = createLocalAgentServer({
     catch (error) { console.error(`[operator] relay reconnect after emergency recovery failed: ${error instanceof Error ? error.message : String(error)}`); }
   },
   getRuntimeStatus: () => ({
+    originalRecoveryOnly,
     packageVersion: process.env.OPERATOR_RUNTIME_PACKAGE_VERSION,
     sourceCommit: process.env.OPERATOR_RUNTIME_SOURCE_COMMIT,
     relay: {

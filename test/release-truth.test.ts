@@ -5,7 +5,7 @@ import { validateReleaseTruthEvidence } from '../scripts/verify-release-truth.ts
 
 function fixture() {
   return {
-    runtimeManifest: { name: 'mecord-connect', version: '2.0.6' },
+    runtimeManifest: { name: 'mecord-connect', version: '2.0.7' },
     bootstrapManifest: { name: 'operator-runtime-cli', version: '1.0.0' },
     releaseState: {
       schemaVersion: 1,
@@ -27,7 +27,7 @@ function fixture() {
 
 test('release truth records the deployed production state independently from the current documentation head', () => {
   const evidence = validateReleaseTruthEvidence(fixture());
-  assert.equal(evidence.source.runtimePackageVersion, '2.0.6');
+  assert.equal(evidence.source.runtimePackageVersion, '2.0.7');
   assert.equal(evidence.production.runtimePackageVersion, '2.0.5');
   assert.equal(evidence.production.sourceCommit, RELEASE_TRUTH.production.sourceCommit);
   assert.notEqual(evidence.source.headCommit, evidence.production.sourceCommit);
@@ -53,10 +53,10 @@ test('release truth requires full immutable commit identities', () => {
 
 test('C11 release-truth identity and production URLs never use hostile object coercion', () => {
   let calls = 0;
-  const forged = { toString() { calls++; return '2.0.6'; },
-    valueOf() { calls++; return '2.0.6'; } };
+  const forged = { toString() { calls++; return '2.0.7'; },
+    valueOf() { calls++; return '2.0.7'; } };
   for (const mutate of [
-    (f: any) => { f.runtimeManifest.version = ['2.0.6']; },
+    (f: any) => { f.runtimeManifest.version = ['2.0.7']; },
     (f: any) => { f.runtimeManifest.version = forged; },
     (f: any) => { f.releaseState.production.sourceCommit = ['ef3bcdc2fcbc56b1b42f7a7a6f09ceabfc5a2bf2']; },
     (f: any) => { f.releaseState.production.publicMcp = ['https://operator.splcart.in/mcp']; },

@@ -26,5 +26,5 @@ test('C10 private capability examples cannot be mistaken for public scopes or li
   }
   assert.match(doc, /Release candidate acceptance: NOT ACCEPTED/);
   assert.match(doc, /original-device physical acceptance not established/i);
-  assert.equal(RELEASE_TRUTH.source.runtimePackageVersion, '2.0.6');
+  assert.equal(RELEASE_TRUTH.source.runtimePackageVersion, '2.0.7');
 });
