@@ -58,7 +58,8 @@ export function boundedVisiblePageText(semantic, maxLength=1600) {
     pieces.push(piece);
     remaining-=piece.length+1;
   }
-  return pieces.join(' ');
+  const result=pieces.join(' ');
+  return result || (typeof semantic.textExcerpt==='string' ? semantic.textExcerpt.slice(0,Math.min(1600,Math.max(0,Math.floor(maxLength)))) : '');
 }
 
 

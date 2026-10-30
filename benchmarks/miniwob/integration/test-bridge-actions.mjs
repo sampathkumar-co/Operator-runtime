@@ -63,3 +63,8 @@ test('validated pre-dispatch rejections are explicitly side-effect-free',()=>{
  assert.equal(result.executionPhase,'pre_dispatch');
  assert.match(result.error,/REF_NOT_FROM_FRESH_INSPECTION/);
 });
+
+test('provider textExcerpt fallback remains available when visibleText is empty',()=>{
+ assert.equal(boundedVisiblePageText({visibleText:[],textExcerpt:'Fallback instructions'}),'Fallback instructions');
+ assert.equal(boundedVisiblePageText({visibleText:[{text:'Preferred'}],textExcerpt:'Fallback'}),'Preferred');
+});

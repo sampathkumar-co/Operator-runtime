@@ -44,6 +44,7 @@ import browsergym.miniwob
 from mecord_observation import observed_mecord_candidates,verified_action,MecordObservationError
 from integration.budget_ledger import BudgetLedger
 from integration.bridge_protocol import parse_bridge_http_rejection
+from integration.model_failures import safe_meta_http_error,is_campaign_blocking_meta_failure
 from playwright.sync_api._generated import BrowserType
 
 # Isolated process-only shim: BrowserGym supplies launch args itself, and also
@@ -162,7 +163,7 @@ def request_model(prompt, *, output_limit=None, screenshot=None):
     try:
         with urllib.request.urlopen(req,timeout=55) as response:data=json.load(response)
     except urllib.error.HTTPError as exc:
-        raise RuntimeError("META_HTTP_"+str(exc.code)) from None
+        raise RuntimeError(safe_meta_http_error(exc.code,exc.read(4096))) from None
     u=data.get("usage") or {}
     ti=int(u.get("prompt_tokens") or 0);to=int(u.get("completion_tokens") or 0)
     in_tokens+=ti;out_tokens+=to;api_calls+=1
@@ -387,6 +388,10 @@ try:
                     outcome["trace"][-1]["failure"] = outcome["error"]
                 if isinstance(exc,(urllib.error.URLError,TimeoutError,ConnectionError)):
                     campaign_stop = "META_TRANSPORT_UNCERTAIN"
+                    outcome["reward"] = None
+                    outcome["unscored"] = True
+                if is_campaign_blocking_meta_failure(str(exc)):
+                    campaign_stop = "META_PROVIDER_REJECTED_OR_UNAVAILABLE"
                     outcome["reward"] = None
                     outcome["unscored"] = True
                 if str(exc).startswith("LOCAL_BRIDGE_TRANSPORT_"):
