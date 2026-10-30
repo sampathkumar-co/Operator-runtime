@@ -111,7 +111,7 @@ const svr=http.createServer(async(req,res)=>{
       throw Error('DIALOG_OBSERVATION_UNAUTHORIZED');
     inspectState={targetId,dialogRef:dialog.ref,dialogType:dialog.type};
     res.end(JSON.stringify({ok:true,provider:out.provider,durationMs:out.durationMs,
-      dialog:{ref:dialog.ref,type:dialog.type},
+      dialog:{ref:dialog.ref,type:dialog.type},nativeGesturesEnabled:runtimePin.nativeGesturesEnabled,
       page:{semantic:{observationGeneration:'dialog-1',controls:[],visuals:[]}}}));
     return;
    }
