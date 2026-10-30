@@ -47,7 +47,8 @@ from integration.budget_ledger import BudgetLedger, require_budget_feasibility
 from integration.inspection_paging import next_page_offsets
 from integration.outcome_scoring import score_terminal_if_unstepped
 from integration.bridge_protocol import parse_bridge_http_rejection
-from integration.model_failures import safe_meta_http_error,is_campaign_blocking_meta_failure,is_campaign_blocking_execution_failure
+from integration.model_failures import safe_meta_http_error,classify_episode_failure
+from integration.api_accounting import checked_reported_usage
 from playwright.sync_api._generated import BrowserType
 
 # Isolated process-only shim: BrowserGym supplies launch args itself, and also
@@ -77,13 +78,19 @@ indices = (list(range(125)) if args.limit == 125 else
            [round(i * 124 / (args.limit - 1)) for i in range(args.limit)] if args.limit > 1 else [0])
 # Hash the GLOBAL campaign first, before sharding. Every worker then reports
 # the same immutable roster digest; worker-specific partitions are recorded too.
-full_campaign_plan = [(i, all_tasks[index]) for i, index in enumerate(indices)]
-global_plan_sha256 = sha256(json.dumps(full_campaign_plan,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
-task_plan = [row for row in full_campaign_plan if row[0] % args.workers == args.worker]
-if args.task_id:
+# Single-task diagnostics have a separate, non-qualifying plan, never
+# an out-of-range index within a frozen 20/50/125-task campaign.
+task_debug = args.task_id is not None
+if task_debug:
     if args.task_id not in all_tasks:
         raise RuntimeError("TASK_ID_NOT_IN_FROZEN_BROWSERGYM_ROSTER")
-    task_plan = [(all_tasks.index(args.task_id), args.task_id)]
+    if args.workers != 1 or args.worker != 0 or args.start_at != 0 or args.count is not None:
+        raise RuntimeError("SINGLE_TASK_DEBUG_MUST_BE_UNSHARDED")
+    full_campaign_plan = [(0,args.task_id)]
+else:
+    full_campaign_plan = [(i, all_tasks[index]) for i,index in enumerate(indices)]
+global_plan_sha256 = sha256(json.dumps(full_campaign_plan,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
+task_plan = [row for row in full_campaign_plan if row[0] % args.workers == args.worker]
 frozen_plan_sha256=sha256(json.dumps(task_plan,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
 if type(args.start_at) is not int or not 0 <= args.start_at < len(task_plan):
     raise RuntimeError("INVALID_CAMPAIGN_OFFSET")
@@ -112,6 +119,7 @@ harness_files = [
     Path(__file__).with_name("runtime_pin.mjs"),
     Path(__file__).with_name("inspection_paging.py"),
     Path(__file__).with_name("outcome_scoring.py"),
+    Path(__file__).with_name("api_accounting.py"),
 ]
 if not all(p.is_file() for p in harness_files):
     raise RuntimeError("BENCHMARK_HARNESS_FILE_MISSING")
@@ -204,12 +212,14 @@ def request_model(prompt, *, output_limit=None, screenshot=None):
         with urllib.request.urlopen(req,timeout=55) as response:data=json.load(response)
     except urllib.error.HTTPError as exc:
         raise RuntimeError(safe_meta_http_error(exc.code,exc.read(4096))) from None
-    u=data.get("usage") or {}
-    ti=int(u.get("prompt_tokens") or 0);to=int(u.get("completion_tokens") or 0)
-    in_tokens+=ti;out_tokens+=to;api_calls+=1
-    if ti<=0 or to<0:
-        raise RuntimeError("MODEL_USAGE_MISSING")
-    cost+=(ti*.10+to*.20)/1e6
+    # The API request may already be charged even if its response is invalid.
+    # Do not issue another call unless exact integer usage is available and
+    # its estimated charge fits within the preceding reservation.
+    api_calls+=1
+    checked=checked_reported_usage(data.get("usage"),reservation_usd=reserve)
+    ti=checked["prompt_tokens"];to=checked["completion_tokens"]
+    in_tokens+=ti;out_tokens+=to
+    cost+=checked["estimated_usage_usd"]
     choices=data.get("choices") or []
     if not choices:return {}, "incomplete"
     choice=choices[0]
@@ -292,7 +302,9 @@ try:
                          "runtime_version":runtime_manifest_info.get("version"),
                          "runtime_source_commit":runtime_manifest_info.get("sourceCommit"),
                          "native_gestures_enabled":None,
-                         "worker":args.worker,"workers":args.workers}
+                         "worker":args.worker,"workers":args.workers,
+                         "task_debug":task_debug,"failure_kind":None,
+                         "model_usage_estimate_usd":0.0}
             env = None
             try:
                 env = gym.make(task_id, headless=True)
@@ -454,26 +466,14 @@ try:
                     if done or truncated: break
             except Exception as exc:
                 outcome["error"] = type(exc).__name__ + ":" + str(exc)[:100]
+                kind,unscored,stop=classify_episode_failure(exc)
+                outcome["failure_kind"]=kind
                 if outcome["trace"]:
                     outcome["trace"][-1]["failure"] = outcome["error"]
-                if isinstance(exc,(urllib.error.URLError,TimeoutError,ConnectionError)):
-                    campaign_stop = "META_TRANSPORT_UNCERTAIN"
-                    outcome["reward"] = None
-                    outcome["unscored"] = True
-                if is_campaign_blocking_meta_failure(str(exc)):
-                    campaign_stop = "META_PROVIDER_REJECTED_OR_UNAVAILABLE"
-                    outcome["reward"] = None
-                    outcome["unscored"] = True
-                if is_campaign_blocking_execution_failure(str(exc)):
-                    campaign_stop = "MECORD_PROVIDER_OR_OBSERVATION_UNCERTAIN"
-                    outcome["reward"] = None
-                    outcome["unscored"] = True
-                if str(exc) in {"BUDGET_CAP_REACHED","MODEL_USAGE_MISSING"} or str(exc).startswith(("META_HTTP_429","META_HTTP_503","META_HTTP_504")):
-                    campaign_stop = "API_BUDGET_OR_PROVIDER_STOP"
-                    # No independently scored task result is inferred when
-                    # the call never ran or token accounting is inconclusive.
-                    outcome["reward"] = None
-                    outcome["unscored"] = True
+                if unscored:
+                    campaign_stop=stop
+                    outcome["reward"]=None
+                    outcome["unscored"]=True
             finally:
                 if env:
                     if outcome.get("unscored") is not True and outcome.get("steps")==0:
@@ -486,9 +486,16 @@ try:
                             outcome["trace"].append({"terminal_scorer_error":"BROWSERGYM_TERMINAL_REWARD_UNAVAILABLE"})
                     try:env.close()
                     except:pass
+            outcome["model_usage_estimate_usd"]=round(cost,7)
             outcome["elapsed_sec"] = round(time.perf_counter() - start, 2)
             outcome["cumulative_cost_usd"] = round(cost, 7)
             outcome["api_calls_cumulative"] = api_calls
+            # A task diagnostic or an error without an independent failure
+            # reward can never be silently counted as a valid success.
+            if outcome.get("error") and outcome.get("reward")==1:
+                outcome["reward"]=None
+                outcome["unscored"]=True
+                campaign_stop=campaign_stop or "ERROR_WITH_UNEXPECTED_SUCCESS"
             if outcome.get("unscored") is True or outcome["reward"] is None:
                 unscored_episodes += 1
             elif outcome["reward"] == 1.0:
@@ -509,6 +516,7 @@ try:
         "runtime_version":runtime_manifest_info.get("version"),
         "runtime_source_commit":runtime_manifest_info.get("sourceCommit"),
         "start_at":args.start_at,"count":len(task_plan),"campaign_tag":args.campaign_tag,
+        "task_debug":task_debug,"qualification_eligible":not task_debug,
         "scored":scored_successes+scored_failures,
         "successes":scored_successes,"failures":scored_failures,
         "unscored":unscored_episodes,
@@ -516,7 +524,7 @@ try:
             if scored_successes+scored_failures else None),
         "status":"COMPLETE" if not campaign_stop and attempted_count==len(task_plan) and unscored_episodes==0 else "PARTIAL",
         "full_50_task_70_percent_gate":("PASS" if scored_successes>=35 else "FAIL")
-            if args.limit==50 and args.workers==1 and args.count is None and args.start_at==0
+            if not task_debug and args.limit==50 and args.workers==1 and args.count is None and args.start_at==0
             and attempted_count==50 and unscored_episodes==0 and not campaign_stop else "NOT_RUN",
         "campaign_stop":campaign_stop,
         "api_calls":api_calls,
