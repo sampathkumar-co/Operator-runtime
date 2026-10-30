@@ -1,5 +1,5 @@
 import { OperatorError } from '../core/errors.ts';
-import { dispatchHeldPointerStroke } from './browser-cdp-held-pointer.ts';
+import { dispatchHeldPointerStroke, dispatchNativeClickSequence, mouseSignalForDispatch } from './browser-cdp-held-pointer.ts';
 import type { CdpConnection, JsonMap } from './browser-cdp-connection.ts';
 import { browserDomContractFunction, dateSelectFunction, interactionFunction, semanticSnapshotFunction, unwrapRuntimeValue, type BrowserObservationOptions } from './browser-cdp-page.ts';
 
@@ -766,8 +766,8 @@ export async function performSemanticInteraction(
         throw new OperatorError('BROWSER_RESIZE_NOT_ACTIONABLE', 'Resize handle geometry is invalid.', { retryable: true });
       }
       const dispatch = (params: JsonMap, cleanup = false) => chosen.frame
-        ? (providerDispatchStarted = true, session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, cleanup ? undefined : signal))
-        : (providerDispatchStarted = true, session.send('Input.dispatchMouseEvent', params, 8_000, cleanup ? undefined : signal));
+        ? (providerDispatchStarted = true, session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, mouseSignalForDispatch(signal, cleanup)))
+        : (providerDispatchStarted = true, session.send('Input.dispatchMouseEvent', params, 8_000, mouseSignalForDispatch(signal, cleanup)));
       await dispatch({ type: 'mouseMoved', x: startX, y: startY, button: 'none', buttons: 0 });
       await dispatch({ type: 'mousePressed', x: startX, y: startY, button: 'left', buttons: 1, clickCount: 1 });
       const steps = Math.max(4, Math.min(20, Math.ceil(Math.hypot(dx, dy) / 20)));
@@ -1034,22 +1034,18 @@ export async function performSemanticInteraction(
       } else if (['click','click_relative','double_click','shift_click'].includes(input.operation)) {
         const clickCount=input.operation==='double_click'?2:1;
         const modifiers=input.operation==='shift_click'?8:0;
-        await dispatch({type:'mouseMoved',x,y,button:'none',buttons:0,modifiers});
-        for(let count=1;count<=clickCount;count+=1){
-          await dispatch({type:'mousePressed',x,y,button:'left',buttons:1,clickCount:count,modifiers});
-          await dispatch({type:'mouseReleased',x,y,button:'left',buttons:0,clickCount:count,modifiers});
-        }
+        await dispatchNativeClickSequence(x,y,clickCount,modifiers,dispatch);
       } else {
         const targetX = dragDestination ? dragDestination.x : x + Number(input.deltaX);
         const targetY = dragDestination ? dragDestination.y : y + Number(input.deltaY);
         const deltaX = targetX - x; const deltaY = targetY - y;
-        await dispatch({ type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
-        await dispatch({ type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
         const steps = Math.max(4, Math.min(20, Math.ceil(Math.hypot(deltaX, deltaY) / 20)));
-        for (let step = 1; step <= steps; step += 1) {
-          await dispatch({ type: 'mouseMoved', x: x + deltaX * step / steps, y: y + deltaY * step / steps, button: 'left', buttons: 1 });
-        }
-        await dispatch({ type: 'mouseReleased', x: targetX, y: targetY, button: 'left', buttons: 0, clickCount: 1 });
+        const interpolatedPath = Array.from({ length: steps + 1 }, (_, step) => ({
+          x: x + deltaX * step / steps, y: y + deltaY * step / steps
+        }));
+        // Generic drag, resize and drag-between share the same no-stuck-button
+        // finally cleanup as native drawing paths.
+        await dispatchHeldPointerStroke(interpolatedPath, dispatch);
       }
       return {
         value: { ok: true, matched: second, ...(dragDestination ? { destination: dragDestination.sample } : {}), after: { nativeInputDispatched: true } },
