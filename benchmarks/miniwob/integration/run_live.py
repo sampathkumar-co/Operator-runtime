@@ -50,6 +50,7 @@ from integration.bridge_protocol import parse_bridge_http_rejection
 from integration.model_failures import safe_meta_http_error,classify_episode_failure
 from integration.api_accounting import checked_reported_usage
 from integration.campaign_plan import plan_tasks
+from integration.checkpoint_integrity import seal_row,ZERO_DIGEST
 from playwright.sync_api._generated import BrowserType
 
 # Isolated process-only shim: BrowserGym supplies launch args itself, and also
@@ -114,6 +115,7 @@ harness_files = [
     Path(__file__).with_name("outcome_scoring.py"),
     Path(__file__).with_name("api_accounting.py"),
     Path(__file__).with_name("campaign_plan.py"),
+    Path(__file__).with_name("checkpoint_integrity.py"),
 ]
 if not all(p.is_file() for p in harness_files):
     raise RuntimeError("BENCHMARK_HARNESS_FILE_MISSING")
@@ -283,6 +285,7 @@ try:
     scored_failures = 0
     unscored_episodes = 0
     with output_path.open("x", encoding="utf8") as log:
+        previous_record_sha256=ZERO_DIGEST
         for original_index, task_id in task_plan:
             attempted_count += 1
             start = time.perf_counter()
@@ -496,6 +499,8 @@ try:
                 scored_successes += 1
             else:
                 scored_failures += 1
+            outcome=seal_row(outcome,previous_record_sha256)
+            previous_record_sha256=outcome["record_sha256"]
             log.write(json.dumps(outcome, ensure_ascii=True) + "\n")
             log.flush()
             print("META_MECORD_EPISODE=" + json.dumps(outcome), flush=True)
