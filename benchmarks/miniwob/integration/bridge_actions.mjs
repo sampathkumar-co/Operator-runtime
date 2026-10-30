@@ -86,7 +86,7 @@ export function boundedGesturePath(value) {
   const pieces=value.split(';');
   if(pieces.length<2||pieces.length>24)throw Error('INVALID_GESTURE_PATH');
   const path=pieces.map(piece=>{
-    if(!/^(?:0\\.[0-9]{1,2}|1(?:\\.00?)?):(?:0\\.[0-9]{1,2}|1(?:\\.00?)?)$/.test(piece))
+    if(!/^(?:0\.[0-9]{1,2}|1(?:\.00?)?):(?:0\.[0-9]{1,2}|1(?:\.00?)?)$/.test(piece))
       throw Error('INVALID_GESTURE_PATH');
     const [xRatio,yRatio]=piece.split(':').map(Number);
     if(xRatio<0.01||xRatio>0.99||yRatio<0.01||yRatio>0.99)
