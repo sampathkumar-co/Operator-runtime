@@ -18,7 +18,7 @@ export function verifyIsolatedRuntimePin(manifest,manifestBytes,env={}){
   const version=env.MECORD_MINIWOB_EXPECTED_RUNTIME_VERSION;
   const commit=env.MECORD_MINIWOB_EXPECTED_RUNTIME_COMMIT;
   const digest=env.MECORD_MINIWOB_EXPECTED_MANIFEST_SHA256;
-  if(!/^2\\.0\\.7-rc\\.(?:[7-9]|[1-9][0-9]+)$/.test(version||'')||
+  if(!/^2\.0\.7-rc\.(?:[7-9]|[1-9][0-9]+)$/.test(version||'')||
      !/^[0-9a-f]{40}$/.test(commit||'')||commit===LEGACY_COMMIT||
      !/^[0-9a-f]{64}$/.test(digest||'')||!Buffer.isBuffer(manifestBytes)||
      createHash('sha256').update(manifestBytes).digest('hex')!==digest||
