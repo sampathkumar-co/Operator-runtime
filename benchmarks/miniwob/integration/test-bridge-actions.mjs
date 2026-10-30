@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,relativePointForLabel,boundedRelativePoint,boundedVisiblePageText,validatedDialogPrompt} from './bridge_actions.mjs';
+import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,relativePointForLabel,boundedRelativePoint,boundedVisiblePageText,validatedDialogPrompt,preDispatchRejection} from './bridge_actions.mjs';
 
 test('text fill uses provider type; slider retains set_value',()=>{
  assert.equal(providerOperationForInput('set_value','textbox'),'type');
@@ -54,4 +54,12 @@ test('dialog prompt rejects NUL and oversized values before dispatch',()=>{
  assert.equal(validatedDialogPrompt('hello'),'hello');
  for(const value of ['x'.repeat(401),'bad\0value',null,10])
   assert.throws(()=>validatedDialogPrompt(value),/DIALOG_PROMPT_INVALID/);
+});
+
+test('validated pre-dispatch rejections are explicitly side-effect-free',()=>{
+ const result=preDispatchRejection('REF_NOT_FROM_FRESH_INSPECTION');
+ assert.equal(result.ok,false);
+ assert.equal(result.sideEffectState,'none');
+ assert.equal(result.executionPhase,'pre_dispatch');
+ assert.match(result.error,/REF_NOT_FROM_FRESH_INSPECTION/);
 });

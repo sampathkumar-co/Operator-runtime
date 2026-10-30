@@ -43,6 +43,7 @@ import gymnasium as gym
 import browsergym.miniwob
 from mecord_observation import observed_mecord_candidates,verified_action,MecordObservationError
 from integration.budget_ledger import BudgetLedger
+from integration.bridge_protocol import parse_bridge_http_rejection
 from playwright.sync_api._generated import BrowserType
 
 # Isolated process-only shim: BrowserGym supplies launch args itself, and also
@@ -218,10 +219,8 @@ def bridge_call(port, payload):
             detail=json.loads(exc.read(1024).decode("utf8","replace"))
         except (ValueError,UnicodeDecodeError):
             detail={}
-        reason=detail.get("error") if isinstance(detail,dict) else None
-        # Never turn an execution rejection into an accepted browser action.
-        return {"ok":False,"provider":None,
-                "error":("BRIDGE_HTTP_"+str(exc.code)+"_"+str(reason or "UNKNOWN"))[:110]}
+        # Only an exact bridge no-effect receipt can authorize re-observation.
+        return parse_bridge_http_rejection(exc.code,detail)
     except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
         raise RuntimeError("LOCAL_BRIDGE_TRANSPORT_" + type(exc).__name__) from None
 
@@ -363,6 +362,10 @@ try:
                         # followed by a fresh observation and a NEW decision.
                         if result.get("executionPhase")=="pre_dispatch" and result.get("sideEffectState")=="none":
                             event["recovery"] = "REOBSERVE_WITHOUT_REPLAY"
+                            history.append({"op":op,"bid":bid,"value":request.get("value",""),
+                                "role":next((x["role"] for x in candidates if x["bid"]==bid),""),
+                                "error":str(result.get("error") or "VALIDATION_DENIED")[:80],
+                                "sideEffectState":"none","progress":False})
                             continue
                         raise RuntimeError("MECORD_EXECUTION_" + str(result.get("error") or "UNKNOWN")[:70])
                     selected = next(x for x in candidates if x["bid"]==bid)

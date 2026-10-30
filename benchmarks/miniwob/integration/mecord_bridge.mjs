@@ -1,7 +1,7 @@
 // Isolated, source-pinned Mecord MiniWoB bridge. No production relay or credentials.
 import http from 'node:http';import path from 'node:path';
 import {timingSafeEqual} from 'node:crypto';
-import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,boundedRelativePoint,boundedVisiblePageText,validatedDialogPrompt} from './bridge_actions.mjs';
+import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,boundedRelativePoint,boundedVisiblePageText,validatedDialogPrompt,preDispatchRejection} from './bridge_actions.mjs';
 import {captureSyntheticView,allowedSyntheticFrameUrl} from './browser_visual.mjs';
 import {pathToFileURL} from 'node:url';import {readFile} from 'node:fs/promises';
 const dir=process.env.MECORD_MINIWOB_WORKDIR ? path.resolve(process.env.MECORD_MINIWOB_WORKDIR) : null;
@@ -64,7 +64,7 @@ const project=(item,sourceGeneration='',frameTargetId='')=>({
     rx:finite(item.ellipse.rx),ry:finite(item.ellipse.ry)}:null,
    points:Array.isArray(item.viewportPoints)?item.viewportPoints.slice(0,16).map(safePoint).filter(Boolean):[]}
 });
-const error=(res,msg)=>{res.writeHead(400);res.end(JSON.stringify({ok:false,error:String(msg).slice(0,120)}));};
+const error=(res,msg,preDispatch=false)=>{res.writeHead(400);res.end(JSON.stringify(preDispatch?preDispatchRejection(msg):{ok:false,error:String(msg).slice(0,120)}));};
 async function exactTarget(){
  const response=await fetch(endpoint+'/json/list',{signal:AbortSignal.timeout(3500)});
  if(!response.ok)throw Error('CDP_DISCOVERY_UNAVAILABLE');
@@ -80,6 +80,7 @@ const svr=http.createServer(async(req,res)=>{
  if(!authorized(req.headers.authorization)){res.writeHead(403).end('{"ok":false,"error":"BRIDGE_AUTH_REQUIRED"}');return;}
  if(busy){res.writeHead(409).end('{"ok":false,"error":"BRIDGE_CONCURRENT_REQUEST"}');return;}
  busy=true;
+ let interactionDispatched=false;
  let body='';
  try{
   for await(const chunk of req){body+=chunk.toString();if(body.length>10000)throw Error('ACTION_TOO_LARGE');}
@@ -189,6 +190,7 @@ const svr=http.createServer(async(req,res)=>{
    const actionInput={targetId,operation:input.op,dialogRef:ref};
    if(input.op==='dialog_accept'&&typeof input.value==='string'&&input.value.length)
      actionInput.promptText=input.value;
+   interactionDispatched=true;
    const output=await provider.execute({id:'miniwob-dialog-'+(++sequence),
      capability:'browser.interact',risk:'external',input:actionInput,
      provenance:{kind:'runtime',source:'isolated-benchmark'}});
@@ -268,6 +270,7 @@ const svr=http.createServer(async(req,res)=>{
   inspectState=null;
   const action={id:'miniwob-action-'+(++sequence),capability:'browser.interact',risk:'external',input:actionInput,
    provenance:{kind:'runtime',source:'isolated-benchmark'}};
+  interactionDispatched=true;
   const result=await provider.execute(action);
   res.end(JSON.stringify({ok:result.ok===true,provider:result.provider,durationMs:result.durationMs,
     error:result.error?.code||null,
@@ -276,7 +279,7 @@ const svr=http.createServer(async(req,res)=>{
     stateProgress:result.output?.stateDelta?.progress===true,
     repeatedNoProgress:result.output?.stateDelta?.repeatedNoProgress||0,
     needsReobserve:true}));
- }catch(e){inspectState=null;error(res,e?.message||e);}
+ }catch(e){inspectState=null;error(res,e?.message||e,!interactionDispatched);}
  finally{busy=false;}
 });
 svr.listen(0,'127.0.0.1',()=>console.log('MECORD_BRIDGE_PORT='+svr.address().port));

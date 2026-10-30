@@ -68,3 +68,10 @@ export function validatedDialogPrompt(value) {
     throw new Error('DIALOG_PROMPT_INVALID');
   return value;
 }
+
+
+/** A validation-only rejection is proven to have no browser side effect. */
+export function preDispatchRejection(message) {
+  return {ok:false,error:String(message).slice(0,120),
+    sideEffectState:'none',executionPhase:'pre_dispatch'};
+}
