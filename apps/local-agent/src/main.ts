@@ -62,7 +62,7 @@ import { AdaptiveModalityShadowAdvisor } from '../../../src/core/adaptive-modali
 import { AdaptiveStrategyShadowAdvisor } from '../../../src/core/adaptive-strategy-shadow.ts';
 import { createLocalStateComponents } from './state-components.ts';
 import { LocalRuntimeLifecycle } from './runtime-lifecycle.ts';
-import { isOriginalAuthorityConflict } from './relay-recovery-only.ts';
+import { isProtectedRelayRecoveryRequired } from './relay-recovery-only.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -386,7 +386,7 @@ async function failRequiredRelay(error: unknown): Promise<void> {
   if (!relayRequired || lifecycle.shuttingDown) return;
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[operator] required relay failed: ${message}`);
-  if (isOriginalAuthorityConflict(relayConnectionStatus, error) && !startupEmergencyStatus.engaged) {
+  if (isProtectedRelayRecoveryRequired(relayConnectionStatus, error) && !startupEmergencyStatus.engaged) {
     // Transition BEFORE yielding: all new HTTP traffic and provider dispatch
     // become non-executable, even for valid local bearer sessions.
     originalRecoveryOnly = true;
@@ -399,8 +399,11 @@ async function failRequiredRelay(error: unknown): Promise<void> {
       stopCapabilityGovernanceRefresh()
     ]);
     if (quiesced.every((result) => result.status === 'fulfilled')) {
+      const recoveryCode = (error instanceof OperatorError && error.code === 'RELAY_RECOVERY_REQUIRED') ||
+        relayConnectionStatus.code === 'RELAY_RECOVERY_REQUIRED'
+        ? 'RELAY_RECOVERY_REQUIRED' : 'RELAY_AUTHORITY_CONFLICT_REVIEW_REQUIRED';
       relayConnectionStatus = { ...relayConnectionStatus,
-        state: 'DEGRADED', code: 'RELAY_AUTHORITY_CONFLICT_REVIEW_REQUIRED',
+        state: 'DEGRADED', code: recoveryCode,
         recoverable: false, originalRecoveryOnly: true, updatedAt: new Date().toISOString() };
       console.error('[operator] local original-device Control Center recovery-only; relay and all ordinary execution are disabled.');
       console.error('[operator] resolve only through original-device native owner confirmation. No relay ACK or mutation replay is performed.');
