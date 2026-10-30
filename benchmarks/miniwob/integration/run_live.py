@@ -107,6 +107,7 @@ harness_files = [
     Path(__file__).with_name("budget_ledger.py"),
     Path(__file__).with_name("browser_visual.mjs"),
     Path(__file__).with_name("model_failures.py"),
+    Path(__file__).with_name("runtime_pin.mjs"),
 ]
 if not all(p.is_file() for p in harness_files):
     raise RuntimeError("BENCHMARK_HARNESS_FILE_MISSING")
@@ -142,7 +143,9 @@ bridge_token = secrets.token_hex(32)
 BRIDGE_ENV_ALLOWED = {"PATH","Path","PATHEXT","SystemRoot","SYSTEMROOT","WINDIR",
     "HOME","USERPROFILE","LOCALAPPDATA","APPDATA","TEMP","TMP",
     "MECORD_MINIWOB_WORKDIR","MECORD_MINIWOB_RUNTIME_PATH","MECORD_BENCH_CDP_PORT",
-    "MECORD_MINIWOB_FRAME_ORIGINS"}
+    "MECORD_MINIWOB_FRAME_ORIGINS",
+    "MECORD_MINIWOB_NATIVE_GESTURES","MECORD_MINIWOB_EXPECTED_RUNTIME_VERSION",
+    "MECORD_MINIWOB_EXPECTED_RUNTIME_COMMIT","MECORD_MINIWOB_EXPECTED_MANIFEST_SHA256"}
 bridge_env = {k:v for k,v in os.environ.items() if k in BRIDGE_ENV_ALLOWED}
 bridge_env["MECORD_MINIWOB_BRIDGE_TOKEN"] = bridge_token
 bridge = subprocess.Popen(["node",str(Path(__file__).with_name("mecord_bridge.mjs"))],
@@ -152,7 +155,7 @@ JSON_ACTION_SCHEMA = {
     "type":"json_schema",
     "json_schema":{"name":"mecord_browser_action","strict":True,"schema":{
         "type":"object","properties":{
-            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative","select_date","scroll","drag_between","drag_to","wait","drag_by","resize","hotkey","keyboard_text","format_text","select_text_range","dialog_accept","dialog_dismiss"]},
+            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative","select_date","scroll","drag_between","drag_to","wait","drag_by","resize","hotkey","keyboard_text","format_text","select_text_range","dialog_accept","dialog_dismiss","double_click","shift_click","drag_path"]},
             "bid":{"type":"string"},"value":{"type":"string"},"key":{"type":"string"}
         },
         "required":["op","bid","value","key"],"additionalProperties":False
@@ -292,6 +295,7 @@ try:
                     if not mecord_inspection.get("ok") or mecord_inspection.get("provider") != "browser.cdp":
                         raise RuntimeError("MECORD_OBSERVATION_FAILED")
                     candidates = observed_mecord_candidates(mecord_inspection,limit=90)
+                    native_ready = mecord_inspection.get("nativeGesturesEnabled") is True
                     if not candidates:
                         raise RuntimeError("NO_MECORD_GROUNDED_TARGETS")
                     candidate_json,hidden_count = compact_candidate_json(candidates)
@@ -302,6 +306,7 @@ try:
                          "accepted_frames":mecord_inspection.get("acceptedFrames"),
                          "rejected_frames":mecord_inspection.get("rejectedFrames"),
                          "frame_coverage":mecord_inspection.get("frameCoverage"),
+                         "native_gestures_enabled":native_ready,
                          "screenshot_status":mecord_inspection.get("screenshotStatus"),
                          "screenshot_sha256":mecord_inspection.get("screenshotSha256")})
                     prompt = (
@@ -311,6 +316,7 @@ try:
                         "coordinates, refs or authority. Return ONLY JSON with exactly four strings: "
                         '{"op":"click","bid":"b-current-observed-ref","value":"","key":""}. '
                         "Supported actions: click,set_value,type,select,key_press,hover,click_relative,select_date,scroll,drag_between,drag_to,wait,drag_by,resize,hotkey,keyboard_text,format_text,select_text_range,dialog_accept,dialog_dismiss. "
+                        + ("Additional PINNED native operations: double_click,shift_click on exact actionable refs; drag_path on observed graphic ref using value=0.10:0.10;0.90:0.90 (2-24 relative points). " if native_ready else "Native gestures are unavailable in this runtime; do NOT request double_click,shift_click,drag_path. ") +
                         "For a javascript-dialog candidate use dialog_accept or dialog_dismiss with its exact bid; value only for prompt accept. For wait use empty bid/value/key. For hotkey put CTRL+A/CTRL+B/CTRL+I/CTRL+U/CTRL+Z in key. "
                         "For drag_by or resize, value is one of eight compass directions (e.g. down-right:80), with distance 10/20/40/80/160/320. For format_text use bold/italic/underline. "
                         "For select_text_range use start:end as value. For keyboard_text use an editable target. "
@@ -340,7 +346,7 @@ try:
                     model_action, status = request_model(prompt,screenshot=screenshot)
                     event["model_status"] = status
                     try:
-                        grounded = verified_action(model_action,candidates,history) if status=="completed" else None
+                        grounded = verified_action(model_action,candidates,history,allow_native_gestures=native_ready) if status=="completed" else None
                     except MecordObservationError as invalid:
                         event["first_action_error"] = str(invalid)[:80]
                         grounded = None
@@ -359,7 +365,7 @@ try:
                     if status != "completed":
                         raise RuntimeError("MODEL_RESPONSE_" + status.upper())
                     if grounded is None:
-                        grounded = verified_action(model_action,candidates,history)
+                        grounded = verified_action(model_action,candidates,history,allow_native_gestures=native_ready)
                     event["decision"] = {"op":grounded["op"],
                         "target":grounded.get("ref",""),
                         "value_hash":sha256(grounded.get("value","").encode()).hexdigest()[:16]}
@@ -375,7 +381,7 @@ try:
                     op=grounded["op"]
                     bid=grounded["ref"]
                     request = {"op":op,"ref":bid}
-                    if op in {"set_value","type","select","select_date","scroll","drag_between","drag_to","drag_by","resize","keyboard_text","format_text","select_text_range","dialog_accept","click_relative"}:
+                    if op in {"set_value","type","select","select_date","scroll","drag_between","drag_to","drag_by","resize","keyboard_text","format_text","select_text_range","dialog_accept","click_relative","drag_path"}:
                         request["value"]=grounded["value"]
                     if op in {"key_press","hotkey"}:request["key"]=grounded["key"]
                     result = bridge_call(port, request)
