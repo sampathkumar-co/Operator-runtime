@@ -45,6 +45,7 @@ def aggregate(paths, expected, seed, workers, *, roster, harness_sha256, runtime
     seen={}
     seen_files=set()
     visions=set()
+    native_modes=set()
     step_limits=set()
     observed_workers=set()
     for supplied in paths:
@@ -78,6 +79,9 @@ def aggregate(paths, expected, seed, workers, *, roster, harness_sha256, runtime
             if type(row.get("vision_enabled")) is not bool:
                 raise CampaignError("VISION_PROVENANCE_MISSING")
             visions.add(row["vision_enabled"])
+            if type(row.get("native_gestures_enabled")) is not bool:
+                raise CampaignError("NATIVE_CAPABILITY_PROVENANCE_MISSING")
+            native_modes.add(row["native_gestures_enabled"])
             if type(row.get("step_limit")) is not int or not 1<=row["step_limit"]<=10:
                 raise CampaignError("STEP_LIMIT_INVALID")
             step_limits.add(row["step_limit"])
@@ -92,7 +96,7 @@ def aggregate(paths, expected, seed, workers, *, roster, harness_sha256, runtime
             local_indexes.append(index)
         if local_indexes!=sorted(local_indexes):
             raise CampaignError("CHECKPOINT_ORDER_INVALID")
-    if len(visions)!=1 or len(step_limits)!=1:
+    if len(visions)!=1 or len(step_limits)!=1 or len(native_modes)!=1:
         raise CampaignError("MIXED_TEST_CONDITIONS")
     present=len(seen)
     unscored=sum(r.get("unscored") is True for r in seen.values())
@@ -103,7 +107,8 @@ def aggregate(paths, expected, seed, workers, *, roster, harness_sha256, runtime
     return {"expected":expected,"seed":seed,"workers":workers,
             "frozen_manifest_sha256":manifest,"harness_sha256":harness_sha256,
             "runtime_manifest_sha256":runtime_manifest_sha256,
-            "vision_enabled":next(iter(visions)),"step_limit":next(iter(step_limits)),
+            "vision_enabled":next(iter(visions)),"native_gestures_enabled":next(iter(native_modes)),
+            "step_limit":next(iter(step_limits)),
             "attempted":present,"scored":scored,"successes":successful,
             "failures":scored-successful,"unscored":unscored,"missing":len(missing),
             "first_missing_indexes":missing[:25],
