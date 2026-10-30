@@ -16,3 +16,23 @@ This folder contains **only** the side-effect-free, model-agnostic controller ex
 This is a *source-contracted candidate*, not a completed benchmark controller, browser action runtime, or proof of benchmark success. MiniWoB evaluation still requires a separately authorized disposable environment, a model budget/consent policy, exact BrowserGym scorer/version, source-matched Mecord provider and independent held-out runs.
 
 No model API key is read or sent. Do not treat model suggestions as direct production authority or infer any improvement to the earlier MiniWoB score from these unit tests. We intentionally leave out the legacy runner, BrowserGym site-packages patcher, native bridge, original host paths, historical model prices and scores. Integrate a new source-pinned, consented, bounded evaluation adapter only after the C01 runner and scorer contract is independently accepted.
+
+## Opt-in RC6 integration prototype (separate from product runtime)
+
+The separately contained `integration/` folder now contains a **strictly
+opt-in synthetic benchmark harness**. Unlike the source-only modules above,
+its Python runner can call a model provider and an isolated local Chrome
+instance when an authorized operator explicitly supplies all required
+environment variables and a per-run budget. It does not run during tests,
+normal Mecord startup, npm installation, or production releases.
+
+`mecord_observation.py` remains pure and unit-testable. The executable bridge
+must also enforce observed generation-bound Mecord refs; the model never
+receives a direct arbitrary CSS/coordinate execution API. For model credentials,
+pinned checkout, source identity and cost warnings see
+[`integration/README.md`](integration/README.md).
+
+The harness is **experimental**, not a release acceptance, and it may leave
+some visual MiniWoB tasks unsolved if the provider cannot prove a safe
+actionable target. The main controller must not silently infer click targets
+or replay potentially uncertain browser actions.
