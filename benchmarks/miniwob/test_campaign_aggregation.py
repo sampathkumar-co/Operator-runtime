@@ -65,7 +65,7 @@ class CampaignAggregation(unittest.TestCase):
      records[0]["unscored"]=True
      records[0]["reward"]=None
      paths[0].write_text("".join(json.dumps(x)+"\n" for x in records))
-     out=aggregate(paths,8,42,4)
+     out=self.score(paths)
      self.assertEqual(out["unscored"],1)
      self.assertEqual(out["status"],"PARTIAL")
      self.assertIsNone(out["full_score"])
