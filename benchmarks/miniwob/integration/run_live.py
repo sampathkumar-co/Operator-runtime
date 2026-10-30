@@ -113,6 +113,13 @@ harness_files = [
 ]
 if not all(p.is_file() for p in harness_files):
     raise RuntimeError("BENCHMARK_HARNESS_FILE_MISSING")
+runtime_manifest_path=Path(os.environ["MECORD_MINIWOB_RUNTIME_PATH"]).resolve() / "runtime" / "runtime-manifest.json"
+runtime_manifest_bytes=runtime_manifest_path.read_bytes()
+runtime_manifest_sha256=sha256(runtime_manifest_bytes).hexdigest()
+runtime_manifest_info=json.loads(runtime_manifest_bytes)
+if type(runtime_manifest_info) is not dict:
+    raise RuntimeError("RUNTIME_MANIFEST_INVALID")
+
 harness_sha256 = sha256(json.dumps(
     [(p.name,sha256(p.read_bytes()).hexdigest()) for p in harness_files],
     separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
@@ -279,6 +286,9 @@ try:
                         "trace":[], "step_limit":args.max_steps, "frozen_plan_sha256":frozen_plan_sha256,
                         "global_campaign_sha256":global_plan_sha256,"harness_sha256":harness_sha256,
                         "source_commit":source_commit,"vision_enabled":args.vision,
+                         "runtime_manifest_sha256":runtime_manifest_sha256,
+                         "runtime_version":runtime_manifest_info.get("version"),
+                         "runtime_source_commit":runtime_manifest_info.get("sourceCommit"),
                          "worker":args.worker,"workers":args.workers}
             env = None
             try:
@@ -481,6 +491,9 @@ try:
         "frozen_plan_sha256":frozen_plan_sha256,
         "global_campaign_sha256":global_plan_sha256,
         "harness_sha256":harness_sha256,"source_commit":source_commit,
+        "runtime_manifest_sha256":runtime_manifest_sha256,
+        "runtime_version":runtime_manifest_info.get("version"),
+        "runtime_source_commit":runtime_manifest_info.get("sourceCommit"),
         "start_at":args.start_at,"count":len(task_plan),"campaign_tag":args.campaign_tag,
         "scored":scored_successes+scored_failures,
         "successes":scored_successes,"failures":scored_failures,
