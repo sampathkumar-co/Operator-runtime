@@ -28,7 +28,7 @@ def frozen_plan(roster,expected):
 def digest_plan(plan):
     return sha256(json.dumps(plan,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
 
-def aggregate(paths, expected, seed, workers, *, roster, harness_sha256):
+def aggregate(paths, expected, seed, workers, *, roster, harness_sha256, runtime_manifest_sha256):
     if type(workers) is not int or not 1<=workers<=4:
         raise CampaignError("WORKER_COUNT_INVALID")
     if type(seed) is not int or not 0<=seed<=2**32-1:
@@ -36,6 +36,9 @@ def aggregate(paths, expected, seed, workers, *, roster, harness_sha256):
     if type(harness_sha256) is not str or len(harness_sha256)!=64 or any(
             c not in "0123456789abcdef" for c in harness_sha256):
         raise CampaignError("HARNESS_DIGEST_REQUIRED")
+    if type(runtime_manifest_sha256) is not str or len(runtime_manifest_sha256)!=64 or any(
+            c not in "0123456789abcdef" for c in runtime_manifest_sha256):
+        raise CampaignError("RUNTIME_MANIFEST_DIGEST_REQUIRED")
     plan=frozen_plan(roster,expected)
     manifest=digest_plan(plan)
     if not paths:raise CampaignError("NO_CHECKPOINT_FILES")
@@ -68,6 +71,8 @@ def aggregate(paths, expected, seed, workers, *, roster, harness_sha256):
                 raise CampaignError("SEED_OR_MANIFEST_MISMATCH")
             if row.get("harness_sha256")!=harness_sha256 or row.get("source_commit")!=SOURCE_SHA:
                 raise CampaignError("HARNESS_OR_SOURCE_REVISION_MISMATCH")
+            if row.get("runtime_manifest_sha256")!=runtime_manifest_sha256:
+                raise CampaignError("RUNTIME_MANIFEST_MISMATCH")
             if row.get("agent")!=MODEL or row.get("executor")!=EXECUTOR:
                 raise CampaignError("MODEL_OR_EXECUTOR_MISMATCH")
             if type(row.get("vision_enabled")) is not bool:
@@ -97,6 +102,7 @@ def aggregate(paths, expected, seed, workers, *, roster, harness_sha256):
     missing=[i for i in range(expected) if i not in seen]
     return {"expected":expected,"seed":seed,"workers":workers,
             "frozen_manifest_sha256":manifest,"harness_sha256":harness_sha256,
+            "runtime_manifest_sha256":runtime_manifest_sha256,
             "vision_enabled":next(iter(visions)),"step_limit":next(iter(step_limits)),
             "attempted":present,"scored":scored,"successes":successful,
             "failures":scored-successful,"unscored":unscored,"missing":len(missing),
@@ -115,6 +121,7 @@ def main():
     p.add_argument("--seed",type=int,default=42)
     p.add_argument("--workers",type=int,default=1)
     p.add_argument("--harness-sha256",required=True)
+    p.add_argument("--runtime-manifest-sha256",required=True)
     args=p.parse_args()
     import gymnasium as gym
     import browsergym.miniwob
@@ -131,6 +138,7 @@ def main():
         raise CampaignError("MINIWOB_SOURCE_REVISION_MISMATCH")
     roster=sorted(str(x) for x in gym.envs.registry if str(x).startswith("browsergym/miniwob."))
     print(json.dumps(aggregate(args.paths,args.expected,args.seed,args.workers,
-        roster=roster,harness_sha256=args.harness_sha256),sort_keys=True))
+        roster=roster,harness_sha256=args.harness_sha256,
+        runtime_manifest_sha256=args.runtime_manifest_sha256),sort_keys=True))
 
 if __name__=="__main__":main()
