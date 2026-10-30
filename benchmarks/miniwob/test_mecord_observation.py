@@ -347,4 +347,14 @@ class Grounding(unittest.TestCase):
      verified_action({"op":"shift_click","bid":cs[0]["bid"]},
        cs,[{"sideEffectState":"uncertain"}],allow_native_gestures=True)
 
+
+ def test_native_double_and_shift_click_on_exact_graphical_ref(self):
+    graphic=item(ref="b-abc123-7-5",active=False)
+    graphic["tag"]="text"
+    cs=observed_mecord_candidates(obs([], [graphic]))
+    self.assertEqual(cs[0]["description"],"visual-geometry")
+    for op in ("double_click","shift_click"):
+     self.assertEqual(verified_action({"op":op,"bid":cs[0]["bid"]},
+       cs,[],allow_native_gestures=True)["op"],op)
+
 if __name__=="__main__":unittest.main(verbosity=2)
