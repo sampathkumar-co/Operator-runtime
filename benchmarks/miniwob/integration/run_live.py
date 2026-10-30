@@ -49,6 +49,7 @@ from integration.outcome_scoring import score_terminal_if_unstepped
 from integration.bridge_protocol import parse_bridge_http_rejection
 from integration.model_failures import safe_meta_http_error,classify_episode_failure
 from integration.api_accounting import checked_reported_usage
+from integration.campaign_plan import plan_tasks
 from playwright.sync_api._generated import BrowserType
 
 # Isolated process-only shim: BrowserGym supplies launch args itself, and also
@@ -74,23 +75,15 @@ if not 16 <= len(key) <= 400:
 all_tasks = sorted(str(t) for t in gym.envs.registry if str(t).startswith("browsergym/miniwob."))
 if len(all_tasks) != 125 or len(set(all_tasks)) != 125:
     raise RuntimeError("CANONICAL_125_TASK_ROSTER_REQUIRED")
-indices = (list(range(125)) if args.limit == 125 else
-           [round(i * 124 / (args.limit - 1)) for i in range(args.limit)] if args.limit > 1 else [0])
-# Hash the GLOBAL campaign first, before sharding. Every worker then reports
-# the same immutable roster digest; worker-specific partitions are recorded too.
-# Single-task diagnostics have a separate, non-qualifying plan, never
-# an out-of-range index within a frozen 20/50/125-task campaign.
-task_debug = args.task_id is not None
-if task_debug:
-    if args.task_id not in all_tasks:
-        raise RuntimeError("TASK_ID_NOT_IN_FROZEN_BROWSERGYM_ROSTER")
-    if args.workers != 1 or args.worker != 0 or args.start_at != 0 or args.count is not None:
-        raise RuntimeError("SINGLE_TASK_DEBUG_MUST_BE_UNSHARDED")
-    full_campaign_plan = [(0,args.task_id)]
-else:
-    full_campaign_plan = [(i, all_tasks[index]) for i,index in enumerate(indices)]
+# Debugging is deliberately non-qualifying and uses index zero.
+if args.task_id and (args.start_at!=0 or args.count is not None):
+    raise RuntimeError("SINGLE_TASK_DEBUG_MUST_BE_UNSHARDED")
+try:
+    full_campaign_plan,task_plan,task_debug=plan_tasks(
+        all_tasks,args.limit,args.workers,args.worker,args.task_id)
+except ValueError as exc:
+    raise RuntimeError(str(exc)) from None
 global_plan_sha256 = sha256(json.dumps(full_campaign_plan,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
-task_plan = [row for row in full_campaign_plan if row[0] % args.workers == args.worker]
 frozen_plan_sha256=sha256(json.dumps(task_plan,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
 if type(args.start_at) is not int or not 0 <= args.start_at < len(task_plan):
     raise RuntimeError("INVALID_CAMPAIGN_OFFSET")
@@ -120,6 +113,7 @@ harness_files = [
     Path(__file__).with_name("inspection_paging.py"),
     Path(__file__).with_name("outcome_scoring.py"),
     Path(__file__).with_name("api_accounting.py"),
+    Path(__file__).with_name("campaign_plan.py"),
 ]
 if not all(p.is_file() for p in harness_files):
     raise RuntimeError("BENCHMARK_HARNESS_FILE_MISSING")
@@ -304,7 +298,7 @@ try:
                          "native_gestures_enabled":None,
                          "worker":args.worker,"workers":args.workers,
                          "task_debug":task_debug,"failure_kind":None,
-                         "model_usage_estimate_usd":0.0}
+                         "cumulative_model_usage_estimate_usd":0.0}
             env = None
             try:
                 env = gym.make(task_id, headless=True)
@@ -486,7 +480,7 @@ try:
                             outcome["trace"].append({"terminal_scorer_error":"BROWSERGYM_TERMINAL_REWARD_UNAVAILABLE"})
                     try:env.close()
                     except:pass
-            outcome["model_usage_estimate_usd"]=round(cost,7)
+            outcome["cumulative_model_usage_estimate_usd"]=round(cost,7)
             outcome["elapsed_sec"] = round(time.perf_counter() - start, 2)
             outcome["cumulative_cost_usd"] = round(cost, 7)
             outcome["api_calls_cumulative"] = api_calls
