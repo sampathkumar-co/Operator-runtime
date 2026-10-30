@@ -31,8 +31,9 @@ arg.add_argument("--count",type=int,default=None)
 arg.add_argument("--campaign-tag",type=str,default="v6")
 arg.add_argument("--vision",action="store_true",help="Opt-in CDP screenshot input for Meta")
 args = arg.parse_args()
-assert 1 <= args.limit <= 125 and 1 <= args.workers <= 4
-assert 0 <= args.worker < args.workers and 1 <= args.max_steps <= 10
+if not (1 <= args.limit <= 125 and 1 <= args.workers <= 4 and
+        0 <= args.worker < args.workers and 1 <= args.max_steps <= 10):
+    raise RuntimeError("BENCHMARK_ARGUMENTS_INVALID")
 if not math.isfinite(args.cap_usd) or not 0.001 <= args.cap_usd <= 0.07:
     raise RuntimeError("BENCHMARK_CAP_INVALID")
 cdp_port = 9330 + args.worker
@@ -42,9 +43,9 @@ os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(Path.home() / "AppData" / "Local" /
 import gymnasium as gym
 import browsergym.miniwob
 from mecord_observation import observed_mecord_candidates,verified_action,MecordObservationError
-from integration.budget_ledger import BudgetLedger
+from integration.budget_ledger import BudgetLedger, require_budget_feasibility
 from integration.bridge_protocol import parse_bridge_http_rejection
-from integration.model_failures import safe_meta_http_error,is_campaign_blocking_meta_failure
+from integration.model_failures import safe_meta_http_error,is_campaign_blocking_meta_failure,is_campaign_blocking_execution_failure
 from playwright.sync_api._generated import BrowserType
 
 # Isolated process-only shim: BrowserGym supplies launch args itself, and also
@@ -68,7 +69,8 @@ if not 16 <= len(key) <= 400:
     raise RuntimeError("META_KEY_INVALID")
 
 all_tasks = sorted(str(t) for t in gym.envs.registry if str(t).startswith("browsergym/miniwob."))
-assert len(all_tasks) == 125, len(all_tasks)
+if len(all_tasks) != 125 or len(set(all_tasks)) != 125:
+    raise RuntimeError("CANONICAL_125_TASK_ROSTER_REQUIRED")
 indices = (list(range(125)) if args.limit == 125 else
            [round(i * 124 / (args.limit - 1)) for i in range(args.limit)] if args.limit > 1 else [0])
 # Hash the GLOBAL campaign first, before sharding. Every worker then reports
@@ -93,6 +95,24 @@ in_tokens = 0
 out_tokens = 0
 api_calls = 0
 max_out_tokens = 2048
+# Fingerprint the entire adapter/controller/bridge contract. Every resumed
+# checkpoint must use the same implementation, not merely the same task list.
+harness_files = [
+    ROOT / "controller.py",
+    ROOT / "mecord_observation.py",
+    Path(__file__).resolve(),
+    Path(__file__).with_name("mecord_bridge.mjs"),
+    Path(__file__).with_name("bridge_actions.mjs"),
+    Path(__file__).with_name("bridge_protocol.py"),
+    Path(__file__).with_name("budget_ledger.py"),
+    Path(__file__).with_name("browser_visual.mjs"),
+    Path(__file__).with_name("model_failures.py"),
+]
+if not all(p.is_file() for p in harness_files):
+    raise RuntimeError("BENCHMARK_HARNESS_FILE_MISSING")
+harness_sha256 = sha256(json.dumps(
+    [(p.name,sha256(p.read_bytes()).hexdigest()) for p in harness_files],
+    separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
 output_dir = B / "results"
 output_dir.mkdir(parents=True, exist_ok=True)
 case_label = (args.task_id.split(".")[-1] if args.task_id else f"{args.limit}")
@@ -105,6 +125,12 @@ lifetime_cap_usd = 0.07
 ledger = BudgetLedger(output_dir,lifetime_cap=lifetime_cap_usd,
     run_cap=args.cap_usd,worker=args.worker,workers=args.workers,
     manifest=global_plan_sha256)
+# Fail before any model call or bridge launch when even ONE reserved
+# vision request per scheduled task exceeds the host-approved limits.
+# Reservation is deliberately conservative; never silently raise the cap.
+require_budget_feasibility(task_count=len(task_plan), vision=args.vision,
+    run_cap=args.cap_usd, lifetime_cap=lifetime_cap_usd,
+    already_reserved=ledger._sum(), output_tokens=max_out_tokens)
 historical_reservations = 0.0
 run_reserved = 0.0
 def reserve_budget(usd):
@@ -246,7 +272,8 @@ try:
                        "reward": 0.0, "steps": 0, "agent": "meta-muse-spark-1.3-contributor",
                        "executor": "mecord-browser.cdp-isolated", "error": None,
                         "trace":[], "step_limit":args.max_steps, "frozen_plan_sha256":frozen_plan_sha256,
-                        "global_campaign_sha256":global_plan_sha256,"vision_enabled":args.vision,
+                        "global_campaign_sha256":global_plan_sha256,"harness_sha256":harness_sha256,
+                        "source_commit":source_commit,"vision_enabled":args.vision,
                          "worker":args.worker,"workers":args.workers}
             env = None
             try:
@@ -394,8 +421,8 @@ try:
                     campaign_stop = "META_PROVIDER_REJECTED_OR_UNAVAILABLE"
                     outcome["reward"] = None
                     outcome["unscored"] = True
-                if str(exc).startswith("LOCAL_BRIDGE_TRANSPORT_"):
-                    campaign_stop = "LOCAL_BRIDGE_TRANSPORT_UNCERTAIN"
+                if is_campaign_blocking_execution_failure(str(exc)):
+                    campaign_stop = "MECORD_PROVIDER_OR_OBSERVATION_UNCERTAIN"
                     outcome["reward"] = None
                     outcome["unscored"] = True
                 if str(exc) in {"BUDGET_CAP_REACHED","MODEL_USAGE_MISSING"} or str(exc).startswith(("META_HTTP_429","META_HTTP_503","META_HTTP_504")):
@@ -426,16 +453,17 @@ try:
         "attempted":attempted_count,"scheduled":len(task_plan),
         "frozen_plan_sha256":frozen_plan_sha256,
         "global_campaign_sha256":global_plan_sha256,
+        "harness_sha256":harness_sha256,"source_commit":source_commit,
         "start_at":args.start_at,"count":len(task_plan),"campaign_tag":args.campaign_tag,
         "scored":scored_successes+scored_failures,
         "successes":scored_successes,"failures":scored_failures,
         "unscored":unscored_episodes,
         "success_rate_scored":(scored_successes/(scored_successes+scored_failures)
             if scored_successes+scored_failures else None),
-        "status":"COMPLETE" if not campaign_stop and attempted_count==len(task_plan) else "PARTIAL",
+        "status":"COMPLETE" if not campaign_stop and attempted_count==len(task_plan) and unscored_episodes==0 else "PARTIAL",
         "full_50_task_70_percent_gate":("PASS" if scored_successes>=35 else "FAIL")
             if args.limit==50 and args.workers==1 and args.count is None and args.start_at==0
-            and attempted_count==50 and not campaign_stop else "NOT_RUN",
+            and attempted_count==50 and unscored_episodes==0 and not campaign_stop else "NOT_RUN",
         "campaign_stop":campaign_stop,
         "api_calls":api_calls,
         "input_tokens": in_tokens, "output_tokens": out_tokens,
