@@ -51,6 +51,7 @@ from integration.model_failures import safe_meta_http_error,classify_episode_fai
 from integration.api_accounting import checked_reported_usage
 from integration.campaign_plan import plan_tasks
 from integration.checkpoint_integrity import seal_row,ZERO_DIGEST
+from integration.motion_hints import motion_hints
 from playwright.sync_api._generated import BrowserType
 
 # Isolated process-only shim: BrowserGym supplies launch args itself, and also
@@ -116,6 +117,7 @@ harness_files = [
     Path(__file__).with_name("api_accounting.py"),
     Path(__file__).with_name("campaign_plan.py"),
     Path(__file__).with_name("checkpoint_integrity.py"),
+    Path(__file__).with_name("motion_hints.py"),
 ]
 if not all(p.is_file() for p in harness_files):
     raise RuntimeError("BENCHMARK_HARNESS_FILE_MISSING")
@@ -314,6 +316,7 @@ try:
                 obs, info = env.reset(seed=args.seed)
                 time.sleep(0.08)
                 history = []
+                previous_candidates=[]
                 inspect_offsets={"controlOffset":0,"visualOffset":0}
                 for step in range(args.max_steps):
                     event = {"step":step+1}
@@ -326,6 +329,8 @@ try:
                     if not mecord_inspection.get("ok") or mecord_inspection.get("provider") != "browser.cdp":
                         raise RuntimeError("MECORD_OBSERVATION_FAILED")
                     candidates = observed_mecord_candidates(mecord_inspection,limit=90)
+                    movement=motion_hints(previous_candidates,candidates)
+                    previous_candidates=candidates
                     native_ready = mecord_inspection.get("nativeGesturesEnabled") is True
                     if outcome["native_gestures_enabled"] is not None and outcome["native_gestures_enabled"] != native_ready:
                         raise RuntimeError("NATIVE_RUNTIME_CAPABILITY_CHANGED")
@@ -351,6 +356,7 @@ try:
                          "native_gestures_enabled":native_ready,
                          "inspected_offsets":inspect_offsets.copy(),
                          "next_page_available":next_offsets is not None,
+                         "motion_hint_count":len(movement),
                          "screenshot_status":mecord_inspection.get("screenshotStatus"),
                          "screenshot_sha256":mecord_inspection.get("screenshotSha256")})
                     prompt = (
@@ -378,7 +384,8 @@ try:
                         + "\nPage headings: " + json.dumps(mecord_inspection.get("headings") or [],ensure_ascii=True)[:1000]
                         + "\nVisible page excerpt: " + str(mecord_inspection.get("textExcerpt") or "")[:1200]
                         + "\nMore omitted candidates: " + str(hidden_count)
-                        + "\nPrevious actions: " + json.dumps(history[-4:],ensure_ascii=True)[:2200]
+                        + "\nObserved motion (advisory only, never dispatch coordinates): " + json.dumps(movement,ensure_ascii=True)[:1800]
+                         + "\nPrevious actions: " + json.dumps(history[-4:],ensure_ascii=True)[:2200]
                         + "\nSelect exactly one next action, with a bid from CURRENT controls."
                     )
                     event["candidate_digest"] = sha256(candidate_json.encode("utf8")).hexdigest()[:20]
