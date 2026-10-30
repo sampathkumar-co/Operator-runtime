@@ -1,5 +1,7 @@
 // Isolated, source-pinned Mecord MiniWoB bridge. No production relay or credentials.
 import http from 'node:http';import path from 'node:path';
+import {execFileSync} from 'node:child_process';
+import {NATIVE_GESTURE_OPS,parseNativeGesturePath} from './native_graphical.mjs';
 import {timingSafeEqual} from 'node:crypto';
 import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,boundedRelativePoint,boundedVisiblePageText,validatedDialogPrompt,preDispatchRejection} from './bridge_actions.mjs';
 import {captureSyntheticView,allowedSyntheticFrameUrl} from './browser_visual.mjs';
@@ -10,8 +12,21 @@ const root=process.env.MECORD_MINIWOB_RUNTIME_PATH ? path.resolve(process.env.ME
 if(!root)throw Error('MECORD_MINIWOB_RUNTIME_PATH_REQUIRED');
 const manifest=JSON.parse(await readFile(path.join(root,'runtime','runtime-manifest.json'),'utf8'));
 if(manifest.version!=='2.0.7-rc.6'||manifest.sourceCommit!=='beef93d3aa9c2c1363e92a6b3b78c893bf1a0ad4')throw Error('UNPINNED_RUNTIME');
-const {BrowserCdpProvider}=await import(pathToFileURL(path.join(root,'runtime','app','src','capabilities','browser-cdp.js')).href);
-const {CdpConnection}=await import(pathToFileURL(path.join(root,'runtime','app','src','capabilities','browser-cdp-connection.js')).href);
+// Testing unreleased source requires a separate exact-commit opt-in. Never
+// substitute this provider in production or silently upgrade the pinned RC6.
+const nativeSource=process.env.MECORD_MINIWOB_NATIVE_SOURCE_ROOT?path.resolve(process.env.MECORD_MINIWOB_NATIVE_SOURCE_ROOT):null;
+const nativeSha='7e73340fa8478810b9a14ee5d6943caf9dbea6ed';
+let BrowserCdpProvider,CdpConnection;
+if(nativeSource){
+ const rev=execFileSync('git',['-C',nativeSource,'rev-parse','HEAD'],{encoding:'utf8',timeout:5000}).trim();
+ const changed=execFileSync('git',['-C',nativeSource,'status','--porcelain','--','src/capabilities/browser-cdp.ts','src/capabilities/browser-cdp-frames.ts','src/capabilities/browser-cdp-gesture-contract.ts','src/capabilities/browser-cdp-page.ts','src/capabilities/browser-cdp-connection.ts'],{encoding:'utf8',timeout:5000}).trim();
+ if(rev!==nativeSha||changed)throw Error('NATIVE_SOURCE_UNPINNED_OR_MODIFIED');
+ ({BrowserCdpInspectProvider:BrowserCdpProvider}=await import(pathToFileURL(path.join(nativeSource,'src','capabilities','browser-cdp.ts')).href));
+ ({CdpConnection}=await import(pathToFileURL(path.join(nativeSource,'src','capabilities','browser-cdp-connection.ts')).href));
+}else{
+ ({BrowserCdpProvider}=await import(pathToFileURL(path.join(root,'runtime','app','src','capabilities','browser-cdp.js')).href));
+ ({CdpConnection}=await import(pathToFileURL(path.join(root,'runtime','app','src','capabilities','browser-cdp-connection.js')).href));
+}
 const port=Number(process.env.MECORD_BENCH_CDP_PORT||9330);
 if(!Number.isInteger(port)||port<9300||port>9399)throw Error('INVALID_LOCAL_CDP_PORT');
 const endpoint='http://127.0.0.1:'+port;
@@ -175,7 +190,7 @@ const svr=http.createServer(async(req,res)=>{
    return;
   }
   const allowed=new Set(['click','hover','set_value','type','select','select_date','key_press','click_relative','scroll','drag_between','drag_to','drag_by','resize','hotkey','keyboard_text','format_text','select_text_range','dialog_accept','dialog_dismiss']);
-  if(!allowed.has(input.op))throw Error('UNSUPPORTED_INTERACTION');
+  if(!allowed.has(input.op) && !(nativeSource&&NATIVE_GESTURE_OPS.includes(input.op)))throw Error('UNSUPPORTED_INTERACTION');
   if(input.op==='dialog_accept'||input.op==='dialog_dismiss'){
    const ref=input.ref;
    if(!inspectState||inspectState.targetId!==targetId||
@@ -207,7 +222,7 @@ const svr=http.createServer(async(req,res)=>{
   const graphicalRefs=new Set([...inspectState.refs,...inspectState.relativeRefs]);
   const allowedRefs=(input.op==='click_relative'?inspectState.relativeRefs:
     input.op==='drag_between'?inspectState.sortableRefs:
-    input.op==='drag_to'||input.op==='hover'||input.op==='drag_by'||input.op==='resize'?graphicalRefs:
+    input.op==='drag_to'||input.op==='hover'||input.op==='drag_by'||input.op==='resize'||input.op==='drag_path'?graphicalRefs:
     input.op==='scroll'?inspectState.scrollRefs:inspectState.refs);
   if(!allowedRefs.has(ref))throw Error('REF_NOT_FROM_FRESH_INSPECTION');
   const observed=inspectState.controlInfo.get(ref);
@@ -224,9 +239,14 @@ const svr=http.createServer(async(req,res)=>{
   if(Object.keys(input).some(k=>!['op','ref','value','key'].includes(k)))throw Error('EXTRA_MODEL_PARAMETERS');
   // Provider set_value is reserved for sliders; native text inputs use type
   // (which safely replaces the current value, including clear-to-empty).
-  const dispatchOp=providerOperationForInput(input.op==='drag_to'?'drag_between':input.op,observed?.role);
+  if(nativeSource&&NATIVE_GESTURE_OPS.includes(input.op)){
+   if(input.op==='drag_path' && observed?.tag!=='canvas' && observed?.tag!=='svg' && observed?.role!=='img')throw Error('NATIVE_PATH_REQUIRES_OBSERVED_GRAPHIC');
+   if(input.op!=='drag_path' && observed?.actionable!==true)throw Error('NATIVE_CLICK_TARGET_NOT_ACTIONABLE');
+ }
+ const dispatchOp=providerOperationForInput(input.op==='drag_to'?'drag_between':input.op,observed?.role);
   const actionInput={targetId,operation:dispatchOp,target:{ref}};
   if(input.op==='click_relative'){Object.assign(actionInput,boundedRelativePoint(input.value));}
+  if(input.op==='drag_path')actionInput.path=parseNativeGesturePath(input.value);
   if(['type','set_value','select','select_date','keyboard_text','format_text','select_text_range'].includes(input.op)){
    if(typeof input.value!=='string'||(input.value.length===0&&input.op!=='set_value')||input.value.length>400)throw Error('INVALID_TEXT_VALUE');
    if(input.op==='select_date'&&!/^\d{4}-\d{2}-\d{2}$/.test(input.value))throw Error('DATE_VALUE_INVALID');

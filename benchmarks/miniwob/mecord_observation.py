@@ -167,7 +167,7 @@ def observed_mecord_candidates(payload: dict[str, Any], limit: int = 90) -> list
         })
     return candidates
 
-def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[dict]) -> dict[str,str]:
+def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[dict], *, native_enabled: bool=False) -> dict[str,str]:
     """Normalize a model suggestion; permit only exact, currently observed refs."""
     # Do not use accessible-name fallback to turn an invented/stale model ID
     # into authority. A proposed action must name one exact CURRENT Mecord ref.
@@ -210,12 +210,15 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
     if type(candidates) is not list or sum(
             type(c) is dict and c.get("bid") == ref for c in candidates) != 1:
         raise MecordObservationError("EXACT_OBSERVED_REF_REQUIRED")
+    native_op=raw.get("op") in {"double_click","shift_click","drag_path"}
+    if native_op and native_enabled is not True:
+        raise MecordObservationError("NATIVE_GESTURES_REQUIRE_PINNED_SOURCE")
     relative = raw.get("op") == "click_relative"
     date_action = raw.get("op") == "select_date"
     scroll_action = raw.get("op") == "scroll"
     drag_action = raw.get("op") in {"drag_between","drag_to"}
     extended = {"drag_by", "resize", "hotkey", "keyboard_text", "format_text", "select_text_range"}
-    if relative or date_action or scroll_action or drag_action or raw.get("op") in extended:
+    if relative or date_action or scroll_action or drag_action or native_op or raw.get("op") in extended:
         proposal = dict(raw)
         proposal["op"] = "set_value" if date_action or raw.get("op") in {"keyboard_text","format_text","select_text_range"} else "click"
     elif raw.get("op") == "set_value" and raw.get("value") == "":
@@ -273,6 +276,25 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
             if not match_range or int(match_range[1]) > int(match_range[2]):
                 raise MecordObservationError("TEXT_RANGE_INVALID")
         action = Decision(raw["op"], action.bid, action.value, "")
+    if native_op:
+        if raw["op"] == "drag_path":
+            if chosen.get("description") != "visual-geometry" or str(chosen.get("role","")).lower() not in {"canvas","svg","img"}:
+                raise MecordObservationError("NATIVE_PATH_REQUIRES_OBSERVED_GRAPHIC")
+            parts=raw.get("value","").split(";")
+            if not 2 <= len(parts) <= 24:
+                raise MecordObservationError("NATIVE_PATH_COUNT_INVALID")
+            ratios=[]
+            for part in parts:
+                if re.fullmatch(r"0[.](?:0[1-9]|[1-9][0-9]?):0[.](?:0[1-9]|[1-9][0-9]?)",part) is None:
+                    raise MecordObservationError("NATIVE_PATH_POINT_INVALID")
+                x,y=part.split(":")
+                ratios.append((float(x),float(y)))
+            if len(set(ratios)) < 2:
+                raise MecordObservationError("NATIVE_PATH_NO_MOVEMENT")
+        else:
+            if chosen.get("description") != "semantic" or raw.get("value","") != "":
+                raise MecordObservationError("NATIVE_CLICK_REQUIRES_ACTIONABLE_CONTROL")
+        action=Decision(raw["op"],action.bid,raw.get("value",""),"")
     if raw.get("op") == "hotkey":
         if raw.get("key") not in {"CTRL+A","CTRL+C","CTRL+V","CTRL+Z","CTRL+SHIFT+Z","CTRL+B","CTRL+I","CTRL+U"}:
             raise MecordObservationError("HOTKEY_INVALID")
@@ -296,9 +318,9 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
         if match[0].get("description") != "visual-geometry":
             raise MecordObservationError("RELATIVE_TARGET_NOT_VISUAL")
         action = Decision("click_relative", action.bid, action.value, action.key)
-    elif match[0].get("description") == "visual-geometry" and raw.get("op") not in {"drag_by","resize","drag_to","hover"}:
+    elif match[0].get("description") == "visual-geometry" and raw.get("op") not in {"drag_by","resize","drag_to","hover","drag_path"}:
         raise MecordObservationError("VISUAL_NEEDS_RELATIVE_CLICK")
-    if not relative and not date_action and not scroll_action and not drag_action and raw.get("op") not in {"drag_by","resize","hover"} and chosen.get("description") in {"sortable-geometry","scroll-geometry"}:
+    if not relative and not date_action and not scroll_action and not drag_action and raw.get("op") not in {"drag_by","resize","hover","drag_path","double_click","shift_click"} and chosen.get("description") in {"sortable-geometry","scroll-geometry"}:
         raise MecordObservationError("SPECIALIST_ACTION_REQUIRED")
     # Detect uncertainty throughout this bounded task, not only the last 3
     # entries checked by the generic source controller.

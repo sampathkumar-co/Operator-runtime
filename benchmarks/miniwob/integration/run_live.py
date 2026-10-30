@@ -30,6 +30,7 @@ arg.add_argument("--start-at",type=int,default=0)
 arg.add_argument("--count",type=int,default=None)
 arg.add_argument("--campaign-tag",type=str,default="v6")
 arg.add_argument("--vision",action="store_true",help="Opt-in CDP screenshot input for Meta")
+arg.add_argument("--native-gestures",action="store_true",help="Explicit source-pinned native graphical provider experiment")
 args = arg.parse_args()
 assert 1 <= args.limit <= 125 and 1 <= args.workers <= 4
 assert 0 <= args.worker < args.workers and 1 <= args.max_steps <= 10
@@ -116,10 +117,16 @@ bridge_token = secrets.token_hex(32)
 BRIDGE_ENV_ALLOWED = {"PATH","Path","PATHEXT","SystemRoot","SYSTEMROOT","WINDIR",
     "HOME","USERPROFILE","LOCALAPPDATA","APPDATA","TEMP","TMP",
     "MECORD_MINIWOB_WORKDIR","MECORD_MINIWOB_RUNTIME_PATH","MECORD_BENCH_CDP_PORT",
-    "MECORD_MINIWOB_FRAME_ORIGINS"}
+    "MECORD_MINIWOB_FRAME_ORIGINS","MECORD_MINIWOB_NATIVE_SOURCE_ROOT"}
 bridge_env = {k:v for k,v in os.environ.items() if k in BRIDGE_ENV_ALLOWED}
 bridge_env["MECORD_MINIWOB_BRIDGE_TOKEN"] = bridge_token
-bridge = subprocess.Popen(["node",str(Path(__file__).with_name("mecord_bridge.mjs"))],
+if args.native_gestures:
+    if not os.environ.get("MECORD_MINIWOB_NATIVE_SOURCE_ROOT"):
+        raise RuntimeError("EXPLICIT_PINNED_NATIVE_SOURCE_REQUIRED")
+else:
+    bridge_env.pop("MECORD_MINIWOB_NATIVE_SOURCE_ROOT",None)
+bridge_command=["node"]+(["--experimental-strip-types"] if args.native_gestures else [])+[str(Path(__file__).with_name("mecord_bridge.mjs"))]
+bridge = subprocess.Popen(bridge_command,
                           stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
                           env=bridge_env,text=True,bufsize=1)
 JSON_ACTION_SCHEMA = {
@@ -303,6 +310,8 @@ try:
                         + "\nPrevious actions: " + json.dumps(history[-4:],ensure_ascii=True)[:2200]
                         + "\nSelect exactly one next action, with a bid from CURRENT controls."
                     )
+                    if args.native_gestures:
+                        prompt += "\\nNative source mode adds double_click and shift_click on actionable controls; drag_path only on observed canvas/svg/img, with 2-24 pairs like 0.20:0.30;0.40:0.50;0.80:0.80 as value."
                     event["candidate_digest"] = sha256(candidate_json.encode("utf8")).hexdigest()[:20]
                     event["api_calls_before"] = api_calls
                     event["input_tokens_before"] = in_tokens
@@ -313,7 +322,7 @@ try:
                     model_action, status = request_model(prompt,screenshot=screenshot)
                     event["model_status"] = status
                     try:
-                        grounded = verified_action(model_action,candidates,history) if status=="completed" else None
+                        grounded = verified_action(model_action,candidates,history,native_enabled=args.native_gestures) if status=="completed" else None
                     except MecordObservationError as invalid:
                         event["first_action_error"] = str(invalid)[:80]
                         grounded = None
@@ -332,7 +341,7 @@ try:
                     if status != "completed":
                         raise RuntimeError("MODEL_RESPONSE_" + status.upper())
                     if grounded is None:
-                        grounded = verified_action(model_action,candidates,history)
+                        grounded = verified_action(model_action,candidates,history,native_enabled=args.native_gestures)
                     event["decision"] = {"op":grounded["op"],
                         "target":grounded.get("ref",""),
                         "value_hash":sha256(grounded.get("value","").encode()).hexdigest()[:16]}
@@ -348,7 +357,7 @@ try:
                     op=grounded["op"]
                     bid=grounded["ref"]
                     request = {"op":op,"ref":bid}
-                    if op in {"set_value","type","select","select_date","scroll","drag_between","drag_to","drag_by","resize","keyboard_text","format_text","select_text_range","dialog_accept","click_relative"}:
+                    if op in {"set_value","type","select","select_date","scroll","drag_between","drag_to","drag_by","resize","keyboard_text","format_text","select_text_range","dialog_accept","click_relative","drag_path"}:
                         request["value"]=grounded["value"]
                     if op in {"key_press","hotkey"}:request["key"]=grounded["key"]
                     result = bridge_call(port, request)

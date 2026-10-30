@@ -44,3 +44,29 @@ not successful MiniWoB rewards.
   available here until a separately approved runtime build and physical test.
 - The original 2/7 campaign was from older code; **do not relabel it as a new score**.
 - Do not overwrite original JSONL results or the append-only spend ledger.
+
+## Native graphical source-mode validation (October 30)
+
+Native graphical source is staged **only** in PR #696 at commit
+`7e73340fa8478810b9a14ee5d6943caf9dbea6ed`.
+The installed `2.0.7-rc.6` package is deliberately unchanged.
+
+From the existing isolated workspace's `integration` folder:
+
+```powershell
+.\smoke-native-local.ps1
+```
+
+The native opt-in wrapper verifies the exact source commit and RC6 package,
+removes the model API credential from its process, and exercises:
+(1) double-click through Mecord with BrowserGym reward,
+(2) Shift-click through Mecord with BrowserGym reward,
+(3) bounded held-button drawing through the Mecord provider against a
+temporary synthetic Chrome test page. All three passed on LAPTOP-MRNU23B2.
+The regular `smoke-local.ps1` still uses pinned RC6.
+
+The model runner has an explicit `--native-gestures` flag, which is refused
+unless `MECORD_MINIWOB_NATIVE_SOURCE_ROOT` points to this exact
+source checkout. No paid model campaign has run in this mode; the
+model-provider response schema and full independent MiniWoB score remain
+unqualified. Source mode cannot be presented as a published npm release.
