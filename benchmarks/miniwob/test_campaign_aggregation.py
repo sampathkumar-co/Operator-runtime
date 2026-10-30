@@ -25,6 +25,7 @@ class CampaignAggregation(unittest.TestCase):
      rows=[{"plan_index":i,"task_id":task,"worker":w,"workers":workers,"seed":42,
        "global_campaign_sha256":digest,"harness_sha256":HARNESS,
        "runtime_manifest_sha256":RUNTIME,
+       "native_gestures_enabled":False,
        "source_commit":SOURCE_SHA,"agent":MODEL,"executor":EXECUTOR,
        "vision_enabled":False,"steps":1,"step_limit":6,
        "reward":1.0 if i%2==0 else 0.0}
