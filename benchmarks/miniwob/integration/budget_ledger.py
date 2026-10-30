@@ -110,7 +110,7 @@ class BudgetLedger:
                 "estimated_usd":round(estimated_usd,9),
                 "reserved_usd":round(reservation_usd,9)}
         with (self.root/"mecord-provider-usage.jsonl").open("a",encoding="utf8") as f:
-            f.write(json.dumps(record,separators=(",",":"))+"\\n")
+            f.write(json.dumps(record,separators=(",",":"))+"\n")
             f.flush()
             os.fsync(f.fileno())
     finally:
