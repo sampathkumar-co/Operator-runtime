@@ -10,11 +10,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 ROSTER=[f"browsergym/miniwob.synthetic-{i}" for i in range(125)]
 HARNESS="a"*64
+RUNTIME="b"*64
 
 class CampaignAggregation(unittest.TestCase):
  def score(self, paths, expected=8, workers=4):
     return aggregate(paths, expected, 42, workers, roster=ROSTER,
-                     harness_sha256=HARNESS)
+                     harness_sha256=HARNESS,runtime_manifest_sha256=RUNTIME)
  def make_campaign(self,folder,expected=8,workers=4):
     tasks=frozen_plan(ROSTER,expected)
     digest=digest_plan(tasks)
@@ -23,6 +24,7 @@ class CampaignAggregation(unittest.TestCase):
      path=folder/f"worker-{w}.jsonl"
      rows=[{"plan_index":i,"task_id":task,"worker":w,"workers":workers,"seed":42,
        "global_campaign_sha256":digest,"harness_sha256":HARNESS,
+       "runtime_manifest_sha256":RUNTIME,
        "source_commit":SOURCE_SHA,"agent":MODEL,"executor":EXECUTOR,
        "vision_enabled":False,"steps":1,"step_limit":6,
        "reward":1.0 if i%2==0 else 0.0}
