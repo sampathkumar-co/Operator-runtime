@@ -75,3 +75,28 @@ class BudgetLedger:
             if self.lock.read_text(encoding="ascii")==marker:
                 self.lock.unlink()
         except OSError:pass
+
+
+def require_budget_feasibility(*, task_count, vision, run_cap, lifetime_cap,
+                               already_reserved, output_tokens=2048):
+    """Fail BEFORE Meta/browser startup if a planned vision batch cannot fit.
+
+    A lower bound on the harness's conservative reservation, not a provider
+    quote or permission to charge more. Atomic reserve() is still authoritative.
+    """
+    if (type(task_count) is not int or task_count < 1 or
+        type(vision) is not bool or
+        any(type(x) not in (int, float) or not math.isfinite(x)
+            for x in (run_cap, lifetime_cap, already_reserved)) or
+        not 0 < run_cap <= lifetime_cap or
+        not 0 <= already_reserved <= lifetime_cap or
+        type(output_tokens) is not int or not 256 <= output_tokens <= 3072):
+        raise BudgetError("BUDGET_PREFLIGHT_INVALID")
+    if not vision:
+        return
+    # Each task needs at least one screenshot-bearing Meta request.
+    # The live runner reserves 32,768 image input tokens and output_tokens.
+    min_per_task = (32768 * 0.10 + output_tokens * 0.20) / 1e6
+    required = task_count * min_per_task
+    if required > run_cap + 1e-12 or required > lifetime_cap - already_reserved + 1e-12:
+        raise BudgetError("VISION_RESERVATION_INFEASIBLE_USE_SMALLER_CHECKPOINT")
