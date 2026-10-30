@@ -1,18 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
-import { isOriginalAuthorityConflict, originalRecoveryOnlyRouteAllowed } from '../apps/local-agent/src/relay-recovery-only.ts';
+import { isProtectedRelayRecoveryRequired, originalRecoveryOnlyRouteAllowed } from '../apps/local-agent/src/relay-recovery-only.ts';
 import { OperatorRuntime } from '../src/core/runtime.ts';
 import { OperatorError } from '../src/core/errors.ts';
 
 test('only exact native authority conflict may enter recovery-only mode', () => {
-  assert.equal(isOriginalAuthorityConflict({ state:'DEGRADED',code:'RELAY_AUTHORITY_CONFLICT_REVIEW_REQUIRED',recoverable:false }),true);
-  assert.equal(isOriginalAuthorityConflict({ state:'READY',code:'RELAY_AUTHORITY_CONFLICT_REVIEW_REQUIRED' }),false);
-  assert.equal(isOriginalAuthorityConflict({ state:'DEGRADED',code:'RELAY_NETWORK_TIMEOUT',recoverable:false }),false);
-  assert.equal(isOriginalAuthorityConflict({ state:'DEGRADED',code:'RELAY_AUTHORITY_CONFLICT_REVIEW_REQUIRED',recoverable:true }),false);
-  assert.equal(isOriginalAuthorityConflict({ state:'SHUTTING_DOWN' },
+  assert.equal(isProtectedRelayRecoveryRequired({ state:'DEGRADED',code:'RELAY_AUTHORITY_CONFLICT_REVIEW_REQUIRED',recoverable:false }),true);
+  assert.equal(isProtectedRelayRecoveryRequired({ state:'READY',code:'RELAY_AUTHORITY_CONFLICT_REVIEW_REQUIRED' }),false);
+  assert.equal(isProtectedRelayRecoveryRequired({ state:'DEGRADED',code:'RELAY_NETWORK_TIMEOUT',recoverable:false }),false);
+  assert.equal(isProtectedRelayRecoveryRequired({ state:'DEGRADED',code:'RELAY_AUTHORITY_CONFLICT_REVIEW_REQUIRED',recoverable:true }),false);
+  assert.equal(isProtectedRelayRecoveryRequired({ state:'SHUTTING_DOWN' },
     new OperatorError('RELAY_AUTHORITY_CONFLICT_REVIEW_REQUIRED','Expected original authority conflict')),true);
-  assert.equal(isOriginalAuthorityConflict({ state:'SHUTTING_DOWN' },new Error('RELAY_AUTHORITY_CONFLICT_REVIEW_REQUIRED')),false);
+  assert.equal(isProtectedRelayRecoveryRequired({ state:'SHUTTING_DOWN' },new Error('RELAY_AUTHORITY_CONFLICT_REVIEW_REQUIRED')),false);
+  assert.equal(isProtectedRelayRecoveryRequired({ state:'DEGRADED',code:'RELAY_RECOVERY_REQUIRED',recoverable:false }),true);
+  assert.equal(isProtectedRelayRecoveryRequired({ state:'SHUTTING_DOWN' },
+    new OperatorError('RELAY_RECOVERY_REQUIRED','Expired delivery recovery callback refused to reconcile')),true);
+  assert.equal(isProtectedRelayRecoveryRequired({ state:'SHUTTING_DOWN' },
+    new OperatorError('RELAY_LOCAL_RESULT_INVALID','Unrelated failure')),false);
 });
 
 test('recovery-only route allowlist never permits ordinary execution or state reset', () => {
