@@ -92,6 +92,10 @@ def aggregate(paths, expected, seed, workers, *, roster, harness_sha256, runtime
                 raise CampaignError("SCORED_REWARD_INVALID")
             if type(row.get("steps")) is not int or not 0<=row["steps"]<=row["step_limit"]:
                 raise CampaignError("STEPS_INVALID")
+            if row.get("unscored") is not True and row["steps"] == 0:
+                raise CampaignError("SCORED_EPISODE_NEVER_STEPPED")
+            if row.get("unscored") is not True and val == 1 and row.get("error") not in (None, ""):
+                raise CampaignError("SUCCESS_WITH_ERROR_NOT_CERTIFIABLE")
             seen[index]=row
             local_indexes.append(index)
         if local_indexes!=sorted(local_indexes):
