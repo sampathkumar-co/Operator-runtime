@@ -1,6 +1,7 @@
 import json, tempfile, unittest
 from pathlib import Path
 from aggregate_campaign import aggregate, frozen_plan, digest_plan, CampaignError, SOURCE_SHA, MODEL, EXECUTOR
+from checkpoint_integrity import seal_row, ZERO_DIGEST
 
 ROSTER=["browsergym/miniwob.synthetic%03d"%i for i in range(125)]
 HARNESS="a"*64
@@ -17,7 +18,13 @@ def episode(i,reward=1,**overrides):
     row.update(overrides);return row
 def file(folder,name,rows):
     path=folder/name
-    path.write_text("".join(json.dumps(x)+"\n" for x in rows),encoding="utf8")
+    previous=ZERO_DIGEST
+    sealed=[]
+    for row in rows:
+        signed=seal_row(row,previous)
+        previous=signed["record_sha256"]
+        sealed.append(signed)
+    path.write_text("".join(json.dumps(x)+"\n" for x in sealed),encoding="utf8")
     return path
 
 class Aggregation(unittest.TestCase):
