@@ -6,6 +6,7 @@ from hashlib import sha256
 from integration.aggregate_campaign import (aggregate, CampaignError, frozen_plan,
     digest_plan, SOURCE_SHA, MODEL, EXECUTOR)
 from integration.budget_ledger import BudgetLedger,BudgetError
+from integration.checkpoint_integrity import seal_row,ZERO_DIGEST
 from concurrent.futures import ThreadPoolExecutor
 
 ROSTER=[f"browsergym/miniwob.synthetic-{i}" for i in range(125)]
@@ -30,7 +31,13 @@ class CampaignAggregation(unittest.TestCase):
        "vision_enabled":False,"steps":1,"step_limit":6,
        "reward":1.0 if i%2==0 else 0.0}
        for i,task in tasks if i%workers==w]
-     path.write_text("".join(json.dumps(x)+"\n" for x in rows))
+     previous=ZERO_DIGEST
+     sealed=[]
+     for row in rows:
+      record=seal_row(row,previous)
+      previous=record["record_sha256"]
+      sealed.append(record)
+     path.write_text("".join(json.dumps(x)+"\n" for x in sealed))
      paths.append(path)
     return paths
  def test_exact_manifest_scored_across_four_workers(self):
@@ -68,6 +75,8 @@ class CampaignAggregation(unittest.TestCase):
      records[0]["unscored"]=True
      records[0]["reward"]=None
      paths[0].write_text("".join(json.dumps(x)+"\n" for x in records))
+     sealed=[seal_row(x,ZERO_DIGEST if i==0 else records[i-1]["record_sha256"]) for i,x in enumerate(records)]
+     paths[0].write_text("".join(json.dumps(x)+"\n" for x in sealed))
      out=self.score(paths)
      self.assertEqual(out["unscored"],1)
      self.assertEqual(out["status"],"PARTIAL")
