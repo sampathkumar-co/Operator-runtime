@@ -1018,9 +1018,12 @@ export async function performSemanticInteraction(
           nativePath.push({x:px,y:py});
         }
       }
-      const dispatch = (params: JsonMap) => chosen.frame
-        ? (providerDispatchStarted = true, session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, signal))
-        : (providerDispatchStarted = true, session.send('Input.dispatchMouseEvent', params, 8_000, signal));
+      // Cleanup is intentionally independent of the cancelled action signal.
+      // Without this, the held-pointer helper's best-effort release is cancelled
+      // immediately after an aborted press/move and can leave the mouse held.
+      const dispatch = (params: JsonMap, cleanup = false) => chosen.frame
+        ? (providerDispatchStarted = true, session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, cleanup ? undefined : signal))
+        : (providerDispatchStarted = true, session.send('Input.dispatchMouseEvent', params, 8_000, cleanup ? undefined : signal));
       if (input.operation === 'drag_path') {
         await dispatchHeldPointerStroke(nativePath!, dispatch);
       } else if (input.operation === 'hover') {
