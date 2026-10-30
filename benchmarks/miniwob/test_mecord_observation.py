@@ -164,4 +164,151 @@ class Grounding(unittest.TestCase):
  def test_sortable_nonlist_elements_not_exposed(self):
     a=item(role="",active=False);a["tag"]="div";a["semanticPath"]="body>div"
     self.assertEqual(observed_mecord_candidates(obs([], [a])),[])
+
+ def test_stable_identity_denies_duplicate_across_fresh_refs(self):
+    old=observed_mecord_candidates(obs([item()]))[0]
+    new=observed_mecord_candidates(obs([item(ref="b-abc123-7-2")]))[0]
+    self.assertEqual(old["identity"],new["identity"])
+    with self.assertRaisesRegex(MecordObservationError,"UNSAFE_REPLAY_STABLE_TARGET"):
+     verified_action({"op":"click","bid":new["bid"]},[new],
+       [{"op":"click","bid":old["bid"],"identity":old["identity"],"value":""}]*2)
+ def test_wait_without_target_and_wait_with_target_rejected(self):
+    cs=observed_mecord_candidates(obs([item()]))
+    self.assertEqual(verified_action({"op":"wait","bid":"","value":"","key":""},cs,[])["op"],"wait")
+    with self.assertRaisesRegex(MecordObservationError,"WAIT_MUST_HAVE_NO_TARGET"):
+     verified_action({"op":"wait","bid":cs[0]["bid"]},cs,[])
+ def test_clear_textbox_to_empty_is_supported(self):
+    cs=observed_mecord_candidates(obs([item(role="textbox")]))
+    self.assertEqual(verified_action({"op":"set_value","bid":cs[0]["bid"],"value":""},cs,[])["value"],"")
+ def test_observed_control_state_is_preserved(self):
+    a=item(role="checkbox")
+    a.update({"checked":True,"selected":False,"expanded":True,"value":"abc","placeholder":"Search"})
+    c=observed_mecord_candidates(obs([a]))[0]
+    self.assertIs(c["checked"],True)
+    self.assertIs(c["selected"],False)
+    self.assertEqual(c["currentValue"],"abc")
+ def test_visuals_are_not_starved_by_many_controls(self):
+    controls=[item(ref=f"b-abc123-7-{i+1}",name=f"Button {i}") for i in range(120)]
+    visual=item(ref="b-abc123-7-z",role="",active=False)
+    visual["tag"]="circle"
+    cs=observed_mecord_candidates(obs(controls,[visual]),limit=90)
+    self.assertEqual(len(cs),90)
+    self.assertIn("b-abc123-7-z",[c["bid"] for c in cs])
+ def test_large_bounded_scroll_and_invalid_scroll(self):
+    a=item(role="combobox");a["scrollable"]=True
+    cs=observed_mecord_candidates(obs([a]))
+    self.assertEqual(verified_action({"op":"scroll","bid":cs[0]["bid"],"value":"down:320"},cs,[])["value"],"down:320")
+    with self.assertRaisesRegex(MecordObservationError,"SCROLL_TARGET_OR_DIRECTION_INVALID"):
+     verified_action({"op":"scroll","bid":cs[0]["bid"],"value":"down:2000"},cs,[])
+ def test_bounded_extended_editing_and_displacement(self):
+    cs=observed_mecord_candidates(obs([item(role="textbox")]))
+    bid=cs[0]["bid"]
+    for op,value in [("keyboard_text","hello"),("format_text","bold"),("select_text_range","1:3"),("drag_by","right:80"),("resize","down:40")]:
+     with self.subTest(op=op):
+      self.assertEqual(verified_action({"op":op,"bid":bid,"value":value},cs,[])["op"],op)
+    with self.assertRaisesRegex(MecordObservationError,"DISPLACEMENT_INVALID"):
+     verified_action({"op":"drag_by","bid":bid,"value":"right:2000"},cs,[])
+ def test_hotkey_allowlist_and_rejection(self):
+    cs=observed_mecord_candidates(obs([item()]))
+    bid=cs[0]["bid"]
+    self.assertEqual(verified_action({"op":"hotkey","bid":bid,"key":"CTRL+A"},cs,[])["key"],"CTRL+A")
+    with self.assertRaisesRegex(MecordObservationError,"HOTKEY_INVALID"):
+     verified_action({"op":"hotkey","bid":bid,"key":"CTRL+ALT+DELETE"},cs,[])
+
+ def test_explicit_cross_origin_frame_generation(self):
+    frame=item(ref="b-child01-4-1",role="button",name="Frame save")
+    frame["observationGeneration"]="child01-4"
+    frame["sourceFrameTargetId"]="synthetic-oopif"
+    cs=observed_mecord_candidates(obs([frame]))
+    self.assertEqual(len(cs),1)
+    self.assertEqual(cs[0]["frameTargetId"],"synthetic-oopif")
+    self.assertEqual(verified_action({"op":"click","bid":cs[0]["bid"]},cs,[])["op"],"click")
+ def test_frame_generation_mismatch_fails_closed(self):
+    frame=item(ref="b-invalid-3-1",role="button")
+    frame["observationGeneration"]="child01-4"
+    self.assertEqual(observed_mecord_candidates(obs([frame])),[])
+ def test_cross_frame_drag_rejected_in_validator(self):
+    first=item(role="",active=False);first.update({"tag":"div","groupRole":"li","semanticPath":"body>ul:sortable>li","observationGeneration":"abc123-7","sourceFrameTargetId":"a"})
+    second=dict(first,ref="b-abc123-7-2",name="Another",sourceFrameTargetId="b")
+    cs=observed_mecord_candidates(obs([], [first,second]))
+    with self.assertRaisesRegex(MecordObservationError,"DRAG_TARGETS_NOT_CURRENT_SORTABLE"):
+     verified_action({"op":"drag_between","bid":first["ref"],"value":second["ref"]},cs,[])
+ def test_graphical_canvas_click_grid_validation(self):
+    canvas=item(ref="b-abc123-7-3",role="",active=False)
+    canvas["tag"]="canvas"
+    cs=observed_mecord_candidates(obs([], [canvas]))
+    self.assertEqual(verified_action({"op":"click_relative","bid":canvas["ref"],"value":"top-right"},cs,[])["value"],"top-right")
+    with self.assertRaisesRegex(MecordObservationError,"RELATIVE_POINT_NOT_ENUMERATED"):
+     verified_action({"op":"click_relative","bid":canvas["ref"],"value":"0.98,0.22"},cs,[])
+
+ def test_provider_dialog_accept_dismiss_with_exact_ref(self):
+    dialog_ref="bd-0123456789abcdef-1-0123456789ab"
+    seen=observed_mecord_candidates({"ok":True,"provider":"browser.cdp",
+      "dialog":{"ref":dialog_ref,"type":"prompt"}})
+    self.assertEqual(seen[0]["bid"],dialog_ref)
+    self.assertEqual(verified_action({"op":"dialog_accept","bid":dialog_ref,
+      "value":"answer","key":""},seen,[])["value"],"answer")
+    self.assertEqual(verified_action({"op":"dialog_dismiss","bid":dialog_ref,
+      "value":"","key":""},seen,[])["op"],"dialog_dismiss")
+ def test_dialog_forged_ref_and_prompt_policy_rejected(self):
+    dialog_ref="bd-0123456789abcdef-1-0123456789ab"
+    seen=observed_mecord_candidates({"ok":True,"provider":"browser.cdp",
+      "dialog":{"ref":dialog_ref,"type":"confirm"}})
+    with self.assertRaisesRegex(MecordObservationError,"EXACT_DIALOG_REF_REQUIRED"):
+     verified_action({"op":"dialog_accept","bid":"bd-0123456789abcdef-2-0123456789ab"},seen,[])
+    with self.assertRaisesRegex(MecordObservationError,"DIALOG_PROMPT_ONLY"):
+     verified_action({"op":"dialog_accept","bid":dialog_ref,"value":"not allowed"},seen,[])
+    with self.assertRaisesRegex(MecordObservationError,"DIALOG_PROMPT_ONLY"):
+     verified_action({"op":"dialog_dismiss","bid":dialog_ref,"value":"not allowed"},seen,[])
+
+ def test_dense_page_does_not_starve_authorized_frames(self):
+    main=[item(ref=f"b-abc123-7-{i+1}",name=f"Main {i}") for i in range(100)]
+    framed=item(ref="b-frame01-2-1",name="Inner button")
+    framed["sourceFrameTargetId"]="observed-frame-1"
+    framed["observationGeneration"]="frame01-2"
+    cs=observed_mecord_candidates(obs(main+[framed]),limit=30)
+    self.assertTrue(any(c["bid"]==framed["ref"] for c in cs))
+ def test_general_graphical_drag_between_current_observed_elements(self):
+    one=item(ref="b-abc123-7-11",active=False,name="Source")
+    two=item(ref="b-abc123-7-12",active=False,name="Destination")
+    one["tag"]=two["tag"]="canvas"
+    cs=observed_mecord_candidates(obs([], [one,two]))
+    self.assertEqual(verified_action({"op":"drag_to","bid":one["ref"],"value":two["ref"]},cs,[])["op"],"drag_to")
+    self.assertEqual(verified_action({"op":"hover","bid":one["ref"]},cs,[])["op"],"hover")
+    with self.assertRaisesRegex(MecordObservationError,"DRAG_TARGETS_NOT_CURRENT"):
+     verified_action({"op":"drag_to","bid":one["ref"],"value":"b-abc123-7-999"},cs,[])
+ def test_horizontal_scroll_and_diagonal_drag(self):
+    scroll=item(role="listbox",active=False)
+    scroll["scrollable"]=True
+    scroll["tag"]="div"
+    cs=observed_mecord_candidates(obs([], [scroll]))
+    self.assertEqual(verified_action({"op":"scroll","bid":cs[0]["bid"],"value":"right:640"},cs,[])["value"],"right:640")
+    draggable=item(ref="b-abc123-7-2")
+    drag=observed_mecord_candidates(obs([draggable]))
+    self.assertEqual(verified_action({"op":"drag_by","bid":draggable["ref"],"value":"up-right:20"},drag,[])["value"],"up-right:20")
+ def test_precise_relative_click_and_invalid_ratio(self):
+    graphic=item(active=False);graphic["tag"]="canvas"
+    cs=observed_mecord_candidates(obs([], [graphic]))
+    self.assertEqual(verified_action({"op":"click_relative","bid":graphic["ref"],"value":"0.27:0.83"},cs,[])["value"],"0.27:0.83")
+    with self.assertRaisesRegex(MecordObservationError,"RELATIVE_POINT_NOT_ENUMERATED"):
+     verified_action({"op":"click_relative","bid":graphic["ref"],"value":"1.01:0.20"},cs,[])
+ def test_progress_allows_repeated_fresh_generation_action(self):
+    cs=observed_mecord_candidates(obs([item()]))
+    history=[{"op":"click","bid":"b-abc123-5-1","identity":cs[0]["identity"],"value":"","progress":True}]*2
+    self.assertEqual(verified_action({"op":"click","bid":cs[0]["bid"]},cs,history)["op"],"click")
+ def test_oversized_model_value_is_rejected_not_truncated(self):
+    cs=observed_mecord_candidates(obs([item(role="textbox")]))
+    with self.assertRaisesRegex(MecordObservationError,"ACTION_FIELDS_INVALID"):
+     verified_action({"op":"type","bid":cs[0]["bid"],"value":"x"*401},cs,[])
+
+ def test_observed_shape_colors_and_circle_geometry_reach_model(self):
+    graphic=item(active=False,name="Target color")
+    graphic["tag"]="circle"
+    graphic["colors"]={"fill":"rgb(255, 0, 0)","stroke":"rgb(0, 0, 0)"}
+    graphic["shape"]={"circle":{"cx":30,"cy":40,"r":12},"center":{"x":30,"y":40}}
+    graphic["numericValue"]=7
+    cs=observed_mecord_candidates(obs([], [graphic]))
+    self.assertEqual(cs[0]["colors"]["fill"],"rgb(255, 0, 0)")
+    self.assertEqual(cs[0]["shape"]["circle"]["r"],12)
+    self.assertEqual(cs[0]["numericValue"],7)
 if __name__=="__main__":unittest.main(verbosity=2)

@@ -97,3 +97,103 @@ checkpoint, pause and diagnose rather than quietly switching task selections.
 The full 50-task threshold is 35 successful episodes; stopping early does
 not entitle the project to claim the benchmark passed.
 
+
+## Deep-audit corrective branch (29 October 2026)
+
+Fixes under stacked draft PR #695 are **benchmark-only** and not the
+shipping TaskOrchestrator. Do not interpret the source test score as an AI
+benchmark performance improvement or a production release acceptance.
+
+- The provider's `set_value` means slider updates, whereas its `type`
+  operation replaces textbox contents. The bridge now translates non-slider
+  `set_value` into `type` while preserving genuine slider actions.
+- Each fresh observation may regenerate a `bid`. Replay detection also uses
+  a bounded stable observation fingerprint, with the provider still retaining
+  its authoritative side-effect/no-progress controls.
+- Model observations now include bounded headings, text excerpt, checked and
+  selected states, input values, placeholder, and a real page-scroller ref.
+  The first tranche reserves room for visual candidates. Candidate JSON is
+  composed from whole records rather than cut mid-element.
+- Wait, keyboard text, bounded directional drag/resize, hotkey, text formatting
+  and selection-range operations now have a restrictive benchmark adapter
+  vocabulary. New operations must be accepted by the actual runtime provider;
+  offline tests cannot certify live DOM behavior.
+- Every episode retains sanitized step-level evidence, the controller sees
+  whether an interaction progressed, and an explicitly no-effect pre-dispatch
+  refusal may trigger a fresh decision. Uncertain post-dispatch operations
+  remain **non-replayable**.
+- Local bridge transport errors are distinguished from Meta transport errors.
+  The CDP bridge process receives an explicit environment allowlist.
+- The runner defaults to six steps per task. Workers 0–3 can reserve
+  from a common durable O_EXCL, short-lived locking ledger in one isolated
+  workspace. A lock is never held across a model/browser call, and failures
+  do not steal an uncertain owner's lock. The global campaign digest is
+  recorded before worker partitioning. Actual provider billing remains
+  authoritative; input-image charges are conservatively reserved, not a
+  provider-certified upper bound.
+- Keep `--limit 50 --workers 1 --worker 0 --max-steps 6 --seed 42`
+  explicitly pinned for future development runs. This is not a like-for-like
+  reproduction of the older four-worker checkpoint; compare fixed **task IDs**
+  and manifests, not only the aggregate scores.
+- New CI checks Python syntax, Node bridge syntax and pure controller/bridge
+  fixtures without Meta credentials or browser execution.
+
+### Still not covered by this isolated source patch
+
+The **code paths** for transient CDP screenshots, opt-in Meta vision
+requests, bounded iframe observations with explicit allowed origins, enumerated
+hit-tested graphical positions and a shared four-worker budget ledger now
+exist. They are source-tested, NOT physically qualified. Additional graphical
+types, cross-origin navigation beyond explicit owner-authorized origins,
+stable multimodal latency/cost measurements, source-pinned 50/125 model-driven
+qualifications, physical device acceptance and production TaskOrchestrator
+integration remain unverified or unimplemented. No benchmark success is
+claimed for them.
+
+The benchmark runner's separate entry point expects explicit host-injected
+`MUSE_API_KEY`. The production signed benchmark wrapper intentionally
+filters ambient environment variables, including credentials; **do not
+weaken that boundary to make this harness work automatically**. A separately
+reviewed credential broker would be needed for approved integrated launch.
+
+### Multimodal and multiworker source-only usage
+
+`--vision` adds one transient, bounded JPEG screenshot captured using the
+exact fixture tab's Mecord CDP session. The screenshot is returned to the
+isolated Meta runner as a user-image content part; only its SHA-256 and
+byte count appear in the trace. Raw images are not persisted. If CDP
+capture fails or the task tab navigates out of the fixture, a vision run
+fails closed. Visual tokens consume the same workspace spending cap.
+
+An OOPIF URL is accepted only when it resides under the pinned file fixture
+root or its canonical HTTP(S) origin is listed in the independently configured
+`MECORD_MINIWOB_FRAME_ORIGINS` comma-separated allowlist. Same-origin frame
+refs must carry observed nested-frame provenance. Unlisted third-party
+frame content is excluded, not silently treated as authorized.
+
+Worker example, using the **same workspace**, task selection and seed:
+
+```shell
+python benchmarks/miniwob/integration/run_live.py --limit 50 --workers 4 --worker 0 --seed 42 --max-steps 6 --vision --cap-usd 0.007
+```
+
+Worker indices 1, 2 and 3 use the corresponding `--worker` argument in
+separate owner-authorized processes. The hard workspace lifetime reservation
+ceiling remains USD 0.07, so a full vision campaign may stop early rather than
+overspend. Neither a partial run nor source tests prove 70% accuracy.
+
+Only **after all four worker files exist**, report the frozen manifest result
+with the report-only command:
+
+```shell
+python benchmarks/miniwob/integration/aggregate_campaign.py --expected 50 --seed 42 --workers 4 <worker0.jsonl> <worker1.jsonl> <worker2.jsonl> <worker3.jsonl>
+```
+
+The aggregator checks the global manifest SHA-256, exact task index coverage,
+worker membership, duplicate tasks, and unscored episodes. It cannot infer
+independent task rewards when no real BrowserGym run has been executed.
+
+Production integration must use the production kernel's authority/policy
+and verified task planning contracts, not invoke this raw benchmark bridge
+against personal Chrome tabs. That integration remains a separate approval
+and qualification gate.
