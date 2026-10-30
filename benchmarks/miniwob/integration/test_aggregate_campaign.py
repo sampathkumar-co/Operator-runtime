@@ -81,4 +81,15 @@ class Aggregation(unittest.TestCase):
       aggregate([file(p,"native-mixed",rows)],50,42,1,
        roster=ROSTER,harness_sha256=HARNESS,runtime_manifest_sha256=RUNTIME)
 
+
+ def test_score_requires_independent_step_and_error_free_success(self):
+    with tempfile.TemporaryDirectory() as temp:
+     folder=Path(temp)
+     with self.assertRaisesRegex(CampaignError,"SCORED_EPISODE_NEVER_STEPPED"):
+      aggregate([file(folder,"no-step",[episode(0,steps=0)])],50,42,1,
+       roster=ROSTER,harness_sha256=HARNESS,runtime_manifest_sha256=RUNTIME)
+     with self.assertRaisesRegex(CampaignError,"SUCCESS_WITH_ERROR_NOT_CERTIFIABLE"):
+      aggregate([file(folder,"false-positive",[episode(0,error="MECORD_EXECUTION_UNCERTAIN")])],50,42,1,
+       roster=ROSTER,harness_sha256=HARNESS,runtime_manifest_sha256=RUNTIME)
+
 if __name__=="__main__":unittest.main(verbosity=2)
