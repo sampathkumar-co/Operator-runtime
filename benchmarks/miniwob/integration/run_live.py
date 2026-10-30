@@ -45,7 +45,7 @@ import browsergym.miniwob
 from mecord_observation import observed_mecord_candidates,verified_action,MecordObservationError
 from integration.budget_ledger import BudgetLedger, require_budget_feasibility
 from integration.bridge_protocol import parse_bridge_http_rejection
-from integration.model_failures import safe_meta_http_error,is_campaign_blocking_meta_failure
+from integration.model_failures import safe_meta_http_error,is_campaign_blocking_meta_failure,is_campaign_blocking_execution_failure
 from playwright.sync_api._generated import BrowserType
 
 # Isolated process-only shim: BrowserGym supplies launch args itself, and also
@@ -421,8 +421,8 @@ try:
                     campaign_stop = "META_PROVIDER_REJECTED_OR_UNAVAILABLE"
                     outcome["reward"] = None
                     outcome["unscored"] = True
-                if str(exc).startswith("LOCAL_BRIDGE_TRANSPORT_"):
-                    campaign_stop = "LOCAL_BRIDGE_TRANSPORT_UNCERTAIN"
+                if is_campaign_blocking_execution_failure(str(exc)):
+                    campaign_stop = "MECORD_PROVIDER_OR_OBSERVATION_UNCERTAIN"
                     outcome["reward"] = None
                     outcome["unscored"] = True
                 if str(exc) in {"BUDGET_CAP_REACHED","MODEL_USAGE_MISSING"} or str(exc).startswith(("META_HTTP_429","META_HTTP_503","META_HTTP_504")):
