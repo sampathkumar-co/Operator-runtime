@@ -1,15 +1,17 @@
 // Isolated, source-pinned Mecord MiniWoB bridge. No production relay or credentials.
 import http from 'node:http';import path from 'node:path';
 import {timingSafeEqual} from 'node:crypto';
-import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,boundedRelativePoint,boundedVisiblePageText,validatedDialogPrompt,preDispatchRejection} from './bridge_actions.mjs';
+import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,boundedRelativePoint,boundedVisiblePageText,validatedDialogPrompt,preDispatchRejection,boundedGesturePath} from './bridge_actions.mjs';
 import {captureSyntheticView,allowedSyntheticFrameUrl} from './browser_visual.mjs';
+import {verifyIsolatedRuntimePin} from './runtime_pin.mjs';
 import {pathToFileURL} from 'node:url';import {readFile} from 'node:fs/promises';
 const dir=process.env.MECORD_MINIWOB_WORKDIR ? path.resolve(process.env.MECORD_MINIWOB_WORKDIR) : null;
 if(!dir)throw Error('MECORD_MINIWOB_WORKDIR_REQUIRED');
 const root=process.env.MECORD_MINIWOB_RUNTIME_PATH ? path.resolve(process.env.MECORD_MINIWOB_RUNTIME_PATH) : null;
 if(!root)throw Error('MECORD_MINIWOB_RUNTIME_PATH_REQUIRED');
-const manifest=JSON.parse(await readFile(path.join(root,'runtime','runtime-manifest.json'),'utf8'));
-if(manifest.version!=='2.0.7-rc.6'||manifest.sourceCommit!=='beef93d3aa9c2c1363e92a6b3b78c893bf1a0ad4')throw Error('UNPINNED_RUNTIME');
+const manifestBytes=await readFile(path.join(root,'runtime','runtime-manifest.json'));
+const manifest=JSON.parse(manifestBytes.toString('utf8'));
+const runtimePin=verifyIsolatedRuntimePin(manifest,manifestBytes,process.env);
 const {BrowserCdpProvider}=await import(pathToFileURL(path.join(root,'runtime','app','src','capabilities','browser-cdp.js')).href);
 const {CdpConnection}=await import(pathToFileURL(path.join(root,'runtime','app','src','capabilities','browser-cdp-connection.js')).href);
 const port=Number(process.env.MECORD_BENCH_CDP_PORT||9330);
@@ -89,11 +91,16 @@ const svr=http.createServer(async(req,res)=>{
   const taskTab=await exactTarget();
   const targetId=taskTab.id;
   if(input.op==='inspect'){
-   if(Object.keys(input).some(k=>!['op','visual'].includes(k))||
+   if(Object.keys(input).some(k=>!['op','visual','controlOffset','visualOffset'].includes(k))||
       (input.visual!==undefined&&typeof input.visual!=='boolean'))throw Error('EXTRA_INSPECT_PARAMETERS');
+   for(const k of ['controlOffset','visualOffset']){
+    if(input[k]!==undefined&&(!Number.isInteger(input[k])||input[k]<0||input[k]>640))
+      throw Error('INSPECT_PAGINATION_INVALID');
+   }
    inspectState=null;
    const action={id:'miniwob-inspect-'+(++sequence),capability:'browser.inspect',risk:'read',
-    input:{targetId,observation:{maxControls:160,maxVisuals:160,maxBytes:131072}}};
+    input:{targetId,observation:{maxControls:160,maxVisuals:160,maxBytes:131072,
+     controlOffset:input.controlOffset||0,visualOffset:input.visualOffset||0}}};
    const out=await provider.execute(action);
    if(!out.ok||out.provider!=='browser.cdp')throw Error('PROVIDER_INSPECT_FAILED_'+(out.error?.code||'UNKNOWN'));
    if(out.output?.dialog){
@@ -104,7 +111,7 @@ const svr=http.createServer(async(req,res)=>{
       throw Error('DIALOG_OBSERVATION_UNAUTHORIZED');
     inspectState={targetId,dialogRef:dialog.ref,dialogType:dialog.type};
     res.end(JSON.stringify({ok:true,provider:out.provider,durationMs:out.durationMs,
-      dialog:{ref:dialog.ref,type:dialog.type},
+      dialog:{ref:dialog.ref,type:dialog.type},nativeGesturesEnabled:runtimePin.nativeGesturesEnabled,
       page:{semantic:{observationGeneration:'dialog-1',controls:[],visuals:[]}}}));
     return;
    }
@@ -168,13 +175,15 @@ const svr=http.createServer(async(req,res)=>{
     pagination:semantic.pagination||null,
     frameCoverage:out.output?.page?.frameCoverage||null,
     acceptedFrames,rejectedFrames,
-    screenshotStatus,screenshot:screenshot?.data||null,
+    screenshotStatus,nativeGesturesEnabled:runtimePin.nativeGesturesEnabled,screenshot:screenshot?.data||null,
     screenshotBytes:screenshot?.bytes||0,screenshotSha256:screenshot?.digest||null,
     page:{semantic:{observationGeneration:generation,controls,visuals}},
     observedRefCount:refs.size,visualRelativeRefs:relativeRefs.size,sortableRefs:sortableRefs.size,scrollRefs:scrollRefs.size,truncated:out.output?.truncated===true}));
    return;
   }
-  const allowed=new Set(['click','hover','set_value','type','select','select_date','key_press','click_relative','scroll','drag_between','drag_to','drag_by','resize','hotkey','keyboard_text','format_text','select_text_range','dialog_accept','dialog_dismiss']);
+  const nativeOps=new Set(['double_click','shift_click','drag_path']);
+  if(nativeOps.has(input.op)&&!runtimePin.nativeGesturesEnabled)throw Error('NATIVE_GESTURES_UNAVAILABLE_IN_PINNED_RUNTIME');
+  const allowed=new Set(['double_click','shift_click','drag_path','click','hover','set_value','type','select','select_date','key_press','click_relative','scroll','drag_between','drag_to','drag_by','resize','hotkey','keyboard_text','format_text','select_text_range','dialog_accept','dialog_dismiss']);
   if(!allowed.has(input.op))throw Error('UNSUPPORTED_INTERACTION');
   if(input.op==='dialog_accept'||input.op==='dialog_dismiss'){
    const ref=input.ref;
@@ -207,7 +216,7 @@ const svr=http.createServer(async(req,res)=>{
   const graphicalRefs=new Set([...inspectState.refs,...inspectState.relativeRefs]);
   const allowedRefs=(input.op==='click_relative'?inspectState.relativeRefs:
     input.op==='drag_between'?inspectState.sortableRefs:
-    input.op==='drag_to'||input.op==='hover'||input.op==='drag_by'||input.op==='resize'?graphicalRefs:
+    input.op==='drag_to'||input.op==='hover'||input.op==='drag_by'||input.op==='resize'||input.op==='drag_path'||input.op==='double_click'||input.op==='shift_click'?graphicalRefs:
     input.op==='scroll'?inspectState.scrollRefs:inspectState.refs);
   if(!allowedRefs.has(ref))throw Error('REF_NOT_FROM_FRESH_INSPECTION');
   const observed=inspectState.controlInfo.get(ref);
@@ -222,11 +231,14 @@ const svr=http.createServer(async(req,res)=>{
    if(!observed||!new Set(['select','combobox','listbox','option']).has(role))throw Error('TARGET_NOT_SELECTABLE');
   }
   if(Object.keys(input).some(k=>!['op','ref','value','key'].includes(k)))throw Error('EXTRA_MODEL_PARAMETERS');
+  if(input.op==='drag_path'&&observed?.tag!=='canvas'&&observed?.tag!=='svg'&&observed?.tag!=='rect'&&observed?.tag!=='path'&&observed?.tag!=='circle'&&observed?.tag!=='line')
+    throw Error('GESTURE_TARGET_NOT_GRAPHICAL');
   // Provider set_value is reserved for sliders; native text inputs use type
   // (which safely replaces the current value, including clear-to-empty).
   const dispatchOp=providerOperationForInput(input.op==='drag_to'?'drag_between':input.op,observed?.role);
   const actionInput={targetId,operation:dispatchOp,target:{ref}};
   if(input.op==='click_relative'){Object.assign(actionInput,boundedRelativePoint(input.value));}
+  if(input.op==='drag_path')actionInput.path=boundedGesturePath(input.value);
   if(['type','set_value','select','select_date','keyboard_text','format_text','select_text_range'].includes(input.op)){
    if(typeof input.value!=='string'||(input.value.length===0&&input.op!=='set_value')||input.value.length>400)throw Error('INVALID_TEXT_VALUE');
    if(input.op==='select_date'&&!/^\d{4}-\d{2}-\d{2}$/.test(input.value))throw Error('DATE_VALUE_INVALID');

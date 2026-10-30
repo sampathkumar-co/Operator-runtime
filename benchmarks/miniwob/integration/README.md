@@ -191,7 +191,7 @@ Only **after all four worker files exist**, report the frozen manifest result
 with the report-only command:
 
 ```shell
-python benchmarks/miniwob/integration/aggregate_campaign.py --expected 50 --seed 42 --workers 4 --harness-sha256 <EXACT_64_CHAR_HARNESS_DIGEST_FROM_RUN> <checkpoint0.jsonl> <checkpoint1.jsonl> ...
+python benchmarks/miniwob/integration/aggregate_campaign.py --expected 50 --seed 42 --workers 4 --harness-sha256 <EXACT_64_CHAR_HARNESS_DIGEST_FROM_RUN> --runtime-manifest-sha256 <EXACT_64_CHAR_RUNTIME_MANIFEST_DIGEST_FROM_RUN> <checkpoint0.jsonl> <checkpoint1.jsonl> ...
 ```
 
 The aggregator accepts multiple disjoint checkpoint files, verifies exact frozen
@@ -205,3 +205,44 @@ Production integration must use the production kernel's authority/policy
 and verified task planning contracts, not invoke this raw benchmark bridge
 against personal Chrome tabs. That integration remains a separate approval
 and qualification gate.
+
+## Native gesture source integration and observation paging (30 October 2026)
+
+PR #699 combines the isolated benchmark controller source with PR #698's
+native double-click, Shift-click, held-pointer drawing and recovery logic.
+**This is source integration only.** The currently installed
+`mecord-connect@2.0.7-rc.6` remains pinned and returns
+`nativeGesturesEnabled=false`; it cannot execute the new operations.
+
+A separately built, independently verified and owner-authorized candidate
+with a non-legacy source revision is required. For that candidate, the operator
+must supply `MECORD_MINIWOB_NATIVE_GESTURES=1`,
+`MECORD_MINIWOB_EXPECTED_RUNTIME_VERSION`,
+`MECORD_MINIWOB_EXPECTED_RUNTIME_COMMIT` and
+`MECORD_MINIWOB_EXPECTED_MANIFEST_SHA256` (the SHA-256 of the exact compiled
+`runtime/runtime-manifest.json` bytes). The bridge verifies all four and fails
+closed if the installed runtime differs. The model cannot unlock this contract.
+
+When that pin succeeds, the model may choose:
+`double_click` or `shift_click` on a fresh actionable observed ref,
+or `drag_path` on a fresh observed graphical ref. The drawing `value` is
+two to 24 semicolon-separated two-decimal relative points inside that
+observed element, for example `0.10:0.10;0.90:0.90`. Every point remains
+subject to native provider hit-tests; there is no unrestricted screen click.
+Mecord dispatch success still does not imply independent BrowserGym reward.
+
+The model may choose `inspect_next_page` with empty ref/value/key if
+the actual Mecord inspection reports a further control/visual page.
+The runner requests only provider-returned offsets and discards old refs
+on every inspection. Pagination is bounded at offset 640 and six steps
+per default episode. It **does not** claim unlimited graphical coverage
+or continuous moving-target tracking. No extra model budget is granted.
+
+Every episode now records the exact compiled runtime manifest digest in
+addition to the frozen harness source digest. The scorer rejects checkpoints
+from different compiled runtimes, even if their task IDs and prompts match.
+
+**Release and measurement HOLD:** no native gestures have been physically
+tested on the offline owner's laptop, no signed next runtime candidate exists,
+no 20/50/125 model-driven run has been completed on this combined source,
+and there is no evidence of 70% MiniWoB accuracy.

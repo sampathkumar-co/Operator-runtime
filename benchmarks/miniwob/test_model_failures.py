@@ -19,7 +19,8 @@ class ModelFailureTests(unittest.TestCase):
         for value in ("MECORD_EXECUTION_BROKEN_PIPE",
                       "MECORD_EXECUTION_BROWSER_TARGET_STALE",
                       "MECORD_OBSERVATION_FAILED", "MECORD_VISION_UNAVAILABLE",
-                      "LOCAL_BRIDGE_TRANSPORT_URLError"):
+                      "LOCAL_BRIDGE_TRANSPORT_URLError",
+                      "NATIVE_RUNTIME_CAPABILITY_CHANGED"):
             self.assertTrue(is_campaign_blocking_execution_failure(value))
         for value in ("MODEL_RESPONSE_INCOMPLETE","NO_MECORD_GROUNDED_TARGETS",
                       "META_HTTP_400",None,{"error":"unsafe"}):

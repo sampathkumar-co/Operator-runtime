@@ -44,8 +44,14 @@ import gymnasium as gym
 import browsergym.miniwob
 from mecord_observation import observed_mecord_candidates,verified_action,MecordObservationError
 from integration.budget_ledger import BudgetLedger, require_budget_feasibility
+from integration.inspection_paging import next_page_offsets
+from integration.outcome_scoring import score_terminal_if_unstepped
 from integration.bridge_protocol import parse_bridge_http_rejection
-from integration.model_failures import safe_meta_http_error,is_campaign_blocking_meta_failure,is_campaign_blocking_execution_failure
+from integration.model_failures import safe_meta_http_error,classify_episode_failure
+from integration.api_accounting import checked_reported_usage
+from integration.campaign_plan import plan_tasks
+from integration.checkpoint_integrity import seal_row,ZERO_DIGEST
+from integration.motion_hints import motion_hints
 from playwright.sync_api._generated import BrowserType
 
 # Isolated process-only shim: BrowserGym supplies launch args itself, and also
@@ -71,17 +77,15 @@ if not 16 <= len(key) <= 400:
 all_tasks = sorted(str(t) for t in gym.envs.registry if str(t).startswith("browsergym/miniwob."))
 if len(all_tasks) != 125 or len(set(all_tasks)) != 125:
     raise RuntimeError("CANONICAL_125_TASK_ROSTER_REQUIRED")
-indices = (list(range(125)) if args.limit == 125 else
-           [round(i * 124 / (args.limit - 1)) for i in range(args.limit)] if args.limit > 1 else [0])
-# Hash the GLOBAL campaign first, before sharding. Every worker then reports
-# the same immutable roster digest; worker-specific partitions are recorded too.
-full_campaign_plan = [(i, all_tasks[index]) for i, index in enumerate(indices)]
+# Debugging is deliberately non-qualifying and uses index zero.
+if args.task_id and (args.start_at!=0 or args.count is not None):
+    raise RuntimeError("SINGLE_TASK_DEBUG_MUST_BE_UNSHARDED")
+try:
+    full_campaign_plan,task_plan,task_debug=plan_tasks(
+        all_tasks,args.limit,args.workers,args.worker,args.task_id)
+except ValueError as exc:
+    raise RuntimeError(str(exc)) from None
 global_plan_sha256 = sha256(json.dumps(full_campaign_plan,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
-task_plan = [row for row in full_campaign_plan if row[0] % args.workers == args.worker]
-if args.task_id:
-    if args.task_id not in all_tasks:
-        raise RuntimeError("TASK_ID_NOT_IN_FROZEN_BROWSERGYM_ROSTER")
-    task_plan = [(all_tasks.index(args.task_id), args.task_id)]
 frozen_plan_sha256=sha256(json.dumps(task_plan,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
 if type(args.start_at) is not int or not 0 <= args.start_at < len(task_plan):
     raise RuntimeError("INVALID_CAMPAIGN_OFFSET")
@@ -107,9 +111,23 @@ harness_files = [
     Path(__file__).with_name("budget_ledger.py"),
     Path(__file__).with_name("browser_visual.mjs"),
     Path(__file__).with_name("model_failures.py"),
+    Path(__file__).with_name("runtime_pin.mjs"),
+    Path(__file__).with_name("inspection_paging.py"),
+    Path(__file__).with_name("outcome_scoring.py"),
+    Path(__file__).with_name("api_accounting.py"),
+    Path(__file__).with_name("campaign_plan.py"),
+    Path(__file__).with_name("checkpoint_integrity.py"),
+    Path(__file__).with_name("motion_hints.py"),
 ]
 if not all(p.is_file() for p in harness_files):
     raise RuntimeError("BENCHMARK_HARNESS_FILE_MISSING")
+runtime_manifest_path=Path(os.environ["MECORD_MINIWOB_RUNTIME_PATH"]).resolve() / "runtime" / "runtime-manifest.json"
+runtime_manifest_bytes=runtime_manifest_path.read_bytes()
+runtime_manifest_sha256=sha256(runtime_manifest_bytes).hexdigest()
+runtime_manifest_info=json.loads(runtime_manifest_bytes)
+if type(runtime_manifest_info) is not dict:
+    raise RuntimeError("RUNTIME_MANIFEST_INVALID")
+
 harness_sha256 = sha256(json.dumps(
     [(p.name,sha256(p.read_bytes()).hexdigest()) for p in harness_files],
     separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
@@ -142,7 +160,9 @@ bridge_token = secrets.token_hex(32)
 BRIDGE_ENV_ALLOWED = {"PATH","Path","PATHEXT","SystemRoot","SYSTEMROOT","WINDIR",
     "HOME","USERPROFILE","LOCALAPPDATA","APPDATA","TEMP","TMP",
     "MECORD_MINIWOB_WORKDIR","MECORD_MINIWOB_RUNTIME_PATH","MECORD_BENCH_CDP_PORT",
-    "MECORD_MINIWOB_FRAME_ORIGINS"}
+    "MECORD_MINIWOB_FRAME_ORIGINS",
+    "MECORD_MINIWOB_NATIVE_GESTURES","MECORD_MINIWOB_EXPECTED_RUNTIME_VERSION",
+    "MECORD_MINIWOB_EXPECTED_RUNTIME_COMMIT","MECORD_MINIWOB_EXPECTED_MANIFEST_SHA256"}
 bridge_env = {k:v for k,v in os.environ.items() if k in BRIDGE_ENV_ALLOWED}
 bridge_env["MECORD_MINIWOB_BRIDGE_TOKEN"] = bridge_token
 bridge = subprocess.Popen(["node",str(Path(__file__).with_name("mecord_bridge.mjs"))],
@@ -152,7 +172,7 @@ JSON_ACTION_SCHEMA = {
     "type":"json_schema",
     "json_schema":{"name":"mecord_browser_action","strict":True,"schema":{
         "type":"object","properties":{
-            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative","select_date","scroll","drag_between","drag_to","wait","drag_by","resize","hotkey","keyboard_text","format_text","select_text_range","dialog_accept","dialog_dismiss"]},
+            "op":{"type":"string","enum":["click","set_value","type","select","key_press","hover","click_relative","select_date","scroll","drag_between","drag_to","wait","drag_by","resize","hotkey","keyboard_text","format_text","select_text_range","dialog_accept","dialog_dismiss","double_click","shift_click","drag_path","inspect_next_page"]},
             "bid":{"type":"string"},"value":{"type":"string"},"key":{"type":"string"}
         },
         "required":["op","bid","value","key"],"additionalProperties":False
@@ -190,12 +210,20 @@ def request_model(prompt, *, output_limit=None, screenshot=None):
         with urllib.request.urlopen(req,timeout=55) as response:data=json.load(response)
     except urllib.error.HTTPError as exc:
         raise RuntimeError(safe_meta_http_error(exc.code,exc.read(4096))) from None
-    u=data.get("usage") or {}
-    ti=int(u.get("prompt_tokens") or 0);to=int(u.get("completion_tokens") or 0)
-    in_tokens+=ti;out_tokens+=to;api_calls+=1
-    if ti<=0 or to<0:
-        raise RuntimeError("MODEL_USAGE_MISSING")
-    cost+=(ti*.10+to*.20)/1e6
+    # The API request may already be charged even if its response is invalid.
+    # Do not issue another call unless exact integer usage is available and
+    # its estimated charge fits within the preceding reservation.
+    api_calls+=1
+    checked=checked_reported_usage(data.get("usage"),reservation_usd=reserve)
+    # Recording can fail after the provider has charged a request. Stop rather
+    # than allow unaccounted additional calls. No reservation is refunded.
+    ledger.record_reported_usage(reservation_usd=reserve,
+        prompt_tokens=checked["prompt_tokens"],
+        completion_tokens=checked["completion_tokens"],
+        estimated_usd=checked["estimated_usage_usd"])
+    ti=checked["prompt_tokens"];to=checked["completion_tokens"]
+    in_tokens+=ti;out_tokens+=to
+    cost+=checked["estimated_usage_usd"]
     choices=data.get("choices") or []
     if not choices:return {}, "incomplete"
     choice=choices[0]
@@ -265,6 +293,7 @@ try:
     scored_failures = 0
     unscored_episodes = 0
     with output_path.open("x", encoding="utf8") as log:
+        previous_record_sha256=ZERO_DIGEST
         for original_index, task_id in task_plan:
             attempted_count += 1
             start = time.perf_counter()
@@ -274,13 +303,21 @@ try:
                         "trace":[], "step_limit":args.max_steps, "frozen_plan_sha256":frozen_plan_sha256,
                         "global_campaign_sha256":global_plan_sha256,"harness_sha256":harness_sha256,
                         "source_commit":source_commit,"vision_enabled":args.vision,
-                         "worker":args.worker,"workers":args.workers}
+                         "runtime_manifest_sha256":runtime_manifest_sha256,
+                         "runtime_version":runtime_manifest_info.get("version"),
+                         "runtime_source_commit":runtime_manifest_info.get("sourceCommit"),
+                         "native_gestures_enabled":None,
+                         "worker":args.worker,"workers":args.workers,
+                         "task_debug":task_debug,"failure_kind":None,
+                         "cumulative_model_usage_estimate_usd":0.0}
             env = None
             try:
                 env = gym.make(task_id, headless=True)
                 obs, info = env.reset(seed=args.seed)
                 time.sleep(0.08)
                 history = []
+                previous_candidates=[]
+                inspect_offsets={"controlOffset":0,"visualOffset":0}
                 for step in range(args.max_steps):
                     event = {"step":step+1}
                     outcome["trace"].append(event)
@@ -288,11 +325,25 @@ try:
                         raise RuntimeError("TASK_WALL_TIMEOUT")
                     # Mecord RC6, not BrowserGym AX, is the dispatch authority.
                     # Each turn receives fresh generation-bound refs and visual geometry.
-                    mecord_inspection = bridge_call(port, {"op":"inspect","visual":args.vision})
+                    mecord_inspection = bridge_call(port, {"op":"inspect","visual":args.vision,**inspect_offsets})
                     if not mecord_inspection.get("ok") or mecord_inspection.get("provider") != "browser.cdp":
                         raise RuntimeError("MECORD_OBSERVATION_FAILED")
                     candidates = observed_mecord_candidates(mecord_inspection,limit=90)
+                    movement=motion_hints(previous_candidates,candidates)
+                    previous_candidates=candidates
+                    native_ready = mecord_inspection.get("nativeGesturesEnabled") is True
+                    if outcome["native_gestures_enabled"] is not None and outcome["native_gestures_enabled"] != native_ready:
+                        raise RuntimeError("NATIVE_RUNTIME_CAPABILITY_CHANGED")
+                    outcome["native_gestures_enabled"]=native_ready
+                    next_offsets=next_page_offsets(
+                        mecord_inspection.get("pagination"),
+                        current_control=inspect_offsets["controlOffset"],
+                        current_visual=inspect_offsets["visualOffset"])
                     if not candidates:
+                        if next_offsets:
+                            inspect_offsets=next_offsets
+                            event["recovery"]="NEXT_OBSERVED_PAGE_WITH_NO_TARGETS"
+                            continue
                         raise RuntimeError("NO_MECORD_GROUNDED_TARGETS")
                     candidate_json,hidden_count = compact_candidate_json(candidates)
                     event.update({"observed_candidates":len(candidates),
@@ -302,6 +353,10 @@ try:
                          "accepted_frames":mecord_inspection.get("acceptedFrames"),
                          "rejected_frames":mecord_inspection.get("rejectedFrames"),
                          "frame_coverage":mecord_inspection.get("frameCoverage"),
+                         "native_gestures_enabled":native_ready,
+                         "inspected_offsets":inspect_offsets.copy(),
+                         "next_page_available":next_offsets is not None,
+                         "motion_hint_count":len(movement),
                          "screenshot_status":mecord_inspection.get("screenshotStatus"),
                          "screenshot_sha256":mecord_inspection.get("screenshotSha256")})
                     prompt = (
@@ -311,6 +366,8 @@ try:
                         "coordinates, refs or authority. Return ONLY JSON with exactly four strings: "
                         '{"op":"click","bid":"b-current-observed-ref","value":"","key":""}. '
                         "Supported actions: click,set_value,type,select,key_press,hover,click_relative,select_date,scroll,drag_between,drag_to,wait,drag_by,resize,hotkey,keyboard_text,format_text,select_text_range,dialog_accept,dialog_dismiss. "
+                        + ("Additional PINNED native operations: double_click,shift_click on exact actionable refs; drag_path on observed graphic ref using value=0.10:0.10;0.90:0.90 (2-24 relative points). " if native_ready else "Native gestures are unavailable in this runtime; do NOT request double_click,shift_click,drag_path. ") +
+                        ("Use inspect_next_page with empty bid,value,key to inspect the next provider-validated control/visual page WITHOUT a browser action. " if next_offsets else "No further observed inspection page is available. ") +
                         "For a javascript-dialog candidate use dialog_accept or dialog_dismiss with its exact bid; value only for prompt accept. For wait use empty bid/value/key. For hotkey put CTRL+A/CTRL+B/CTRL+I/CTRL+U/CTRL+Z in key. "
                         "For drag_by or resize, value is one of eight compass directions (e.g. down-right:80), with distance 10/20/40/80/160/320. For format_text use bold/italic/underline. "
                         "For select_text_range use start:end as value. For keyboard_text use an editable target. "
@@ -327,7 +384,8 @@ try:
                         + "\nPage headings: " + json.dumps(mecord_inspection.get("headings") or [],ensure_ascii=True)[:1000]
                         + "\nVisible page excerpt: " + str(mecord_inspection.get("textExcerpt") or "")[:1200]
                         + "\nMore omitted candidates: " + str(hidden_count)
-                        + "\nPrevious actions: " + json.dumps(history[-4:],ensure_ascii=True)[:2200]
+                        + "\nObserved motion (advisory only, never dispatch coordinates): " + json.dumps(movement,ensure_ascii=True)[:1800]
+                         + "\nPrevious actions: " + json.dumps(history[-4:],ensure_ascii=True)[:2200]
                         + "\nSelect exactly one next action, with a bid from CURRENT controls."
                     )
                     event["candidate_digest"] = sha256(candidate_json.encode("utf8")).hexdigest()[:20]
@@ -340,7 +398,7 @@ try:
                     model_action, status = request_model(prompt,screenshot=screenshot)
                     event["model_status"] = status
                     try:
-                        grounded = verified_action(model_action,candidates,history) if status=="completed" else None
+                        grounded = verified_action(model_action,candidates,history,allow_native_gestures=native_ready) if status=="completed" else None
                     except MecordObservationError as invalid:
                         event["first_action_error"] = str(invalid)[:80]
                         grounded = None
@@ -359,10 +417,16 @@ try:
                     if status != "completed":
                         raise RuntimeError("MODEL_RESPONSE_" + status.upper())
                     if grounded is None:
-                        grounded = verified_action(model_action,candidates,history)
+                        grounded = verified_action(model_action,candidates,history,allow_native_gestures=native_ready)
                     event["decision"] = {"op":grounded["op"],
                         "target":grounded.get("ref",""),
                         "value_hash":sha256(grounded.get("value","").encode()).hexdigest()[:16]}
+                    if grounded.get("op")=="inspect_next_page":
+                        if not next_offsets:
+                            raise RuntimeError("PAGINATION_NOT_AVAILABLE")
+                        inspect_offsets=next_offsets
+                        event["next_page_offsets"]=next_offsets
+                        continue
                     if grounded.get("op")=="wait":
                         event["wait"] = True
                         obs,reward,done,truncated,info=env.step("noop()")
@@ -375,10 +439,11 @@ try:
                     op=grounded["op"]
                     bid=grounded["ref"]
                     request = {"op":op,"ref":bid}
-                    if op in {"set_value","type","select","select_date","scroll","drag_between","drag_to","drag_by","resize","keyboard_text","format_text","select_text_range","dialog_accept","click_relative"}:
+                    if op in {"set_value","type","select","select_date","scroll","drag_between","drag_to","drag_by","resize","keyboard_text","format_text","select_text_range","dialog_accept","click_relative","drag_path"}:
                         request["value"]=grounded["value"]
                     if op in {"key_press","hotkey"}:request["key"]=grounded["key"]
                     result = bridge_call(port, request)
+                    inspect_offsets={"controlOffset":0,"visualOffset":0}
                     event.update({"provider_ok":result.get("ok") is True,
                         "provider_error":result.get("error"),
                         "provider_ms":result.get("durationMs"),
@@ -411,39 +476,44 @@ try:
                     if done or truncated: break
             except Exception as exc:
                 outcome["error"] = type(exc).__name__ + ":" + str(exc)[:100]
+                kind,unscored,stop=classify_episode_failure(exc)
+                outcome["failure_kind"]=kind
                 if outcome["trace"]:
                     outcome["trace"][-1]["failure"] = outcome["error"]
-                if isinstance(exc,(urllib.error.URLError,TimeoutError,ConnectionError)):
-                    campaign_stop = "META_TRANSPORT_UNCERTAIN"
-                    outcome["reward"] = None
-                    outcome["unscored"] = True
-                if is_campaign_blocking_meta_failure(str(exc)):
-                    campaign_stop = "META_PROVIDER_REJECTED_OR_UNAVAILABLE"
-                    outcome["reward"] = None
-                    outcome["unscored"] = True
-                if is_campaign_blocking_execution_failure(str(exc)):
-                    campaign_stop = "MECORD_PROVIDER_OR_OBSERVATION_UNCERTAIN"
-                    outcome["reward"] = None
-                    outcome["unscored"] = True
-                if str(exc) in {"BUDGET_CAP_REACHED","MODEL_USAGE_MISSING"} or str(exc).startswith(("META_HTTP_429","META_HTTP_503","META_HTTP_504")):
-                    campaign_stop = "API_BUDGET_OR_PROVIDER_STOP"
-                    # No independently scored task result is inferred when
-                    # the call never ran or token accounting is inconclusive.
-                    outcome["reward"] = None
-                    outcome["unscored"] = True
+                if unscored:
+                    campaign_stop=stop
+                    outcome["reward"]=None
+                    outcome["unscored"]=True
             finally:
                 if env:
+                    if outcome.get("unscored") is not True and outcome.get("steps")==0:
+                        try:
+                            score_terminal_if_unstepped(outcome,env)
+                        except Exception:
+                            outcome["reward"]=None
+                            outcome["unscored"]=True
+                            campaign_stop="BROWSERGYM_TERMINAL_REWARD_UNAVAILABLE"
+                            outcome["trace"].append({"terminal_scorer_error":"BROWSERGYM_TERMINAL_REWARD_UNAVAILABLE"})
                     try:env.close()
                     except:pass
+            outcome["cumulative_model_usage_estimate_usd"]=round(cost,7)
             outcome["elapsed_sec"] = round(time.perf_counter() - start, 2)
             outcome["cumulative_cost_usd"] = round(cost, 7)
             outcome["api_calls_cumulative"] = api_calls
+            # A task diagnostic or an error without an independent failure
+            # reward can never be silently counted as a valid success.
+            if outcome.get("error") and outcome.get("reward")==1:
+                outcome["reward"]=None
+                outcome["unscored"]=True
+                campaign_stop=campaign_stop or "ERROR_WITH_UNEXPECTED_SUCCESS"
             if outcome.get("unscored") is True or outcome["reward"] is None:
                 unscored_episodes += 1
             elif outcome["reward"] == 1.0:
                 scored_successes += 1
             else:
                 scored_failures += 1
+            outcome=seal_row(outcome,previous_record_sha256)
+            previous_record_sha256=outcome["record_sha256"]
             log.write(json.dumps(outcome, ensure_ascii=True) + "\n")
             log.flush()
             print("META_MECORD_EPISODE=" + json.dumps(outcome), flush=True)
@@ -454,7 +524,11 @@ try:
         "frozen_plan_sha256":frozen_plan_sha256,
         "global_campaign_sha256":global_plan_sha256,
         "harness_sha256":harness_sha256,"source_commit":source_commit,
+        "runtime_manifest_sha256":runtime_manifest_sha256,
+        "runtime_version":runtime_manifest_info.get("version"),
+        "runtime_source_commit":runtime_manifest_info.get("sourceCommit"),
         "start_at":args.start_at,"count":len(task_plan),"campaign_tag":args.campaign_tag,
+        "task_debug":task_debug,"qualification_eligible":not task_debug,
         "scored":scored_successes+scored_failures,
         "successes":scored_successes,"failures":scored_failures,
         "unscored":unscored_episodes,
@@ -462,7 +536,7 @@ try:
             if scored_successes+scored_failures else None),
         "status":"COMPLETE" if not campaign_stop and attempted_count==len(task_plan) and unscored_episodes==0 else "PARTIAL",
         "full_50_task_70_percent_gate":("PASS" if scored_successes>=35 else "FAIL")
-            if args.limit==50 and args.workers==1 and args.count is None and args.start_at==0
+            if not task_debug and args.limit==50 and args.workers==1 and args.count is None and args.start_at==0
             and attempted_count==50 and unscored_episodes==0 and not campaign_stop else "NOT_RUN",
         "campaign_stop":campaign_stop,
         "api_calls":api_calls,

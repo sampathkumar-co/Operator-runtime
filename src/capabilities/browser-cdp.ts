@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { normalizeObservedGesturePath, type ObservedGesturePoint } from './browser-cdp-gesture-contract.ts';
 import { constants as fsConstants } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
 import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationResult } from '../core/types.ts';
@@ -847,9 +848,20 @@ export class BrowserCdpProvider implements CapabilityProvider {
       return await this.#handleDialog(action, started, signal);
     }
     const targetId = requiredTargetId(action.input.targetId);
-    if (!['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll', 'type', 'select', 'set_value', 'select_date', 'key_press', 'hotkey', 'keyboard_text', 'format_text', 'select_text_range'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation is not a supported bounded browser interaction.');
+    if (!['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'drag_path', 'double_click', 'shift_click', 'click_relative', 'scroll', 'type', 'select', 'set_value', 'select_date', 'key_press', 'hotkey', 'keyboard_text', 'format_text', 'select_text_range'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation is not a supported bounded browser interaction.');
 
+    let gesturePath: ObservedGesturePoint[] | undefined;
+    if (operation === 'drag_path') {
+      try { gesturePath = normalizeObservedGesturePath(action.input.path); }
+      catch { throw new OperatorError('INVALID_BROWSER_GESTURE_PATH',
+        'drag_path requires 2-24 exact observed-element relative points, quantized to 0.01 within [0.01,0.99].'); }
+    } else if (action.input.path !== undefined) {
+      throw new OperatorError('INVALID_BROWSER_GESTURE_PATH', 'path is only valid for drag_path.');
+    }
     const targetSpec = normalizeTargetSpec(action.input.target);
+    if (['drag_path','double_click','shift_click'].includes(operation) && !targetSpec.ref) {
+      throw new OperatorError('INVALID_BROWSER_TARGET', 'Native graphical gestures require one exact observed target ref.');
+    }
     if (!targetSpec.ref && !targetSpec.css && !targetSpec.text && !targetSpec.renderedColor && !(targetSpec.role && targetSpec.name)) {
       throw new OperatorError('INVALID_BROWSER_TARGET', 'Provide an observed ref, css, text, renderedColor, or role+name for semantic targeting.');
     }
@@ -992,7 +1004,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
         ...(operation === 'click_relative' && hasPixelPoint ? { xPx, yPx } : {}),
         ...(operation === 'key_press' ? { key: action.input.key as string } : {}),
         ...(operation === 'hotkey' ? { keys: action.input.keys as string[] } : {}),
-        ...(operation === 'select_text_range' ? { start: action.input.start as number, end: action.input.end as number } : {})
+        ...(operation === 'select_text_range' ? { start: action.input.start as number, end: action.input.end as number } : {}),
+        ...(gesturePath ? { path: gesturePath } : {})
       }, signal);
       const value = interaction.value;
       if (value.ok !== true) {
@@ -1055,6 +1068,9 @@ export class BrowserCdpProvider implements CapabilityProvider {
         throw new OperatorError('BROWSER_DOWNLOAD_CANCELED', 'Browser download was canceled.', { retryable: true, details: downloadResult });
       }
       const stateProgress = downloadResult?.state === 'completed' || directSemanticProgress || JSON.stringify(beforeRelevant) !== JSON.stringify(afterRelevant);
+      // A canvas can change pixels without changing its DOM tree. Preserve the
+      // truthful input-dispatched result for independently verified drawing
+      // tasks, but still prohibit repeating an unchanged identical stroke.
       if (['drag', 'drag_by', 'drag_between'].includes(operation) && !stateProgress) {
         // An unobserved page delta does not prove no physical effect: a drag
         // was dispatched and may have changed hidden server or application state.
@@ -1065,12 +1081,13 @@ export class BrowserCdpProvider implements CapabilityProvider {
         });
       }
       const actionIdentity = String(beforeTarget.identity ?? targetSpec.ref ?? targetSpec.css ?? `${targetSpec.role ?? ''}:${targetSpec.name ?? targetSpec.text ?? ''}`);
-      const actionPayload = { operation, toTarget: toTargetSpec, value: action.input.value ?? null, deltaX, deltaY, xRatio, yRatio, xPx, yPx, key: action.input.key, keys: action.input.keys, start: action.input.start, end: action.input.end };
+      const actionPayload = { operation, toTarget: toTargetSpec, value: action.input.value ?? null, deltaX, deltaY, xRatio, yRatio, xPx, yPx, key: action.input.key, keys: action.input.keys, start: action.input.start, end: action.input.end, gesturePath };
       const noProgressFamily = (() => {
         if (operation === 'drag' || operation === 'drag_by') return { family: 'drag-displacement' };
         if (operation === 'resize') return { family: 'resize-displacement' };
         if (operation === 'scroll') return { family: 'scroll' };
         if (operation === 'drag_between') return { family: 'drag-between', toTarget: toTargetSpec };
+        if (operation === 'drag_path') return { family: 'drag-path', gesturePath };
         if (operation === 'click_relative') return { family: 'click-relative' };
         if (operation === 'key_press') return { family: 'key-press', key: action.input.key };
         if (operation === 'hotkey') return { family: 'hotkey', keys: action.input.keys };
