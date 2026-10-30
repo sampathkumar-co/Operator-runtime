@@ -45,6 +45,7 @@ import browsergym.miniwob
 from mecord_observation import observed_mecord_candidates,verified_action,MecordObservationError
 from integration.budget_ledger import BudgetLedger, require_budget_feasibility
 from integration.inspection_paging import next_page_offsets
+from integration.outcome_scoring import score_terminal_if_unstepped
 from integration.bridge_protocol import parse_bridge_http_rejection
 from integration.model_failures import safe_meta_http_error,is_campaign_blocking_meta_failure,is_campaign_blocking_execution_failure
 from playwright.sync_api._generated import BrowserType
@@ -110,6 +111,7 @@ harness_files = [
     Path(__file__).with_name("model_failures.py"),
     Path(__file__).with_name("runtime_pin.mjs"),
     Path(__file__).with_name("inspection_paging.py"),
+    Path(__file__).with_name("outcome_scoring.py"),
 ]
 if not all(p.is_file() for p in harness_files):
     raise RuntimeError("BENCHMARK_HARNESS_FILE_MISSING")
@@ -470,6 +472,14 @@ try:
                     outcome["unscored"] = True
             finally:
                 if env:
+                    if outcome.get("unscored") is not True and outcome.get("steps")==0:
+                        try:
+                            score_terminal_if_unstepped(outcome,env)
+                        except Exception:
+                            outcome["reward"]=None
+                            outcome["unscored"]=True
+                            campaign_stop="BROWSERGYM_TERMINAL_REWARD_UNAVAILABLE"
+                            outcome["trace"].append({"terminal_scorer_error":"BROWSERGYM_TERMINAL_REWARD_UNAVAILABLE"})
                     try:env.close()
                     except:pass
             outcome["elapsed_sec"] = round(time.perf_counter() - start, 2)
