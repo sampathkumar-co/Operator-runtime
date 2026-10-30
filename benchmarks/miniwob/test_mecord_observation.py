@@ -311,4 +311,40 @@ class Grounding(unittest.TestCase):
     self.assertEqual(cs[0]["colors"]["fill"],"rgb(255, 0, 0)")
     self.assertEqual(cs[0]["shape"]["circle"]["r"],12)
     self.assertEqual(cs[0]["numericValue"],7)
+
+ def test_native_gestures_require_exact_pinned_runtime(self):
+    cs=observed_mecord_candidates(obs([item()]))
+    for op in ("double_click","shift_click","drag_path"):
+     with self.assertRaisesRegex(MecordObservationError,"NATIVE_GESTURES_NOT_PINNED"):
+      verified_action({"op":op,"bid":cs[0]["bid"]},cs,[])
+    for op in ("double_click","shift_click"):
+     self.assertEqual(verified_action({"op":op,"bid":cs[0]["bid"]},cs,[],
+         allow_native_gestures=True)["op"],op)
+
+ def test_native_path_requires_observed_graphic_and_bounded_points(self):
+    canvas=item(ref="b-abc123-7-4",active=False)
+    canvas["tag"]="canvas"
+    cs=observed_mecord_candidates(obs([], [canvas]))
+    self.assertEqual(verified_action({"op":"drag_path","bid":cs[0]["bid"],
+      "value":"0.10:0.10;0.80:0.80"},cs,[],allow_native_gestures=True)["op"],"drag_path")
+    for value in ("0.1:0.1","0.00:0.20;0.80:0.80",
+      "0.10:0.10;0.10:0.10","0.10:0.10;1.00:0.20",
+      "0.10:0.10;0.20:0.20;0.3:0.4;"+("0.2:0.5;"*23)):
+     with self.assertRaises(MecordObservationError):
+      verified_action({"op":"drag_path","bid":cs[0]["bid"],
+       "value":value},cs,[],allow_native_gestures=True)
+    controls=observed_mecord_candidates(obs([item()]))
+    with self.assertRaisesRegex(MecordObservationError,"NATIVE_PATH_VISUAL_REQUIRED"):
+     verified_action({"op":"drag_path","bid":controls[0]["bid"],
+        "value":"0.10:0.10;0.80:0.80"},controls,[],allow_native_gestures=True)
+
+ def test_native_gesture_no_raw_css_or_repeat_after_uncertainty(self):
+    cs=observed_mecord_candidates(obs([item()]))
+    with self.assertRaisesRegex(MecordObservationError,"UNSUPPORTED_MODEL_FIELDS"):
+     verified_action({"op":"double_click","bid":cs[0]["bid"],"css":"#save"},
+       cs,[],allow_native_gestures=True)
+    with self.assertRaisesRegex(MecordObservationError,"UNCERTAIN_HISTORY"):
+     verified_action({"op":"shift_click","bid":cs[0]["bid"]},
+       cs,[{"sideEffectState":"uncertain"}],allow_native_gestures=True)
+
 if __name__=="__main__":unittest.main(verbosity=2)
