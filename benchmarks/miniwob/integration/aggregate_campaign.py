@@ -8,7 +8,10 @@ import json
 import subprocess
 from hashlib import sha256
 from pathlib import Path
-from checkpoint_integrity import verify_file_rows, CheckpointIntegrityError
+try:
+    from .checkpoint_integrity import verify_file_rows, CheckpointIntegrityError
+except ImportError:  # Executed as a standalone CLI from the integration folder.
+    from checkpoint_integrity import verify_file_rows, CheckpointIntegrityError
 
 SOURCE_SHA="7fd85d71a4b60325c6585396ec4f48377d049838"
 MODEL="meta-muse-spark-1.3-contributor"
