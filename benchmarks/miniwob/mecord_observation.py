@@ -181,6 +181,15 @@ def verified_action(raw: object, candidates: list[dict[str,Any]], history: list[
     native_ops = {"double_click","shift_click","drag_path"}
     if raw.get("op") in native_ops and allow_native_gestures is not True:
         raise MecordObservationError("NATIVE_GESTURES_NOT_PINNED")
+    if raw.get("op") == "inspect_next_page":
+        if any(raw.get(k,"")!="" for k in ("bid","value","key")):
+            raise MecordObservationError("PAGE_CHANGE_MUST_HAVE_NO_TARGET")
+        if type(history) is not list or any(
+            type(h) is not dict or h.get("sideEffectState") == "uncertain" or
+            "UNCERTAIN" in str(h.get("error","")).upper() or
+            "RECONCIL" in str(h.get("error","")).upper() for h in history):
+            raise MecordObservationError("UNCERTAIN_HISTORY")
+        return {"op":"inspect_next_page"}
     if raw.get("op") == "wait":
         if raw.get("bid", "") != "" or raw.get("value", "") != "" or raw.get("key", "") != "":
             raise MecordObservationError("WAIT_MUST_HAVE_NO_TARGET")
