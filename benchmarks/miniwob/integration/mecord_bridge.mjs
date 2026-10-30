@@ -91,11 +91,16 @@ const svr=http.createServer(async(req,res)=>{
   const taskTab=await exactTarget();
   const targetId=taskTab.id;
   if(input.op==='inspect'){
-   if(Object.keys(input).some(k=>!['op','visual'].includes(k))||
+   if(Object.keys(input).some(k=>!['op','visual','controlOffset','visualOffset'].includes(k))||
       (input.visual!==undefined&&typeof input.visual!=='boolean'))throw Error('EXTRA_INSPECT_PARAMETERS');
+   for(const k of ['controlOffset','visualOffset']){
+    if(input[k]!==undefined&&(!Number.isInteger(input[k])||input[k]<0||input[k]>640||input[k]%80!==0))
+      throw Error('INSPECT_PAGINATION_INVALID');
+   }
    inspectState=null;
    const action={id:'miniwob-inspect-'+(++sequence),capability:'browser.inspect',risk:'read',
-    input:{targetId,observation:{maxControls:160,maxVisuals:160,maxBytes:131072}}};
+    input:{targetId,observation:{maxControls:160,maxVisuals:160,maxBytes:131072,
+     controlOffset:input.controlOffset||0,visualOffset:input.visualOffset||0}}};
    const out=await provider.execute(action);
    if(!out.ok||out.provider!=='browser.cdp')throw Error('PROVIDER_INSPECT_FAILED_'+(out.error?.code||'UNKNOWN'));
    if(out.output?.dialog){
