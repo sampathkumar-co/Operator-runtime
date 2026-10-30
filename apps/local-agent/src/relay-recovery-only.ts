@@ -27,6 +27,7 @@ const RECOVERY_ONLY_ROUTES = new Set([
   'POST /v1/control-center/browser-logout',
   'GET /v1/control-center/status',
   'GET /v1/control-center/runtime',
+  'GET /v1/control-center/recovery',
   'GET /v1/control-center/original-recovery/browser',
   'POST /v1/control-center/original-recovery/browser/resolve',
   'GET /v1/control-center/original-recovery'
