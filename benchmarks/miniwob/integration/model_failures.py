@@ -40,4 +40,5 @@ def is_campaign_blocking_execution_failure(value):
         "MECORD_OBSERVATION_FAILED",
         "MECORD_VISION_UNAVAILABLE",
         "LOCAL_BRIDGE_TRANSPORT_",
+        "NATIVE_RUNTIME_CAPABILITY_CHANGED",
     ))
