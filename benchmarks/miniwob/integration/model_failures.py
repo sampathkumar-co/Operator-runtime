@@ -26,3 +26,18 @@ def is_campaign_blocking_meta_failure(value):
         return False
     status=int(match.group(1))
     return status in {400,401,403,408,422,429} or 500 <= status <= 599
+
+
+def is_campaign_blocking_execution_failure(value):
+    """Provider/observation failures may have unknown browser side effects.
+
+    Do not equate a dispatch failure with an independently scored zero reward.
+    """
+    if type(value) is not str:
+        return False
+    return value.startswith((
+        "MECORD_EXECUTION_",
+        "MECORD_OBSERVATION_FAILED",
+        "MECORD_VISION_UNAVAILABLE",
+        "LOCAL_BRIDGE_TRANSPORT_",
+    ))
