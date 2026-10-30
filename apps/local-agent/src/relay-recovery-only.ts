@@ -4,7 +4,13 @@
  */
 const AUTHORITY_CONFLICT = 'RELAY_AUTHORITY_CONFLICT_REVIEW_REQUIRED';
 
-export function isOriginalAuthorityConflict(status: unknown): boolean {
+export function isOriginalAuthorityConflict(status: unknown, error?: unknown): boolean {
+  // The relay client's final SHUTTING_DOWN state can replace DEGRADED before
+  // the required-relay catch executes. Only a real typed error carrying the
+  // *exact* native authority-conflict code is an alternative proof.
+  if (error instanceof Error && (error as Error & { code?: unknown }).code === AUTHORITY_CONFLICT) {
+    return true;
+  }
   if (!status || typeof status !== 'object' || Array.isArray(status)) return false;
   const entry = status as Record<string, unknown>;
   return entry.state === 'DEGRADED' &&
