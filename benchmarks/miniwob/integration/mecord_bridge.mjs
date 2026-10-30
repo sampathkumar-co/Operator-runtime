@@ -1,7 +1,7 @@
 // Isolated, source-pinned Mecord MiniWoB bridge. No production relay or credentials.
 import http from 'node:http';import path from 'node:path';
 import {timingSafeEqual} from 'node:crypto';
-import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,boundedRelativePoint} from './bridge_actions.mjs';
+import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,boundedRelativePoint,boundedVisiblePageText} from './bridge_actions.mjs';
 import {captureSyntheticView,allowedSyntheticFrameUrl} from './browser_visual.mjs';
 import {pathToFileURL} from 'node:url';import {readFile} from 'node:fs/promises';
 const dir=process.env.MECORD_MINIWOB_WORKDIR ? path.resolve(process.env.MECORD_MINIWOB_WORKDIR) : null;
@@ -162,7 +162,7 @@ const svr=http.createServer(async(req,res)=>{
     catch(e){screenshotStatus=String(e?.message||'VISUAL_CAPTURE_FAILED').slice(0,60);}
    }
    res.end(JSON.stringify({ok:true,provider:out.provider,durationMs:out.durationMs,
-    textExcerpt:typeof semantic.textExcerpt==='string'?semantic.textExcerpt.slice(0,1200):'',
+    textExcerpt:boundedVisiblePageText(semantic,1600),
     headings:Array.isArray(semantic.headings)?semantic.headings.filter(x=>typeof x==='string').slice(0,20):[],
     pagination:semantic.pagination||null,
     frameCoverage:out.output?.page?.frameCoverage||null,
@@ -182,7 +182,7 @@ const svr=http.createServer(async(req,res)=>{
      throw Error('FRESH_DIALOG_REQUIRED');
    if(Object.keys(input).some(k=>!['op','ref','value'].includes(k)))throw Error('DIALOG_EXTRA_PARAMETERS');
    if(input.value!==undefined && (typeof input.value!=='string'||
-      input.value.length>400||input.value.includes('\\0')))throw Error('DIALOG_PROMPT_INVALID');
+      input.value.length>400||input.value.includes('\0')))throw Error('DIALOG_PROMPT_INVALID');
    if(input.op==='dialog_dismiss'&&input.value)throw Error('DIALOG_DISMISS_VALUE_DENIED');
    if(input.value && (input.op!=='dialog_accept'||inspectState.dialogType!=='prompt'))
      throw Error('DIALOG_PROMPT_ONLY');

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,relativePointForLabel,boundedRelativePoint} from './bridge_actions.mjs';
+import {providerOperationForInput,boundedScrollDelta,boundedDisplacement,relativePointForLabel,boundedRelativePoint,boundedVisiblePageText} from './bridge_actions.mjs';
 
 test('text fill uses provider type; slider retains set_value',()=>{
  assert.equal(providerOperationForInput('set_value','textbox'),'type');
@@ -40,4 +40,12 @@ test('diagonal drag stays bounded to 320 CSS pixels per axis',()=>{
  assert.deepEqual(boundedDisplacement('down-right:160'),{deltaX:160,deltaY:160});
  assert.deepEqual(boundedDisplacement('up-left:10'),{deltaX:-10,deltaY:-10});
  assert.throws(()=>boundedDisplacement('down-left:1000'),/INVALID_DISPLACEMENT/);
+});
+
+
+test('visible text observation reaches model without hidden DOM reads',()=>{
+ const value=boundedVisiblePageText({visibleText:[{text:'Click the red circle'},{text:'Then submit'}]});
+ assert.equal(value,'Click the red circle Then submit');
+ assert.equal(boundedVisiblePageText({visibleText:[{text:'x'.repeat(500)}]},80).length,80);
+ assert.equal(boundedVisiblePageText({visibleText:[{text:'  '},{hidden:'secret'}]}),'');
 });

@@ -42,3 +42,21 @@ export function boundedRelativePoint(value){
  }
  return relativePointForLabel(value);
 }
+
+
+/** Retain provider-observed visible page instructions; never read DOM or hidden text here. */
+export function boundedVisiblePageText(semantic, maxLength=1600) {
+  if (!semantic || typeof semantic !== 'object') return '';
+  const rows = Array.isArray(semantic.visibleText) ? semantic.visibleText : [];
+  const pieces=[];
+  let remaining=Math.min(1600,Math.max(0,Math.floor(maxLength)));
+  for (const row of rows.slice(0,120)) {
+    const value=typeof row==='string'?row:row&&typeof row.text==='string'?row.text:'';
+    const normalized=value.replace(/\s+/g,' ').trim();
+    if (!normalized || remaining<=0) continue;
+    const piece=normalized.slice(0,Math.min(remaining,240));
+    pieces.push(piece);
+    remaining-=piece.length+1;
+  }
+  return pieces.join(' ');
+}
