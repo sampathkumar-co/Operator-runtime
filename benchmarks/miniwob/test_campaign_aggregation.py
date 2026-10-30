@@ -75,7 +75,12 @@ class CampaignAggregation(unittest.TestCase):
      records[0]["unscored"]=True
      records[0]["reward"]=None
      paths[0].write_text("".join(json.dumps(x)+"\n" for x in records))
-     sealed=[seal_row(x,ZERO_DIGEST if i==0 else records[i-1]["record_sha256"]) for i,x in enumerate(records)]
+     previous=ZERO_DIGEST
+     sealed=[]
+     for row in records:
+      fixed=seal_row(row,previous)
+      previous=fixed["record_sha256"]
+      sealed.append(fixed)
      paths[0].write_text("".join(json.dumps(x)+"\n" for x in sealed))
      out=self.score(paths)
      self.assertEqual(out["unscored"],1)
