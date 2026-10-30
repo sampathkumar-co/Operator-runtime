@@ -42,3 +42,30 @@ def is_campaign_blocking_execution_failure(value):
         "LOCAL_BRIDGE_TRANSPORT_",
         "NATIVE_RUNTIME_CAPABILITY_CHANGED",
     ))
+
+
+def classify_episode_failure(exc):
+    """Return (kind, unscored, campaign_stop), without leaking exception text.
+
+    Only independently scored controller mistakes and timeouts count toward
+    task failure. All execution, billing, model-transport, or harness
+    uncertainties stop the campaign and remain unscored.
+    """
+    import urllib.error
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError)):
+        return ("MODEL_TRANSPORT", True, "MODEL_TRANSPORT_UNCERTAIN")
+    msg = str(exc)
+    if (is_campaign_blocking_meta_failure(msg) or
+        msg.startswith(("META_HTTP_", "MODEL_USAGE_", "MODEL_ACCOUNTING_",
+                        "BUDGET_", "VISION_RESERVATION_"))):
+        return ("MODEL_PROVIDER_OR_BILLING", True, "MODEL_PROVIDER_OR_BILLING_STOP")
+    if (is_campaign_blocking_execution_failure(msg) or
+        msg.startswith(("BRIDGE_", "PROVIDER_", "NO_MECORD_", "MECORD_",
+                        "LOCAL_BRIDGE_", "SCREENSHOT_", "NATIVE_RUNTIME_",
+                        "PAGINATION_NOT_AVAILABLE"))):
+        return ("MECORD_INFRASTRUCTURE", True, "MECORD_INFRASTRUCTURE_STOP")
+    if msg.startswith("MODEL_RESPONSE_") or type(exc).__name__ == "MecordObservationError":
+        return ("MODEL_DECISION", False, None)
+    if msg == "TASK_WALL_TIMEOUT":
+        return ("TASK_TIMEOUT", False, None)
+    return ("HARNESS_OR_UNKNOWN", True, "HARNESS_UNEXPECTED_FAILURE")
