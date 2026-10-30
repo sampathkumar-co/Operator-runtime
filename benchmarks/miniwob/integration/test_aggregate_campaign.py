@@ -72,4 +72,13 @@ class Aggregation(unittest.TestCase):
       aggregate([file(p,"bad-runtime",[record])],50,42,1,
        roster=ROSTER,harness_sha256=HARNESS,runtime_manifest_sha256=RUNTIME)
 
+
+ def test_mixed_native_runtime_modes_rejected(self):
+    with tempfile.TemporaryDirectory() as temp:
+     p=Path(temp)
+     rows=[episode(0),episode(1,native_gestures_enabled=True)]
+     with self.assertRaisesRegex(CampaignError,"MIXED_TEST_CONDITIONS"):
+      aggregate([file(p,"native-mixed",rows)],50,42,1,
+       roster=ROSTER,harness_sha256=HARNESS,runtime_manifest_sha256=RUNTIME)
+
 if __name__=="__main__":unittest.main(verbosity=2)
