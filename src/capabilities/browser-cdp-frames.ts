@@ -682,7 +682,7 @@ export async function observeSemanticTargetState(
 
 export async function performSemanticInteraction(
   session: CdpConnection,
-  input: { operation: string; target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; toTarget?: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; scope?: string; deltaX?: number; deltaY?: number; xRatio?: number; yRatio?: number; xPx?: number; yPx?: number; key?: string; keys?: string[]; start?: number; end?: number },
+  input: { operation: string; target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; toTarget?: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; scope?: string; deltaX?: number; deltaY?: number; xRatio?: number; yRatio?: number; xPx?: number; yPx?: number; key?: string; keys?: string[]; start?: number; end?: number; path?: Array<{xRatio:number;yRatio:number}> },
   signal?: AbortSignal
 ): Promise<{ value: JsonMap; frame?: { targetId: string; url: string; depth: number } }> {
   const scope = await attachOopifSessions(session, signal);
@@ -895,7 +895,7 @@ export async function performSemanticInteraction(
         ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
       };
     }
-    if (['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll'].includes(input.operation)) {
+    if (['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'drag_path', 'double_click', 'shift_click', 'click_relative', 'scroll'].includes(input.operation)) {
       const first = firstLocatedSample(matches[0]!.samples);
       const prepareExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.target)}, (${browserDomContractFunction.toString()})(), true)`;
       const preparedResult = unwrapRuntimeValue(await evaluate(session, chosen, prepareExpression, false, signal)) as JsonMap | undefined;
@@ -996,18 +996,53 @@ export async function performSemanticInteraction(
         }
         dragDestination = { x: destinationX, y: destinationY, sample: destinationSecond };
       }
+      let nativePath: Array<{x:number;y:number}> | undefined;
+      if (input.operation === 'drag_path') {
+        if (!input.target.ref || !Array.isArray(input.path) || input.path.length < 2 || input.path.length > 24) {
+          throw new OperatorError('INVALID_BROWSER_GESTURE_PATH', 'Observed drag_path requires an exact target and bounded points.');
+        }
+        nativePath=[];
+        for (const relative of input.path) {
+          const expression = `(${observedRelativePointFunction.toString()})(${JSON.stringify(input.target.ref)}, ${JSON.stringify(relative)})`;
+          const result=unwrapRuntimeValue(await evaluate(session, chosen, expression, false, signal)) as JsonMap | undefined;
+          const local=result?.local as JsonMap | undefined;
+          const px=Number(local?.x),py=Number(local?.y);
+          if (!result || result.ok !== true || !Number.isFinite(px) || !Number.isFinite(py)) {
+            throw new OperatorError(result?.stale === true ? 'BROWSER_TARGET_STALE' : 'BROWSER_POINT_NOT_ACTIONABLE',
+              'Gesture path point is stale, obscured, or outside the observed target.', {
+                retryable:result?.stale === true,
+                details:{target:input.target,sideEffectState:'none',executionPhase:'pre_dispatch'}
+              });
+          }
+          nativePath.push({x:px,y:py});
+        }
+      }
       const dispatch = (params: JsonMap) => chosen.frame
         ? (providerDispatchStarted = true, session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, signal))
         : (providerDispatchStarted = true, session.send('Input.dispatchMouseEvent', params, 8_000, signal));
-      if (input.operation === 'hover') {
+      if (input.operation === 'drag_path') {
+        const stroke=nativePath!;
+        const first=stroke[0]!;
+        await dispatch({type:'mouseMoved',x:first.x,y:first.y,button:'none',buttons:0});
+        await dispatch({type:'mousePressed',x:first.x,y:first.y,button:'left',buttons:1,clickCount:1});
+        for (const point of stroke.slice(1)) {
+          await dispatch({type:'mouseMoved',x:point.x,y:point.y,button:'left',buttons:1});
+        }
+        const last=stroke[stroke.length-1]!;
+        await dispatch({type:'mouseReleased',x:last.x,y:last.y,button:'left',buttons:0,clickCount:1});
+      } else if (input.operation === 'hover') {
         await dispatch({ type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
       } else if (input.operation === 'scroll') {
         await dispatch({ type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
         await dispatch({ type: 'mouseWheel', x, y, deltaX: Number(input.deltaX ?? 0), deltaY: Number(input.deltaY ?? 0), button: 'none', buttons: 0 });
-      } else if (input.operation === 'click' || input.operation === 'click_relative') {
-        await dispatch({ type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
-        await dispatch({ type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
-        await dispatch({ type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
+      } else if (['click','click_relative','double_click','shift_click'].includes(input.operation)) {
+        const clickCount=input.operation==='double_click'?2:1;
+        const modifiers=input.operation==='shift_click'?8:0;
+        await dispatch({type:'mouseMoved',x,y,button:'none',buttons:0,modifiers});
+        for(let count=1;count<=clickCount;count+=1){
+          await dispatch({type:'mousePressed',x,y,button:'left',buttons:1,clickCount:count,modifiers});
+          await dispatch({type:'mouseReleased',x,y,button:'left',buttons:0,clickCount:count,modifiers});
+        }
       } else {
         const targetX = dragDestination ? dragDestination.x : x + Number(input.deltaX);
         const targetY = dragDestination ? dragDestination.y : y + Number(input.deltaY);
