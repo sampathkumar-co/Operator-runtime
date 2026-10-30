@@ -386,7 +386,7 @@ async function failRequiredRelay(error: unknown): Promise<void> {
   if (!relayRequired || lifecycle.shuttingDown) return;
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[operator] required relay failed: ${message}`);
-  if (isOriginalAuthorityConflict(relayConnectionStatus) && !startupEmergencyStatus.engaged) {
+  if (isOriginalAuthorityConflict(relayConnectionStatus, error) && !startupEmergencyStatus.engaged) {
     // Transition BEFORE yielding: all new HTTP traffic and provider dispatch
     // become non-executable, even for valid local bearer sessions.
     originalRecoveryOnly = true;
